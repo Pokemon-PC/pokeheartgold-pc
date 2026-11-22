@@ -47,12 +47,14 @@ void FxConstTableInit(void) {
         fatal_error("Unable to allocate CSV read buffer");
     }
     readsz = fread(contents, 1, fsize, file);
-    fclose(file);
-    if (readsz != fsize) {
+    // Text mode on Windows turns CRLF into LF, so fewer bytes than the file size is fine.
+    if (ferror(file) || readsz > fsize) {
+        fclose(file);
         free(contents);
         fatal_error("Read error");
     }
-    contents[fsize] = 0;
+    fclose(file);
+    contents[readsz] = 0;
     ptr = contents - 1;
     gNFxConstTable = 0;
     do {

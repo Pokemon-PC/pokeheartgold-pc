@@ -249,9 +249,14 @@ def tool_generated(naix, out_root, rom_dir, smap, hosttools):
     if naix in ("fielddata/encountdata/g_enc_data.naix", "fielddata/encountdata/s_enc_data.naix",
                 "arc/ppark.naix", "application/zukanlist/zkn_data/zukan_enc.naix"):
         # o2narc -n: numbered names; only the member count matters.
-        if not (rom_file and rom_file.is_file()):
-            raise SystemExit(f"{naix}: needs --rom-dir to know the member count")
-        count = narc_count(rom_file)
+        # Member counts of the HeartGold ROM (same in every language), used when
+        # no ROM file system is available (e.g. CI builds without game data).
+        known = {"fielddata/encountdata/g_enc_data.naix": 142, "fielddata/encountdata/s_enc_data.naix": 142,
+                 "arc/ppark.naix": 1, "application/zukanlist/zkn_data/zukan_enc.naix": 3962}
+        if rom_file and rom_file.is_file():
+            count = narc_count(rom_file)
+        else:
+            count = known[naix]
         names = [f"{stem}_{i:08d}" for i in range(count)]
         dst.write_text(render_o2narc(naix, names), encoding="utf-8", newline="\n")
         return count, count

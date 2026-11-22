@@ -23,3 +23,5 @@ Makefile text eol=lf
 *.inc linguist-language=Assembly
 
 *.narc binary diff=hex
+*.csv text eol=lf
+*.py text eol=lf
