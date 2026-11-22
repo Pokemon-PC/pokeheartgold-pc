@@ -157,11 +157,21 @@ uint32_t pc_os_wait_vblank(void) {
         return 1;
     }
 
-    /* Sleep until ~1 ms before the deadline, then spin for accuracy. */
+    /* Sleep until shortly before the deadline, then spin for accuracy. The
+     * margin adapts to how late sleeps wake up on this host (~0.1 ms on a
+     * normal machine, 20 ms+ on some VMs with coalesced timers). */
+    static uint64_t s_oversleep_us = 0;
     while (now < s_next_vblank) {
         uint64_t remaining_us = (s_next_vblank - now) * 1000000u / s_perf_freq;
-        if (remaining_us > 1500) {
-            precise_sleep_us(remaining_us - 1000);
+        uint64_t margin_us = 1000 + s_oversleep_us;
+        if (remaining_us > margin_us + 500) {
+            uint64_t want = remaining_us - margin_us;
+            uint64_t t0 = SDL_GetPerformanceCounter();
+            precise_sleep_us(want);
+            uint64_t slept = (SDL_GetPerformanceCounter() - t0) * 1000000u / s_perf_freq;
+            uint64_t late = slept > want ? slept - want : 0;
+            /* fast attack, slow decay */
+            s_oversleep_us = late > s_oversleep_us ? late : (s_oversleep_us * 15 + late) / 16;
         }
         now = SDL_GetPerformanceCounter();
     }
