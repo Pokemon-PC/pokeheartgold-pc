@@ -60,12 +60,18 @@ jobs:
       - name: Build
         run: cmake --build build --target pokeheartgold phg_m2_selftest
 
+      - name: Link diagnostics
+        if: failure()
+        run: |
+          cmake --build build --target pokeheartgold > link.log 2>&1 || true
+          grep -v '^\[' link.log | cut -c1-400 | grep -iE 'error|undefined|ld:|relocation|duplicate|warning' | sort | uniq -c | sort -rn | head -60
+
       - name: Selftest (headless, no game data)
         env:
           PHG_MUTE: '1'
           SDL_VIDEODRIVER: dummy
           SDL_AUDIODRIVER: dummy
-        run: cd build && ./phg_m2_selftest --save m2_selftest_save.bin
+        run: cd build && ./phg_m2_selftest --data ../files --save m2_selftest_save.bin
 
       - name: Package
         run: python3 tools/pc_port/package.py --build build --out dist || python tools/pc_port/package.py --build build --out dist
