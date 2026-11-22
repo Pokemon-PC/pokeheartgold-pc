@@ -746,8 +746,15 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
       `section$start`), options d'édition de liens propres à lld réservées à
       Windows, macOS sans « chained fixups » (sinon l'adresse fixe est
       ignorée), comptes de membres NARC connus sans ROM, fins de ligne CRLF,
-      rythme d'images adaptatif (minuteurs imprécis des VM macOS). Reste :
-      lancer le vrai jeu (avec la ROM) sous Linux (WSL) et sur un vrai Mac.
+      rythme d'images adaptatif (minuteurs imprécis des VM macOS). **Linux testé avec la ROM** (Ubuntu 26.04 sous
+      WSL2, compilation native Clang 21, Mesa llvmpipe, PulseAudio) :
+      extraction de la ROM, autotest complet 1103/0, Pokéathlon, Tour /
+      Salle / Arcade / Castel de Combat, sauvegarde + rechargement, saves
+      Windows compatibles. Corrigé : **pile du jeu sous 4 Gio**
+      (`pc_run_on_low_stack`, `hw_pc.c`) — le code DS range des adresses dans
+      des mots de 32 bits ; sous Windows la pile du fil principal est basse,
+      sous Linux/macOS elle est vers 0x7FFF… (plantage de la sauvegarde de la
+      Tour). Reste : un vrai Mac (seulement testé en CI).
 
 #### Classes de bugs 64 bits trouvées pendant les finitions
 - Prototypes locaux aux largeurs d'entiers différentes de la définition
@@ -789,3 +796,4 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
 | 2026-11-22 | M7 | Paquet Windows + extraction de la ROM au 1er lancement, README/guide de modding, filtres d'affichage (F7), contours/AA/fil de fer 3D, radio sans fil vide, Linux/macOS + CI (non testés localement). Corrigés : 32 prototypes aux largeurs d'entiers fausses, Pokéathlon (Capture Drapeau et autres tables lues au-delà de leur objet, unions d'icônes). |
 | 2026-11-22 | Jeu | **Zone de Combat complète** : Tour, Usine, Salle, Castel, Arcade — inscription, sauvegarde, combat. Corrigés : Castel (menu lu au-delà d'une table → plantage), Tour (sélection d'équipe lue à des décalages DS). Pokéathlon : épreuve 2 (Capture Drapeau) jouée jusqu'aux résultats. |
 | 2026-11-22 | M7 | **Linux et macOS compilés et testés en CI** (dépôt GitHub privé, sans aucune donnée du jeu) : compilation, autotest et paquet OK sur Windows, Ubuntu et macOS Intel. Le jeu complet avec la ROM reste à lancer sous Linux (WSL) et sur un vrai Mac. |
+| 2026-11-22 | M7 | **Jeu testé sous Linux avec la ROM** (WSL2) : Pokéathlon, Zone de Combat, sauvegarde/rechargement OK. Corrigé : pile du jeu placée sous 4 Gio sous Linux/macOS (adresses de pile tronquées à 32 bits → plantage de la sauvegarde de la Tour de Combat). |
