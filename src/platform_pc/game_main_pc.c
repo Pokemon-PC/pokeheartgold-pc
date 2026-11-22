@@ -23,6 +23,11 @@
 
 void NitroMain(void);
 
+static void run_game(void *unused) {
+    (void)unused;
+    pc_nitro_run(NitroMain);   /* never returns; soft resets restart it */
+}
+
 int main(int argc, char **argv) {
     const char *lang = getenv("PHG_LANG");   /* NULL: the language of the data found */
     const char *data = getenv("PHG_DATA_DIR");
@@ -72,6 +77,6 @@ int main(int argc, char **argv) {
         pc_fatal("Nitro layer init failed (see log above)");
     }
     pc_log("starting NitroMain (lang=%s)", lang);
-    pc_nitro_run(NitroMain);   /* never returns; soft resets restart it */
+    pc_run_on_low_stack(run_game, NULL);   /* game code keeps stack addresses in 32-bit words */
     return 0;
 }

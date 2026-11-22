@@ -350,3 +350,69 @@ void pc_hw_set_vcount(uint16_t line) {
     }
     *pc_hw_reg16(REG_DISPSTAT) = stat;
 }
+
+/*
+ * The game thread's stack below 4 GiB.
+ *
+ * DS code stores addresses in 32-bit words (the CARD backup API, u32 fields,
+ * casts through u32...). Heaps live in the DS memory map and the executable
+ * sits at 0x10000000, and on Windows the main thread's stack is low too, so
+ * that works there. On Linux and macOS the main stack is near 0x7FFF...: any
+ * stack buffer passed through such a word is truncated (crash in the Battle
+ * Tower save on Linux). The game therefore runs on a stack mapped low, on the
+ * same thread (SDL and Cocoa need the main thread).
+ */
+#if defined(_WIN32)
+void pc_run_on_low_stack(void (*fn)(void *), void *arg) {
+    fn(arg);
+}
+#else
+#if defined(__APPLE__)
+#define PHG_ASM_SYM(name) "_" name
+#else
+#define PHG_ASM_SYM(name) name
+#endif
+/* phg_call_on_stack(stack_top, fn, arg): calls fn(arg) with rsp = stack_top. */
+void phg_call_on_stack(void *top, void (*fn)(void *), void *arg);
+__asm__(".text\n"
+        ".globl " PHG_ASM_SYM("phg_call_on_stack") "\n"
+        PHG_ASM_SYM("phg_call_on_stack") ":\n"
+        "    push %rbp\n"
+        "    mov  %rsp, %rbp\n"
+        "    mov  %rdi, %rsp\n"
+        "    mov  %rdx, %rdi\n"
+        "    call *%rsi\n"
+        "    mov  %rbp, %rsp\n"
+        "    pop  %rbp\n"
+        "    ret\n");
+
+#define PHG_LOW_STACK_SIZE (16u * 1024 * 1024)
+
+void pc_run_on_low_stack(void (*fn)(void *), void *arg) {
+    void *stack = MAP_FAILED;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(MAP_32BIT)
+    stack = mmap(NULL, PHG_LOW_STACK_SIZE, PROT_READ | PROT_WRITE, flags | MAP_32BIT, -1, 0);
+#endif
+    /* Otherwise (macOS): try hints above the executable, below 4 GiB. */
+    for (uintptr_t hint = 0x40000000u; stack == MAP_FAILED && hint < 0xF0000000u; hint += 0x10000000u) {
+        void *got = mmap((void *)hint, PHG_LOW_STACK_SIZE, PROT_READ | PROT_WRITE, flags, -1, 0);
+        if (got == MAP_FAILED) {
+            continue;
+        }
+        if ((uintptr_t)got + PHG_LOW_STACK_SIZE <= 0x100000000ull) {
+            stack = got;
+        } else {
+            munmap(got, PHG_LOW_STACK_SIZE);
+        }
+    }
+    if (stack == MAP_FAILED) {
+        pc_warn("hw: no stack below 4 GiB available, running on the system stack");
+        fn(arg);
+        return;
+    }
+    pc_log("hw: game stack at %p-%p", stack, (void *)((char *)stack + PHG_LOW_STACK_SIZE));
+    void *top = (char *)stack + PHG_LOW_STACK_SIZE - 64;   /* 16-byte aligned */
+    phg_call_on_stack(top, fn, arg);
+}
+#endif

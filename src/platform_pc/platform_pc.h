@@ -23,6 +23,8 @@ void pc_warn(const char *fmt, ...);
 void pc_fatal(const char *fmt, ...);
 /* Prints exception + backtrace (stable addresses: fixed image base). */
 void pc_crash_install(void);
+/* Runs fn(arg) on a stack below 4 GiB (Linux/macOS; direct call on Windows). */
+void pc_run_on_low_stack(void (*fn)(void *), void *arg);
 /* Call once per frame; a 5 s stall prints the game thread backtrace. */
 void pc_watchdog_kick(void);
 
