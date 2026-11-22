@@ -739,8 +739,15 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
       `docs/pc_port/MODDING.md`.
 - [x] **Linux/macOS** : code prêt (pile d'appels `execinfo`, exe non-PIE à
       0x10000000, `mallopt`), CI GitHub `.github/workflows/pc-port.yml`
-      (Windows MSYS2, Ubuntu, macOS Intel). **Non testés localement** (pas de
-      WSL ici) : à valider sur la CI ou une vraie machine.
+      (Windows MSYS2, Ubuntu, macOS Intel `macos-15-intel`). **La CI passe sur
+      les trois systèmes** : compilation, autotest sans données (827
+      vérifications sur `files/`), paquet. Corrigés pour y arriver : sections
+      d'overlays par format (COFF `.data$X$N`, ELF `__start_/__stop_`, Mach-O
+      `section$start`), options d'édition de liens propres à lld réservées à
+      Windows, macOS sans « chained fixups » (sinon l'adresse fixe est
+      ignorée), comptes de membres NARC connus sans ROM, fins de ligne CRLF,
+      rythme d'images adaptatif (minuteurs imprécis des VM macOS). Reste :
+      lancer le vrai jeu (avec la ROM) sous Linux (WSL) et sur un vrai Mac.
 
 #### Classes de bugs 64 bits trouvées pendant les finitions
 - Prototypes locaux aux largeurs d'entiers différentes de la définition
@@ -781,3 +788,4 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
 | 2026-11-22 | Jeu | Modes spéciaux testés : Usine de Combat, Parc Safari, Concours d'insectes, puzzle des Ruines d'Alpha. Aucun nouveau bug du jeu. |
 | 2026-11-22 | M7 | Paquet Windows + extraction de la ROM au 1er lancement, README/guide de modding, filtres d'affichage (F7), contours/AA/fil de fer 3D, radio sans fil vide, Linux/macOS + CI (non testés localement). Corrigés : 32 prototypes aux largeurs d'entiers fausses, Pokéathlon (Capture Drapeau et autres tables lues au-delà de leur objet, unions d'icônes). |
 | 2026-11-22 | Jeu | **Zone de Combat complète** : Tour, Usine, Salle, Castel, Arcade — inscription, sauvegarde, combat. Corrigés : Castel (menu lu au-delà d'une table → plantage), Tour (sélection d'équipe lue à des décalages DS). Pokéathlon : épreuve 2 (Capture Drapeau) jouée jusqu'aux résultats. |
+| 2026-11-22 | M7 | **Linux et macOS compilés et testés en CI** (dépôt GitHub privé, sans aucune donnée du jeu) : compilation, autotest et paquet OK sur Windows, Ubuntu et macOS Intel. Le jeu complet avec la ROM reste à lancer sous Linux (WSL) et sur un vrai Mac. |
