@@ -108,6 +108,10 @@ add_executable(phg_m2_selftest
     ${PROJECT_SOURCE_DIR}/src/filesystem.c)
 target_link_libraries(phg_m2_selftest PRIVATE phg_nitro)
 phg_low_address_link(phg_m2_selftest)
+if(APPLE)
+    # The game hooks are weak references (nitro_pc.c); ld64 needs them allowed undefined.
+    target_link_options(phg_m2_selftest PRIVATE -Wl,-undefined,dynamic_lookup)
+endif()
 if(MINGW)
     target_link_options(phg_m2_selftest PRIVATE -static)
 endif()
