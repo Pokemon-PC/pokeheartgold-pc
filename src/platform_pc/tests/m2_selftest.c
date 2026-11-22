@@ -198,6 +198,18 @@ static void test_vblank_irq(void) {
     CHECK(s_vblank_irqs == 30, "%d VBlank handlers ran, expected 30", s_vblank_irqs);
     CHECK(ms >= 450 && ms <= 650, "30 frames took %llu ms (expected ~501)", (unsigned long long)ms);
     printf("  30 frames in %llu ms\n", (unsigned long long)ms);
+    {
+        /* Diagnostic: the per-frame work without pacing (slow hosts). */
+        int prev = pc_os_speed();
+        pc_os_set_speed(0);
+        uint64_t w0 = pc_os_ms();
+        for (int i = 0; i < 30; i++) {
+            OS_WaitIrq(TRUE, OS_IE_V_BLANK);
+        }
+        printf("  info: 30 unpaced frames took %llu ms\n", (unsigned long long)(pc_os_ms() - w0));
+        pc_os_set_speed(prev);
+        s_vblank_irqs -= 30;
+    }
     OSIntrMode m = OS_DisableInterrupts();
     OS_WaitIrq(TRUE, OS_IE_V_BLANK);
     OS_RestoreInterrupts(m);
