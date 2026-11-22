@@ -50,7 +50,9 @@ def main():
     shutil.copy2(exe, dst)
     strip = shutil.which("llvm-strip") or shutil.which("strip")
     if strip:
-        subprocess.run([strip, "--strip-debug", str(dst)], check=True)
+        # llvm-strip / GNU strip: --strip-debug; Apple's strip only knows -S.
+        is_apple = sys.platform == "darwin" and "llvm" not in pathlib.Path(strip).name
+        subprocess.run([strip, "-S" if is_apple else "--strip-debug", str(dst)], check=True)
     else:
         print("warning: no strip tool found, the executable keeps its debug info")
 
