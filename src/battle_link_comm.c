@@ -303,9 +303,17 @@ BOOL BattleLink_PreparePalPad(BattleLinkWork *work) {
     }
     setup = work->setup;
     if (setup->battleType & BATTLE_TYPE_FRONTIER) {
+#ifdef PLATFORM_PC
         index = Comm_GetLocalNetId() * 2 * sizeof(PlayerProfile *);   // 8 on the DS
+#else
+        index = Comm_GetLocalNetId() * 8;
+#endif
     } else {
+#ifdef PLATFORM_PC
         index = Comm_GetLocalNetId() * sizeof(PlayerProfile *);   // 4 on the DS
+#else
+        index = Comm_GetLocalNetId() * 4;
+#endif
     }
     BattleLink_BuildPalPad(*(PlayerProfile **)((u8 *)setup->profile + index), setup->palPad, (SavePalPad *)&work->buffer);
     for (i = 0; i < 4; i++) {

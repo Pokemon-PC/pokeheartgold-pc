@@ -26,7 +26,11 @@ extern const OverlayManagerTemplate subOverlayTemplate;
 // A table of state functions (asm/pokeathlon_course_data.s), declared as an
 // array (only its address is used, same code on the DS) so that the PC data
 // converter (tools/pc_port/asm_data_to_c.py) keeps every entry.
-extern const void *const sPokeathlonStateInfoFuncTable[];
+#ifdef PLATFORM_PC
+extern const void *const sPokeathlonStateInfoFuncTable[];   // an array: the asm data converter emits every entry
+#else
+extern const void *sPokeathlonStateInfoFuncTable;
+#endif
 
 BOOL PokeathlonCourse_Init(OverlayManager *manager, int *state) {
     PokeathlonCourseData *data;

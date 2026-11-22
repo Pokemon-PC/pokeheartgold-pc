@@ -522,7 +522,11 @@ void PokedexApp_UpdateTypeIcons(PokedexAppData *pokedexApp, u32 species, int ent
     u16 type2;
 
     if (pokedexApp->language != GAME_LANGUAGE || species == SPECIES_NONE || pokedexApp->listEntries[entry].caughtState == POKEDEXAPP_ENTRY_SEEN) {
+#ifdef PLATFORM_PC
         index *= sizeof(ManagedSprite *);   // 4 on the DS
+#else
+        index *= 4;
+#endif
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)pokedexApp->sprites + index), FALSE);
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)&pokedexApp->sprites[1] + index), FALSE);
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)&pokedexApp->sprites[2] + index), FALSE);
@@ -530,12 +534,20 @@ void PokedexApp_UpdateTypeIcons(PokedexAppData *pokedexApp, u32 species, int ent
         return;
     }
     if (pokedexApp->typeIconSwap == 0) {
+#ifdef PLATFORM_PC
         offset = index * sizeof(ManagedSprite *);   // 4 on the DS
+#else
+        offset = index * 4;
+#endif
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)pokedexApp->sprites + offset), FALSE);
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)&pokedexApp->sprites[1] + offset), FALSE);
         index += 2;
     } else {
+#ifdef PLATFORM_PC
         offset = index * sizeof(ManagedSprite *);   // 4 on the DS
+#else
+        offset = index * 4;
+#endif
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)&pokedexApp->sprites[2] + offset), FALSE);
         ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)&pokedexApp->sprites[3] + offset), FALSE);
     }
@@ -551,7 +563,11 @@ void PokedexApp_UpdateTypeIcons(PokedexAppData *pokedexApp, u32 species, int ent
     }
     type1 = GetMonBaseStat_HandleAlternateForm(species, form, BASE_TYPE1);
     PokedexApp_SetTypeIconGraphics(pokedexApp, index, type1);
+#ifdef PLATFORM_PC
     offset = index * sizeof(ManagedSprite *);   // 4 on the DS
+#else
+    offset = index * 4;
+#endif
     ManagedSprite_SetDrawFlag(*(ManagedSprite **)((u8 *)pokedexApp->sprites + offset), TRUE);
     type2 = GetMonBaseStat_HandleAlternateForm(species, form, BASE_TYPE2);
     if (type2 == 0 || type1 == type2) {

@@ -1,7 +1,13 @@
 #include "heap.h"
 
+#ifdef PLATFORM_PC
 #include <stdio.h>
+#else
+#endif
+#ifdef PLATFORM_PC
 #include <string.h>
+#else
+#endif
 
 #include "global.h"
 
@@ -130,7 +136,10 @@ BOOL Heap_CreateAtEnd(enum HeapID parent, enum HeapID child, u32 size) {
 
 static BOOL CreateHeapInternal(enum HeapID parent, enum HeapID child, u32 size, s32 alignment) {
     GF_ASSERT(OS_GetProcMode() != OS_PROCMODE_IRQ);
+#ifdef PLATFORM_PC
     size = PC_HEAP_SIZE(size);
+#else
+#endif
 
     u8 *ptr = sHeapInfo.heapIdxs;
     if (sHeapInfo.unallocatedHeapID == ptr[child]) {

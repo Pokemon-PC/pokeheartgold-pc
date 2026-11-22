@@ -11,7 +11,10 @@
 #include "field_warp_tasks.h"
 #include "main.h"
 #include "map_events.h"
+#ifdef PLATFORM_PC
 #include "map_matrix.h"
+#else
+#endif
 #include "math_util.h"
 #include "player_avatar_actions.h"
 #include "field/bottom_screen_app.h"
