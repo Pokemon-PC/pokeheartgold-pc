@@ -203,8 +203,9 @@ static void print_frames(const char *tag) {
 #endif
 }
 
-static void on_signal(int sig) {
-    fprintf(stderr, "\n[phg:crash] signal %d\n", sig);
+static void on_signal(int sig, siginfo_t *info, void *uctx) {
+    (void)uctx;
+    fprintf(stderr, "\n[phg:crash] signal %d (address %p)\n", sig, info != NULL ? info->si_addr : NULL);
     print_frames("crash");
     fflush(stderr);
     _Exit(3);
@@ -219,10 +220,15 @@ void pc_log_backtrace(const char *tag) {
 }
 
 void pc_crash_install(void) {
-    signal(SIGSEGV, on_signal);
-    signal(SIGILL, on_signal);
-    signal(SIGFPE, on_signal);
-    signal(SIGBUS, on_signal);
-    signal(SIGABRT, on_signal);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_signal;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
 }
 #endif
