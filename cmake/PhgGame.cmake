@@ -158,7 +158,8 @@ function(phg_low_address_link target)
         target_link_options(${target} PRIVATE /BASE:0x10000000 /DYNAMICBASE:NO /HIGHENTROPYVA:NO)
     elseif(APPLE)
         # Default __PAGEZERO covers the whole low 4 GiB on 64-bit macOS.
-        target_link_options(${target} PRIVATE -Wl,-pagezero_size,0x1000 -Wl,-image_base,0x10000000)
+        target_link_options(${target} PRIVATE -Wl,-pagezero_size,0x1000 -Wl,-image_base,0x10000000 -Wl,-no_pie)
+        set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE OFF)
     else()
         # Linux / BSD: a non-PIE executable placed at 0x10000000, above the
         # DS memory map (0x01FF0000-0x07010000) and below 4 GiB, like on
