@@ -42,6 +42,8 @@ static void precise_sleep_us(uint64_t us) {
 }
 #elif defined(__APPLE__)
 #include <mach/mach_time.h>
+#include <pthread.h>
+#include <pthread/qos.h>
 /* mach_wait_until: the precise sleep of macOS (nanosleep may be coalesced). */
 static void precise_sleep_us(uint64_t us) {
     static mach_timebase_info_data_t tb;
@@ -79,6 +81,11 @@ bool pc_os_init(void) {
         pc_warn("SDL timer/events init failed: %s", SDL_GetError());
         return false;
     }
+#if defined(__APPLE__)
+    /* Default QoS lets macOS coalesce timers (sleeps of 15 ms took ~40 ms):
+     * the game thread paces frames, mark it latency-critical. */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 #if defined(_WIN32)
     if (s_hires_timer == NULL) {
         s_hires_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
