@@ -40,6 +40,16 @@ static void precise_sleep_us(uint64_t us) {
     }
     SDL_Delay((Uint32)(us / 1000));
 }
+#elif defined(__APPLE__)
+#include <mach/mach_time.h>
+/* mach_wait_until: the precise sleep of macOS (nanosleep may be coalesced). */
+static void precise_sleep_us(uint64_t us) {
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) {
+        mach_timebase_info(&tb);
+    }
+    mach_wait_until(mach_absolute_time() + us * 1000u * tb.denom / tb.numer);
+}
 #else
 static void precise_sleep_us(uint64_t us) {
     SDL_Delay((Uint32)(us / 1000));   /* nanosleep-backed, ~0.1 ms precise */
