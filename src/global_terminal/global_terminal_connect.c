@@ -474,12 +474,23 @@ static void GlobalTerminalConnect_LoadGraphics(GlobalTerminalConnectWork *work) 
         // 3 x 7 palettes: base palette n blended towards base palette n+1 in steps of 3/16 (color 0 unchanged)
         int blend;
         int last;
+#ifdef PLATFORM_PC
+        // DS offsets 0x130 / 0xB0 of the work: paletteCycle.palettes[0] / .basePalettes[0].
+        u8 *dest = (u8 *)work->paletteCycle.palettes[0];
+        u8 *src = (u8 *)work->paletteCycle.basePalettes[0];
+#else
         u8 *dest = (u8 *)work + 0x130;
         u8 *src = (u8 *)work + 0xB0;
+#endif
         while (outer < 3) {
             blend = 0;
             last = 0;
+#ifdef PLATFORM_PC
+            // read below as colors + 0xB0 = basePalettes[outer + 1]
+            colors = (u8 *)work->paletteCycle.basePalettes[outer + 1] - 0xB0;
+#else
             colors = (u8 *)work + (outer + 1) * 0x20;
+#endif
             do {
                 int i;
                 u8 *color;

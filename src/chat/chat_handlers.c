@@ -559,12 +559,19 @@ int ciAddGETCKEYFilter(ChatConnection *chat, const char *cookie, int count, cons
 
 int ciAddGETCHANKEYFilter(ChatConnection *chat, const char *cookie, int count, const char **keys, BOOL broadcastKeys, void *callback, void *param) {
     int i, j;
+#ifdef PLATFORM_PC
+    ChatKeysData *data = DWCi_GsMalloc(sizeof(ChatKeysData));
+#else
     ChatKeysData *data = DWCi_GsMalloc(12);
+#endif
     const char *key;
     if (!data) {
         return 0;
     }
     {
+#ifdef PLATFORM_PC
+        memset(data, 0, sizeof(*data));   // 12 bytes on the DS
+#else
         u8 *p = (u8 *)data;
         p[0] = 0;
         p[1] = 0;
@@ -578,6 +585,7 @@ int ciAddGETCHANKEYFilter(ChatConnection *chat, const char *cookie, int count, c
         p[9] = 0;
         p[10] = 0;
         p[11] = 0;
+#endif
     }
     data->arg.broadcastKeys = broadcastKeys;
     data->count = count;

@@ -1346,6 +1346,21 @@ static void SwalotPlopPopups_UpdateSeat(SwalotPlopPopups *popups) {
     SwalotPlopPopups *slot;
     i = 0;
     slot = popups;
+#ifdef PLATFORM_PC
+    // The DS walks sprites[] and timers[] with one pointer stepping 4 bytes;
+    // sprites[] holds 8-byte pointers here, so index them instead.
+    (void)slot;
+    for (; i < 3; i++) {
+        if (Sprite_GetDrawFlag(popups->sprites[i]) == TRUE) {
+            u32 timer = ++popups->timers[i];
+            if (timer > 16) {
+                SwalotPlopPopups_HideSprite(popups, i);
+            } else {
+                SwalotPlopPopups_SetPos(popups, i);
+            }
+        }
+    }
+#else
     while (i < 3) {
         if (Sprite_GetDrawFlag(slot->sprites[0]) == TRUE) {
             u32 timer = ++slot->timers[0];
@@ -1358,6 +1373,7 @@ static void SwalotPlopPopups_UpdateSeat(SwalotPlopPopups *popups) {
         i++;
         slot = (SwalotPlopPopups *)((u8 *)slot + 4);
     }
+#endif
 }
 
 static void SwalotPlopPopups_SetPos(SwalotPlopPopups *popups, int i) {

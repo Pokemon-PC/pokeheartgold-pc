@@ -2,6 +2,12 @@
 
 #include "global.h"
 
+#ifdef PLATFORM_PC
+#define FOOTPRINT_SPRITE_STRIDE sizeof(ManagedSprite *)   // steps through inkSprites[] / slotSprites[]
+#else
+#define FOOTPRINT_SPRITE_STRIDE 4
+#endif
+
 #include "constants/sndseq.h"
 
 #include "msgdata/msg.naix"
@@ -897,7 +903,7 @@ static void FootprintStamp_ShowParty(FootprintStamp *work) {
 
     unfaded = PaletteData_GetUnfadedBuf(work->plttData, PLTTBUF_MAIN_OBJ);
     faded = PaletteData_GetFadedBuf(work->plttData, PLTTBUF_MAIN_OBJ);
-    for (i = 0, column = 0, mon = work, slot = work, pltt = unfaded; i < FOOTPRINT_STAMP_PARTY_SLOTS; mon = (FootprintStamp *)((u8 *)mon + sizeof(FootprintStampMon)), slot = (FootprintStamp *)((u8 *)slot + 4), column += 4, pltt++, faded++, i++) {
+    for (i = 0, column = 0, mon = work, slot = work, pltt = unfaded; i < FOOTPRINT_STAMP_PARTY_SLOTS; mon = (FootprintStamp *)((u8 *)mon + sizeof(FootprintStampMon)), slot = (FootprintStamp *)((u8 *)slot + FOOTPRINT_SPRITE_STRIDE), column += 4, pltt++, faded++, i++) {
         if (mon->party[0].species == SPECIES_NONE || mon->party[0].species > NATIONAL_DEX_COUNT) {
             ManagedSprite_SetDrawFlag(slot->inkSprites[0], FALSE);
             ManagedSprite_SetDrawFlag(slot->slotSprites[0], FALSE);

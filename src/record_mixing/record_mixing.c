@@ -2,6 +2,12 @@
 
 #include "global.h"
 
+#ifdef PLATFORM_PC
+#define RECORD_MIXING_PTR_STRIDE sizeof(void *)   // walks resMan[] / memberSprites[]
+#else
+#define RECORD_MIXING_PTR_STRIDE 4
+#endif
+
 #include "constants/sndseq.h"
 
 #include "msgdata/msg.naix"
@@ -624,7 +630,7 @@ static void RecordMixing_InitSpriteGraphics(RecordMixingApp *app, NARC *narc) {
     while (i < 4) {
         walk->resMan[0] = Create2DGfxResObjMan(3, (GfGfxResType)i, HEAP_ID_50);
         i++;
-        walk = (RecordMixingApp *)((u8 *)walk + 4);
+        walk = (RecordMixingApp *)((u8 *)walk + RECORD_MIXING_PTR_STRIDE);
     }
     app->charRes = AddCharResObjFromOpenNarc(app->resMan[GF_GFX_RES_TYPE_CHAR], narc, 8, TRUE, 2, NNS_G2D_VRAM_TYPE_2DMAIN, HEAP_ID_50);
     app->plttRes = AddPlttResObjFromOpenNarc(app->resMan[GF_GFX_RES_TYPE_PLTT], narc, 7, FALSE, 2, NNS_G2D_VRAM_TYPE_2DMAIN, 15, HEAP_ID_50);
@@ -657,7 +663,7 @@ static void RecordMixing_CreateSprites(RecordMixingApp *app) {
     Sprite_SetAnimActiveFlag(app->playerSprite, TRUE);
     Sprite_SetDrawFlag(app->playerSprite, TRUE);
     Sprite_SetDrawPriority(app->playerSprite, 100);
-    for (i = 0, pos = &sRecordMixingSpritePositions[0][0], walk = app; i < RECORD_MIXING_MAX_MEMBERS; i++, pos += 2, walk = (RecordMixingApp *)((u8 *)walk + 4)) {
+    for (i = 0, pos = &sRecordMixingSpritePositions[0][0], walk = app; i < RECORD_MIXING_MAX_MEMBERS; i++, pos += 2, walk = (RecordMixingApp *)((u8 *)walk + RECORD_MIXING_PTR_STRIDE)) {
         template.position.x = pos[2] << FX32_SHIFT;
         template.position.y = pos[3] << FX32_SHIFT;
         walk->memberSprites[0] = Sprite_CreateAffine(&template);

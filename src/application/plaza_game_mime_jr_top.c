@@ -2747,7 +2747,11 @@ static void MimeJrTopBurst_Task(SysTask *sysTask, MimeJrTopBurst *burst) {
             ManagedSprite_GetSpritePositionFxXY(cur->sprites[0], &x, &y);
             MimeJrTopTween_InitAccel(xTween, x, x + *xOffset, FX32_CONST(0.3), 8);
             MimeJrTopTween_InitAccel(yTween, y, y + *yOffset, FX32_CONST(0.2), 8);
+#ifdef PLATFORM_PC
+            cur = (MimeJrTopBurst *)((u8 *)cur + sizeof(ManagedSprite *));   // steps through sprites[]
+#else
             cur = (MimeJrTopBurst *)((u8 *)cur + 4);
+#endif
             xOffset++;
             xTween += 2;
             yOffset++;
@@ -2779,7 +2783,11 @@ static void MimeJrTopBurst_Task(SysTask *sysTask, MimeJrTopBurst *burst) {
             donep += 2;
             yTween += 2;
             values = (MimeJrTopBurst *)((u8 *)values + 0x30);
+#ifdef PLATFORM_PC
+            cur = (MimeJrTopBurst *)((u8 *)cur + sizeof(ManagedSprite *));   // steps through sprites[]
+#else
             cur = (MimeJrTopBurst *)((u8 *)cur + 4);
+#endif
         }
         if (allDone) {
             burst->state++;

@@ -14,11 +14,20 @@ extern u16 gFrmTexVramSlotCount;               // number of slots in use
 
 void NNSi_GfdSetTexNrmSearchArray(int first, int second, int third, int fourth, int fifth) {
     FrmTexVramRegion *regions = gFrmTexVramRegions;
+#ifdef PLATFORM_PC
+    // gFrmTexVramSearch4x4[2..6] is gFrmTexVramSearchNormal on the DS (adjacent objects).
+    gFrmTexVramSearchNormal[0] = &regions[first];
+    gFrmTexVramSearchNormal[1] = &regions[second];
+    gFrmTexVramSearchNormal[2] = &regions[third];
+    gFrmTexVramSearchNormal[3] = &regions[fourth];
+    gFrmTexVramSearchNormal[4] = &regions[fifth];
+#else
     (&gFrmTexVramSearch4x4[2])[0] = &regions[first];
     (&gFrmTexVramSearch4x4[2])[1] = &regions[second];
     (&gFrmTexVramSearch4x4[2])[2] = &regions[third];
     (&gFrmTexVramSearch4x4[2])[3] = &regions[fourth];
     (&gFrmTexVramSearch4x4[2])[4] = &regions[fifth];
+#endif
 }
 
 void NNS_GfdInitFrmTexVramManager(u16 numSlot, BOOL useAsDefault) {

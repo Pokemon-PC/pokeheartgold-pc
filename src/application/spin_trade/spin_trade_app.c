@@ -2760,8 +2760,14 @@ static void SpinTrade_StartSubBgFade(SpinTradeApp *app, int fadeOut) {
     s32 startLevels[2];
     SpinTradeFadeTask *fade;
 
+#ifdef PLATFORM_PC
+    // DS: words 7 and 8 past gSpinTradeBonusRanges2P land in gSpinTradeBonusRanges5P (0, 8).
+    startLevels[0] = 0;
+    startLevels[1] = 8;
+#else
     startLevels[0] = gSpinTradeBonusRanges2P[7];
     startLevels[1] = gSpinTradeBonusRanges2P[8];
+#endif
     fade = Heap_AllocAtEnd(HEAP_ID_102, sizeof(SpinTradeFadeTask));
     fade->app = app;
     fade->fadeOut = fadeOut;

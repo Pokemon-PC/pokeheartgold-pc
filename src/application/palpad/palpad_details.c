@@ -540,12 +540,23 @@ static void PalPadDetails_LoadScreens(PalPadDetailsScreen *screens, PalPadGfx *g
     u16 *fileId;
     int i;
 
+#ifdef PLATFORM_PC
+    // On the DS, gPalPadTables[23..26] reads 8 bytes into the following .rodata table
+    // (sPalPadDetailsPage2WindowSpecs, asm/palpad_data.s): screen files 13, 12, 10, 9.
+    fileIds[0] = 13;
+    fileIds[1] = 12;
+    fileId = fileIds;
+    i = 0;
+    fileIds[2] = 10;
+    fileIds[3] = 9;
+#else
     fileIds[0] = gPalPadTables[23];
     fileIds[1] = gPalPadTables[24];
     fileId = fileIds;
     i = 0;
     fileIds[2] = gPalPadTables[25];
     fileIds[3] = gPalPadTables[26];
+#endif
     for (; i < 4; i++) {
         screens->file = GfGfxLoader_GetScrnDataFromOpenNarc(gfx->narc, *fileId, TRUE, &screens->data, heapId);
         screens++;

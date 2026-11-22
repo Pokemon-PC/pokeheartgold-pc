@@ -756,6 +756,30 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
       sous Linux/macOS elle est vers 0x7FFF… (plantage de la sauvegarde de la
       Tour). Reste : un vrai Mac (seulement testé en CI).
 
+#### Vérification du build DS (matching)
+- mwccarm et le Nitro SDK (propriétaires) ne sont pas disponibles ici : la ROM
+  DS n'a pas été recompilée. À la place, `tools/pc_port/check_ds_sources.py
+  ORIGINAL_DIR` compare chaque source à la décompilation d'origine, code
+  `PLATFORM_PC` retiré et macros d'identité développées (SCRIPT_REL(x) → x,
+  PC_PTR32 → rien…) : **0 fichier différent**. Les changements « sans doute
+  équivalents » (`sizeof(ptr)` au lieu de 4, includes ajoutés, auto-affectation)
+  ont été mis sous `#ifdef PLATFORM_PC` pour une identité textuelle.
+
+#### Recherche automatique des bugs 64 bits (`tools/pc_port/find_ds_offsets.py`)
+- libclang sur tout le jeu (drapeaux du build PC) : lectures au-delà d'un objet
+  global (`gX[N]`, `((T *)&gX)[N]`, `(&gX)[N]`, `&gX + N`) et décalages
+  d'octets constants dans des structures à pointeurs (`((u8 *)p)[N]`,
+  `(u8 *)p + N`, `u8 *unk = ptr; unk[N]`). `--as-ds` montre ce que les
+  corrections PC remplacent (sert à valider l'outil).
+- Corrigé grâce à lui : moteur 3D (`g3d_sbc.c`, génération de textures
+  envmap/prjmap : mauvaise commande GPU + écritures hors objet), gestionnaire
+  de VRAM des textures, PalPad (écrans de détail), Dress Up (marges et
+  remises à zéro), Échange de Données (pas de 4 dans des tableaux de
+  pointeurs), Terminal Global (palettes), test de cartouche GBA, et dans le
+  code en ligne seulement : Spin Trade, mini-jeux de la Place Wi-Fi, chat.
+- Restent signalés et laissés : Place Wi-Fi (instruments) et réglages Wi-Fi
+  (point d'accès), inatteignables hors ligne ; un faux positif (Mime Jr).
+
 #### Classes de bugs 64 bits trouvées pendant les finitions
 - Prototypes locaux aux largeurs d'entiers différentes de la définition
   (`u8` déclaré, `int` défini, ou retour large) : en x64 les bits hauts du
@@ -797,3 +821,4 @@ prennent un verrou (`pc_audio_lock`). NitroSystem (`NNS_Snd*`) est inchangé.
 | 2026-11-22 | Jeu | **Zone de Combat complète** : Tour, Usine, Salle, Castel, Arcade — inscription, sauvegarde, combat. Corrigés : Castel (menu lu au-delà d'une table → plantage), Tour (sélection d'équipe lue à des décalages DS). Pokéathlon : épreuve 2 (Capture Drapeau) jouée jusqu'aux résultats. |
 | 2026-11-22 | M7 | **Linux et macOS compilés et testés en CI** (dépôt GitHub privé, sans aucune donnée du jeu) : compilation, autotest et paquet OK sur Windows, Ubuntu et macOS Intel. Le jeu complet avec la ROM reste à lancer sous Linux (WSL) et sur un vrai Mac. |
 | 2026-11-22 | M7 | **Jeu testé sous Linux avec la ROM** (WSL2) : Pokéathlon, Zone de Combat, sauvegarde/rechargement OK. Corrigé : pile du jeu placée sous 4 Gio sous Linux/macOS (adresses de pile tronquées à 32 bits → plantage de la sauvegarde de la Tour de Combat). |
+| 2026-11-23 | M7 | **Build DS vérifié** au niveau des sources (`check_ds_sources.py` : 0 fichier différent de la décompilation d'origine, code PC retiré). **Scanner de bugs 64 bits** (`find_ds_offsets.py`, libclang) : 64 alertes revues, corrigés le moteur 3D (textures envmap/prjmap), la VRAM des textures, PalPad, Dress Up, l'Échange de Données, le Terminal Global et du code en ligne. |

@@ -99,7 +99,11 @@ static const PartyMenuActionWord _02101CB8[] = {
 };
 
 u32 GetPartyMenuContextMenuActionFunc(int index) {
+#ifdef PLATFORM_PC
     return (u32)_02101CB8[index];
+#else
+    return _02101CB8[index];
+#endif
 }
 
 static void PartyMonContextMenuAction_Item(PartyMenu *partyMenu, int *pState) {

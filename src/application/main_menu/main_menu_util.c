@@ -104,7 +104,11 @@ static BOOL MainMenuUtil_CheckGiftCartridgeSignature(void) {
     u32 code = (u8)(gameCode >> 24) | ((gameCode << 24) | (((gameCode >> 8) << 24) >> 8) | (((gameCode >> 16) << 24) >> 16));
     u32 i = 0;
     if (i < gGiftCartridgeGameCodes[0]) {
+#ifdef PLATFORM_PC
+        u32 *codes = gGiftCartridgeGameCodes;   // adjacent to the species map on the DS only
+#else
         u32 *codes = (u32 *)gAgbSpeciesMap[144]; // gGiftCartridgeGameCodes follows the species map
+#endif
         do {
             if (code == *codes) {
                 CTRDG_Enable(TRUE);

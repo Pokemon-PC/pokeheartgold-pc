@@ -2,6 +2,10 @@
 
 #include "global.h"
 
+#ifdef PLATFORM_PC
+#include <string.h>
+#endif
+
 #include "constants/pokemon.h"
 #include "constants/sndseq.h"
 
@@ -2805,6 +2809,10 @@ static void DressUpTray_FreePageTable(DressUpTrayGroup *group) {
     Heap_Free(group->pages);
     zero = 0;
     group->pages = NULL;
+#ifdef PLATFORM_PC
+    (void)bytes;
+    memset(group, 0, sizeof(*group));   // 12 bytes on the DS
+#else
     bytes[0] = zero;
     bytes[1] = zero;
     bytes[2] = zero;
@@ -2817,6 +2825,7 @@ static void DressUpTray_FreePageTable(DressUpTrayGroup *group) {
     bytes[9] = zero;
     bytes[10] = zero;
     bytes[11] = zero;
+#endif
 }
 
 static DressUpNode *DressUpTray_GetCurPageHead(DressUpTray *tray) {
@@ -2993,6 +3002,10 @@ static void DressUp_TickSlideAnim(DressUpSlideAnim *anim) {
     DressUpObj_SetPos(anim->node, x, y);
     if (--anim->remaining <= 0) {
         u8 *bytes = (u8 *)anim;
+#ifdef PLATFORM_PC
+        memset(anim, 0, sizeof(*anim));   // 12 bytes on the DS
+        (void)bytes;
+#else
         bytes[0] = 0;
         bytes[1] = 0;
         bytes[2] = 0;
@@ -3005,6 +3018,7 @@ static void DressUp_TickSlideAnim(DressUpSlideAnim *anim) {
         bytes[9] = 0;
         bytes[10] = 0;
         bytes[11] = 0;
+#endif
     }
 }
 
@@ -3533,10 +3547,18 @@ static BOOL DressUpMon_HitTestPoint(DressUpMonPic *monPic, int x, int y, NNSG2dC
 static void DressUpMon_GetMargins(DressUpMonPic *monPic, u8 *margins) {
     u8 *src = (u8 *)monPic;
     u8 *dst = margins;
+#ifdef PLATFORM_PC
+    (void)src;
+    dst[0] = monPic->margins[0];   // byte 8 on the DS; pointers are 8 bytes here
+    dst[1] = monPic->margins[1];
+    dst[2] = monPic->margins[2];
+    dst[3] = monPic->margins[3];
+#else
     dst[0] = src[8];
     dst[1] = src[9];
     dst[2] = src[10];
     dst[3] = src[11];
+#endif
 }
 
 // first column with an opaque pixel of an 80x80 4bpp picture (80 if none)

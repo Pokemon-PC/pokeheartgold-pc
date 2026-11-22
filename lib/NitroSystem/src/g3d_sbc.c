@@ -859,8 +859,15 @@ void NNSi_G3dFuncSbc_ENVMAP(G3dRS *pRS, u32 opt) {
     if ((pRS->pMatAnmResult->prmTexImage & REG_G3_TEXIMAGE_PARAM_TGEN_MASK) != TEXIMAGE_TGEN(GX_TEXGEN_NORMAL)) {
         pRS->pMatAnmResult->prmTexImage &= ~REG_G3_TEXIMAGE_PARAM_TGEN_MASK;
         pRS->pMatAnmResult->prmTexImage |= TEXIMAGE_TGEN(GX_TEXGEN_NORMAL);
+#ifdef PLATFORM_PC
+        // On the DS these words follow gTexGenTexImageCmds in memory; the PC places
+        // each object separately, so they are named.
+        gEnvMapTexImageParam = pRS->pMatAnmResult->prmTexImage;
+        NNS_G3dGeBufferOP_N((&gPrjMapTexImageParam)[1], &gEnvMapTexImageParam, G3OP_TEXIMAGE_PARAM_NPARAMS);
+#else
         gTexGenTexImageCmds[3] = pRS->pMatAnmResult->prmTexImage;
         NNS_G3dGeBufferOP_N(gTexGenTexImageCmds[2], &gEnvMapTexImageParam, G3OP_TEXIMAGE_PARAM_NPARAMS);
+#endif
     }
     modeTexture = GX_MTXMODE_TEXTURE;
     NNS_G3dGeBufferOP_N(G3OP_MTX_MODE, &modeTexture, G3OP_MTX_MODE_NPARAMS);
@@ -971,7 +978,11 @@ void NNSi_G3dFuncSbc_PRJMAP(G3dRS *pRS, u32 opt) {
     if ((pRS->pMatAnmResult->prmTexImage & REG_G3_TEXIMAGE_PARAM_TGEN_MASK) != TEXIMAGE_TGEN(GX_TEXGEN_VERTEX)) {
         pRS->pMatAnmResult->prmTexImage &= ~REG_G3_TEXIMAGE_PARAM_TGEN_MASK;
         pRS->pMatAnmResult->prmTexImage |= TEXIMAGE_TGEN(GX_TEXGEN_VERTEX);
+#ifdef PLATFORM_PC
+        gPrjMapTexImageParam = pRS->pMatAnmResult->prmTexImage;
+#else
         gTexGenTexImageCmds[1] = pRS->pMatAnmResult->prmTexImage;
+#endif
         NNS_G3dGeBufferOP_N(gTexGenTexImageCmds[0], &gPrjMapTexImageParam, G3OP_TEXIMAGE_PARAM_NPARAMS);
     }
     timing = GetCallbackTiming(pRS, NNS_G3D_SBC_PRJMAP);
@@ -986,10 +997,17 @@ void NNSi_G3dFuncSbc_PRJMAP(G3dRS *pRS, u32 opt) {
         height = pRS->pMatAnmResult->origHeight;
         width = pRS->pMatAnmResult->origWidth;
         // gPrjMapTexMtx._00, _11, _30 and _31, addressed from gTexGenTexImageCmds (needed for the match)
+#ifdef PLATFORM_PC
+        gPrjMapTexMtx._00 = width << 15;
+        gPrjMapTexMtx._11 = (u32)(-height) << 15;
+        gPrjMapTexMtx._30 = width << 15;
+        gPrjMapTexMtx._31 = height << 15;
+#else
         gTexGenTexImageCmds[12] = width << 15;
         gTexGenTexImageCmds[17] = (u32)(-height) << 15;
         gTexGenTexImageCmds[24] = width << 15;
         gTexGenTexImageCmds[25] = height << 15;
+#endif
         NNS_G3dGeBufferOP_N(G3OP_MTX_LOAD_4x4, (const u32 *)&gPrjMapTexMtx, G3OP_MTX_LOAD_4x4_NPARAMS);
     }
     if (timing == G3D_SBC_CALLBACK_TIMING_B) {
