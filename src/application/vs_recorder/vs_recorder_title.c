@@ -1,0 +1,347 @@
+#include "global.h"
+
+#include "constants/sndseq.h"
+
+#include "application/vs_recorder/vs_recorder_internal.h"
+
+#include "font_sprite.h"
+#include "gf_gfx_loader.h"
+#include "heap.h"
+#include "math_util.h"
+#include "orbit_cursor.h"
+#include "palette.h"
+#include "screen_fade.h"
+#include "sound_playback.h"
+#include "sprite_system.h"
+#include "touchscreen.h"
+
+// VS Recorder title screen (VS_RECORDER_SCREEN_TITLE): fade in, drop the orbit cursors, "TOUCH HERE!", then show the
+// menu and slide its choice rows in.
+
+enum VsRecorderTitleIntroStep {
+    TITLE_INTRO_STEP_FADE_IN,
+    TITLE_INTRO_STEP_LAUNCH_CURSOR,
+    TITLE_INTRO_STEP_LAUNCH_SECOND_CURSOR,
+    TITLE_INTRO_STEP_SHOW_TOUCH_HERE,
+    TITLE_INTRO_STEP_BRIGHTEN,
+    TITLE_INTRO_STEP_DARKEN,
+    TITLE_INTRO_STEP_WAIT_TOUCH,
+    TITLE_INTRO_STEP_DONE,
+};
+
+enum VsRecorderTitleShowMenuStep {
+    TITLE_SHOW_MENU_STEP_CREATE_MENU,
+    TITLE_SHOW_MENU_STEP_FADE_IN,
+    TITLE_SHOW_MENU_STEP_LOAD_SCREEN,
+    TITLE_SHOW_MENU_STEP_DONE,
+};
+
+enum VsRecorderTitleFlashStep {
+    TITLE_FLASH_STEP_BRIGHTEN,
+    TITLE_FLASH_STEP_HOLD,
+    TITLE_FLASH_STEP_DARKEN,
+    TITLE_FLASH_STEP_DONE,
+};
+
+enum VsRecorderSlideInChoiceRowsStep {
+    SLIDE_IN_CHOICE_ROWS_STEP_INIT,
+    SLIDE_IN_CHOICE_ROWS_STEP_SLIDE,
+    SLIDE_IN_CHOICE_ROWS_STEP_DONE,
+};
+
+// one choice row sliding up along a sine curve
+typedef struct VsRecorderChoiceSlide {
+    int delay;
+    int angle;
+    s16 targetY;
+    u8 unk_0A[2];
+    fx32 baseX;
+} VsRecorderChoiceSlide;
+
+// VsRecorderWork.screenWork while the choice rows slide in
+typedef struct VsRecorderChoiceSlideIn {
+    VsRecorderChoiceSlide rows[5];
+    u8 fade;
+} VsRecorderChoiceSlideIn;
+
+// substates of the title screen (gVsRecorderTitleSubStates)
+#define TITLE_SHOW_MENU        1
+#define TITLE_FLASH            2
+#define TITLE_SLIDE_IN_CHOICES 3
+
+static BOOL VsRecorder_TitleFlash(VsRecorderWork *work);
+static BOOL VsRecorder_TitleIntro(VsRecorderWork *work);
+static BOOL VsRecorder_TitleShowMenu(VsRecorderWork *work);
+static BOOL VsRecorder_TitleSlideInChoices(VsRecorderWork *work);
+
+const VsRecorderScreenFunc gVsRecorderTitleSubStates[4] = {
+    VsRecorder_TitleIntro,
+    VsRecorder_TitleShowMenu,
+    VsRecorder_TitleFlash,
+    VsRecorder_TitleSlideInChoices,
+};
+
+static BOOL VsRecorder_TitleIntro(VsRecorderWork *work) {
+    switch (work->step) {
+    case TITLE_INTRO_STEP_FADE_IN:
+        if (VsRecorder_HasResumeScreen(work) == TRUE) {
+            VsRecorder_SetSubState(work, TITLE_SHOW_MENU);
+            break;
+        }
+        BeginNormalPaletteFade(FADE_BOTH_SCREENS, FADE_TYPE_BRIGHTNESS_IN, FADE_TYPE_BRIGHTNESS_IN, 0, 6, 1, HEAP_ID_109);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 0xFFFE, 16, (u16)VsRecorder_GetMenuBlendColor(work));
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_BG, 0xBFFF, 16, (u16)VsRecorder_GetMenuBlendColor(work));
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 0x3FFE, 16, (u16)VsRecorder_GetMenuBlendColor(work));
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 0xFFFF, 16, (u16)VsRecorder_GetMenuBlendColor(work));
+        OrbitCursor_SetAltAnim(work->orbitCursors[1]);
+        OrbitCursor_SetAltAnim(work->orbitCursors[0]);
+        work->step++;
+        break;
+    case TITLE_INTRO_STEP_LAUNCH_CURSOR:
+        if (!IsPaletteFadeFinished()) {
+            break;
+        }
+        OrbitCursor_SetPosition(work->orbitCursors[1], 128, 16);
+        OrbitCursor_SetTarget(work->orbitCursors[1], 128, 216);
+        OrbitCursor_SetVisible(work->orbitCursors[1], TRUE);
+        OrbitCursor_SetActive(work->orbitCursors[1], TRUE);
+        PlaySE(SEQ_SE_PL_BREC11_2);
+        work->step++;
+        break;
+    case TITLE_INTRO_STEP_LAUNCH_SECOND_CURSOR:
+        work->counter++;
+        if (work->counter < 25) {
+            break;
+        }
+        work->counter = 0;
+        OrbitCursor_SetPosition(work->orbitCursors[0], 128, -16);
+        OrbitCursor_SetTarget(work->orbitCursors[0], 128, 96);
+        OrbitCursor_SetVisible(work->orbitCursors[0], TRUE);
+        OrbitCursor_SetActive(work->orbitCursors[0], TRUE);
+        work->step++;
+        break;
+    case TITLE_INTRO_STEP_SHOW_TOUCH_HERE:
+        work->counter++;
+        if (work->counter < 18) {
+            break;
+        }
+        VsRecorder_ShowTouchHere(work);
+        OrbitCursor_SetVisible(work->orbitCursors[1], FALSE);
+        work->counter = 0;
+        work->step++;
+        break;
+    case TITLE_INTRO_STEP_BRIGHTEN:
+        if (work->counter < 16) {
+            work->counter += 4;
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_BG, 0xF000, work->counter, 0xFFFF);
+        } else {
+            work->step++;
+        }
+        break;
+    case TITLE_INTRO_STEP_DARKEN:
+        if (work->counter > 0) {
+            work->counter -= 4;
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_BG, 0xF000, work->counter, 0xFFFF);
+        } else {
+            work->step++;
+        }
+        break;
+    case TITLE_INTRO_STEP_WAIT_TOUCH:
+        if (System_GetTouchHeld() == TRUE) {
+            VsRecorder_HideTouchHere(work);
+            OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+            OrbitCursor_SetDefaultAnim(work->orbitCursors[1]);
+            OrbitCursor_SetDefaultAnim(work->orbitCursors[0]);
+            work->step++;
+        }
+        break;
+    default:
+        VsRecorder_SetSubState(work, TITLE_SHOW_MENU);
+        break;
+    }
+    return FALSE;
+}
+
+static BOOL VsRecorder_TitleShowMenu(VsRecorderWork *work) {
+    switch (work->step) {
+    case TITLE_SHOW_MENU_STEP_CREATE_MENU:
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_LoadDecorGfx(work);
+        VsRecorder_CreateDecorSprites(work);
+        VsRecorder_LoadMenuRowGfx(work);
+        VsRecorder_CreateMenuRowSprites(work);
+        VsRecorder_CreateMenuRowText(work);
+        VsRecorder_RefreshChoiceRows(work);
+        VsRecorder_RefreshPathRows(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        if (VsRecorder_HasResumeScreen(work) == TRUE) {
+            if (work->mode == 0) {
+                GfGfxLoader_LoadScrnDataFromOpenNarc(work->narc, 0x45, work->bgConfig, GF_BG_LYR_SUB_1, 0, 0, FALSE, HEAP_ID_109);
+            } else {
+                GfGfxLoader_LoadScrnDataFromOpenNarc(work->narc, 0x37, work->bgConfig, GF_BG_LYR_SUB_1, 0, 0, FALSE, HEAP_ID_109);
+            }
+            OrbitCursor_SetPosition(work->orbitCursors[0], 128, 224);
+            OrbitCursor_SetTarget(work->orbitCursors[0], 128, 224);
+            OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+            OrbitCursor_SetActive(work->orbitCursors[0], TRUE);
+            VsRecorder_SetScreenIfDone(work, work->resumeScreen, TRUE, work->screenPtr);
+            break;
+        }
+        PlaySE(SEQ_SE_PL_BREC03);
+        work->counter = 16;
+        work->step++;
+        break;
+    case TITLE_SHOW_MENU_STEP_FADE_IN:
+        if (VsRecorder_HasResumeScreen(work) == TRUE) {
+            if (IsPaletteFadeFinished() == TRUE) {
+                work->step++;
+            }
+            break;
+        }
+        if (work->counter != 0) {
+            work->counter -= 2;
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 0xFFFE, work->counter, (u16)VsRecorder_GetMenuBlendColor(work));
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_BG, 0xFFFF, work->counter, (u16)VsRecorder_GetMenuBlendColor(work));
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 0x3FFE, work->counter, (u16)VsRecorder_GetMenuBlendColor(work));
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 0xFFFF, work->counter, (u16)VsRecorder_GetMenuBlendColor(work));
+        } else {
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, 16, work->blendColor);
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 0xC, 16, work->blendColor);
+            work->step++;
+        }
+        break;
+    case TITLE_SHOW_MENU_STEP_LOAD_SCREEN:
+        if (work->mode == 0) {
+            GfGfxLoader_LoadScrnDataFromOpenNarc(work->narc, 0x45, work->bgConfig, GF_BG_LYR_SUB_1, 0, 0, FALSE, HEAP_ID_109);
+        } else {
+            GfGfxLoader_LoadScrnDataFromOpenNarc(work->narc, 0x37, work->bgConfig, GF_BG_LYR_SUB_1, 0, 0, FALSE, HEAP_ID_109);
+        }
+        work->step++;
+        break;
+    default:
+        if (work->decor[0].state >= 3) {
+            VsRecorder_SetSubState(work, TITLE_FLASH);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static BOOL VsRecorder_TitleFlash(VsRecorderWork *work) {
+    switch (work->step) {
+    case TITLE_FLASH_STEP_BRIGHTEN:
+        OrbitCursor_SetPosition(work->orbitCursors[0], 128, 96);
+        OrbitCursor_SetTarget(work->orbitCursors[0], 128, 96);
+        OrbitCursor_SetVisible(work->orbitCursors[0], TRUE);
+        OrbitCursor_SetActive(work->orbitCursors[0], TRUE);
+        work->counter++;
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, (u8)(16 - work->counter), work->blendColor);
+        if (work->counter == 2) {
+            work->counter = 15;
+            work->step++;
+        }
+        break;
+    case TITLE_FLASH_STEP_HOLD:
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, work->counter, work->blendColor);
+        work->step++;
+        break;
+    case TITLE_FLASH_STEP_DARKEN:
+        work->counter--;
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, work->counter, work->blendColor);
+        if (work->counter == 0) {
+            work->step++;
+        }
+        break;
+    default:
+        VsRecorder_SetSubState(work, TITLE_SLIDE_IN_CHOICES);
+        break;
+    }
+    return FALSE;
+}
+
+static BOOL VsRecorder_TitleSlideInChoices(VsRecorderWork *work) {
+    s16 x;
+    s16 y;
+    BOOL done = VsRecorder_SlideInChoiceRows(work);
+    VsRecorder_GetSpritePos(work->choiceRows[0].sprite, &x, &y);
+    OrbitCursor_SetTarget(work->orbitCursors[0], (s16)(x + 16), y);
+    return done;
+}
+
+// slides the choice rows up from the bottom of the touch screen while their palettes fade in; TRUE when all are in place
+BOOL VsRecorder_SlideInChoiceRows(VsRecorderWork *work) {
+    fx32 posY;
+    s16 x1;
+    s16 y1;
+    s16 x2;
+    s16 y2;
+    VsRecorderChoiceSlideIn *data;
+    int i;
+    int j;
+    int done;
+    fx32 y;
+    fx32 x;
+
+    switch (work->step) {
+    case SLIDE_IN_CHOICE_ROWS_STEP_INIT:
+        data = Heap_Alloc(HEAP_ID_109, sizeof(VsRecorderChoiceSlideIn));
+        MI_CpuFill8(data, 0, sizeof(VsRecorderChoiceSlideIn));
+        work->screenWork = data;
+        data->fade = 16;
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 0xC, data->fade, work->blendColor);
+        for (i = 0; i < work->choiceCount; i++) {
+            data->rows[i].delay = i * 4;
+            data->rows[i].angle = 90;
+            data->rows[i].targetY = 25 + i * 36 + (5 - work->choiceCount) * 16;
+            VsRecorder_SetSpritePos(work->choiceRows[i].sprite, 42, (5 - work->choiceCount) * 16 + 169);
+            ManagedSprite_GetSpritePositionFxXY(work->choiceRows[i].sprite, &data->rows[i].baseX, &posY);
+            ManagedSprite_SetPositonFxXY(work->choiceRows[i].sprite, data->rows[i].baseX, ((5 - work->choiceCount) * 16 + 169) * FX32_ONE);
+            TextOBJ_SetPosition(work->choiceRows[i].text, 36, -8);
+            TextOBJ_SetSpritesDrawFlag(work->choiceRows[i].text, TRUE);
+        }
+        work->step++;
+        break;
+    case SLIDE_IN_CHOICE_ROWS_STEP_SLIDE:
+        data = work->screenWork;
+        if (data->fade != 0) {
+            data->fade--;
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 0xC, data->fade, work->blendColor);
+        }
+        done = 0;
+        for (j = 0; j < work->choiceCount; j++) {
+            if (data->rows[j].delay != 0) {
+                data->rows[j].delay--;
+                continue;
+            }
+            VsRecorder_GetSpritePos(work->choiceRows[j].sprite, &x1, &y1);
+            if (y1 == data->rows[j].targetY) {
+                done++;
+                continue;
+            }
+            if (y1 - 8 > data->rows[j].targetY) {
+                y1 -= 8;
+            } else {
+                y1 = data->rows[j].targetY;
+            }
+            y = y1 * FX32_ONE;
+            x = data->rows[j].baseX + GF_SinDeg(0xFFFF * data->rows[j].angle / 360) * 16;
+            data->rows[j].angle -= 4;
+            ManagedSprite_SetPositonFxXY(work->choiceRows[j].sprite, x, y);
+            TextOBJ_SetPosition(work->choiceRows[j].text, 36, -8);
+        }
+        if (done == work->choiceCount) {
+            work->step++;
+        }
+        break;
+    default:
+        data = work->screenWork;
+        VsRecorder_GetSpritePos(work->choiceRows[work->menuCursor].sprite, &x2, &y2);
+        OrbitCursor_SetPosition(work->orbitCursors[0], x2 + 16, y2);
+        OrbitCursor_SetTarget(work->orbitCursors[0], (s16)(x2 + 16), y2);
+        OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+        VsRecorder_UpdateMenuHitboxes(work);
+        Heap_Free(data);
+        return TRUE;
+    }
+    return FALSE;
+}

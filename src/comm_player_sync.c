@@ -1,0 +1,910 @@
+#include "global.h"
+
+#include "comm_player_manager_internal.h"
+#include "comm_state.h"
+#include "communication_player_state.h"
+#include "field_system.h"
+#include "field_terrain.h"
+#include "heap.h"
+#include "map_events.h"
+#include "map_events_internal.h"
+#include "map_object.h"
+#include "map_object_movement_commands_internal.h"
+#include "map_object_movement_utilities.h"
+#include "player_avatar.h"
+#include "player_avatar_movement.h"
+#include "player_data.h"
+#include "sys_task_api.h"
+#include "system.h"
+
+static void CommPlayerManager_SendPosition(int forceSend, int x, int z);
+static void CommPlayerManager_SendHostPosition(int netId, const CommPlayerPosition *position);
+static void CommPlayerManager_SendPositionWhenStopped(FieldSystem *unused);
+static void CommPlayerManager_SendChangedHostPositions(FieldSystem *unused);
+static void CommPlayerManager_CreateAvatar(int netId);
+static void CommPlayerManager_RemovePlayer(int netId, int keepActive, int deleteFromMap);
+static void CommPlayerManager_UpdateLocalMoveSpeed(FieldSystem *fieldSystem);
+static void CommPlayerManager_UpdateAvatars(FieldSystem *unused);
+static void CommPlayerManager_SendMoveEnabled(int value);
+static void CommPlayerManager_SetMoveEnabled(int value);
+static int CommPlayerManager_KeysToDirection(int unused, int keys);
+static BOOL CommPlayerManager_IsObjectEventAt(int x, int z);
+static BOOL CommPlayerManager_IsPositionBlocked(int x, int z, int excludedNetId);
+static u32 CommPlayerManager_GetMoveDelay(int speed);
+static void CommPlayerManager_MoveHostPlayers(SysTask *task, CommPlayerManager *unused);
+static void CommPlayerManager_MoveAvatar(int netId);
+static int CommPlayerManager_GetHostX(int netId);
+static int CommPlayerManager_GetHostZ(int netId);
+static int CommPlayerManager_GetHostFrontX(int netId);
+static int CommPlayerManager_GetHostFrontZ(int netId);
+static void CommPlayerManager_SetPlayerMoveEnabled(int netId, int value);
+static void CommPlayerManager_HostLockFlaggedPlayersOnSpots(void);
+static int CommPlayerManager_GetOppositeDirection(int facing);
+static void CommPlayerManager_SetLocalMoveDelay(void);
+
+int Comm_GetLocalNetId(void);
+int Comm_IsNetIdConnected(int netId);
+BOOL Comm_IsActive(void);
+void Comm_EnableKeySync(void);
+int Comm_GetMaxPlayers(int value);
+int Comm_SendParentCommand(int command, const void *data, int size);
+int Comm_SendFixedParentCommand(int command, void *data);
+void Comm_SetLocalMoveSpeed(int mode);
+int Comm_GetMoveSpeed(int netId);
+u16 Comm_TakeDirectionKeys(int netId);
+void Comm_SendFixedCommand(int command, void *data);
+void Comm_SetBattleSlot(int netId, int index);
+
+// Spots in the link room (x, z pairs) for two and for four players; a player flagged by the host
+// who stands on one has their input locked.
+static u16 sTwoPlayerLockSpots[] = { 4, 7, 11, 7 };
+static u16 sFourPlayerLockSpots[] = { 4, 6, 11, 6, 4, 8, 11, 8 };
+
+void CommPlayerManager_RemoveAllAvatars(void) {
+    int i;
+    if (gCommPlayerManager != NULL) {
+        for (i = 0; i < 8; i++) {
+            CommPlayerManager_RemovePlayer((u8)i, 1, 1);
+        }
+    }
+}
+
+void CommPlayerManager_ResyncLocalPlayer(void) {
+    if (gCommPlayerManager != NULL) {
+        gCommPlayerManager->sendAllPositions = 1;
+        gCommPlayerManager->unk_EE = 0;
+        CommPlayerManager_InitLocalPlayer();
+        CommPlayerManager_SendLocalPosition(1);
+        PlayerAvatar_GetXCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+        PlayerAvatar_GetZCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    }
+}
+
+void CommPlayerManager_Delete(int deleteFromMap) {
+    int i;
+    if (gCommPlayerManager != NULL) {
+        for (i = 0; i < 8; i++) {
+            CommPlayerManager_RemovePlayer((u8)i, 0, deleteFromMap);
+        }
+        SysTask_Destroy(gCommPlayerManager->task);
+        Heap_Free(gCommPlayerManager);
+        gCommPlayerManager = NULL;
+    }
+}
+
+BOOL CommPlayerManager_IsInitialized(void) {
+    return gCommPlayerManager != NULL;
+}
+
+void CommPlayerManager_InitLocalPlayer(void) {
+    gCommPlayerManager->avatars[Comm_GetLocalNetId()] = gCommPlayerManager->fieldSystem->playerAvatar;
+    gCommPlayerManager->active[Comm_GetLocalNetId()] = 1;
+    gCommPlayerManager->positions[Comm_GetLocalNetId()].x = PlayerAvatar_GetXCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    gCommPlayerManager->positions[Comm_GetLocalNetId()].z = PlayerAvatar_GetZCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    gCommPlayerManager->positions[Comm_GetLocalNetId()].facing = PlayerAvatar_GetFacingDirection(gCommPlayerManager->fieldSystem->playerAvatar);
+    gCommPlayerManager->hostPositions[Comm_GetLocalNetId()].x = PlayerAvatar_GetXCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    gCommPlayerManager->hostPositions[Comm_GetLocalNetId()].z = PlayerAvatar_GetZCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    gCommPlayerManager->hostPositions[Comm_GetLocalNetId()].facing = PlayerAvatar_GetFacingDirection(gCommPlayerManager->fieldSystem->playerAvatar);
+}
+
+static void CommPlayerManager_SendPosition(int forceSend, int x, int z) {
+    u8 data[8];
+    int facing = PlayerAvatar_GetFacingDirection(gCommPlayerManager->fieldSystem->playerAvatar);
+    data[0] = x;
+    data[1] = x >> 8;
+    data[2] = z;
+    data[3] = z >> 8;
+    data[4] = facing;
+    if (forceSend) {
+        data[4] |= 0x80;
+    }
+    Comm_SendFixedCommand(0x16, data);
+    gCommPlayerManager->sendAllPositions = 1;
+}
+
+void CommPlayerManager_SendLocalPosition(int forceSend) {
+    int x = PlayerAvatar_GetXCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    int z = PlayerAvatar_GetZCoord(gCommPlayerManager->fieldSystem->playerAvatar);
+    CommPlayerManager_SendPosition(forceSend, x, z);
+}
+
+static void CommPlayerManager_SendHostPosition(int netId, const CommPlayerPosition *position) {
+    u8 data[8];
+    u16 x = position->x;
+    u16 z = position->z;
+
+    if (x >= 0xF000) {
+        x = 0xEFFF;
+    }
+    if (z >= 0xF000) {
+        z = 0xEFFF;
+    }
+    data[0] = netId & 0xF;
+    data[1] = x;
+    data[2] = ((x >> 8) & 1) + ((z >> 7) & 2);
+    data[3] = z;
+    if (position->bumped != 0) {
+        data[2] |= 0x80;
+    }
+    data[0] += (position->facing % 4) << 4;
+    data[0] += position->speed << 6;
+    Comm_SendParentCommand(0x17, data, 0);
+}
+
+static void CommPlayerManager_SendPositionWhenStopped(FieldSystem *unused) {
+    enum AvatarMoveState moveState = PlayerAvatar_GetMoveState(gCommPlayerManager->fieldSystem->playerAvatar);
+    enum PlayerMoveState playerMoveState = PlayerAvatar_GetPlayerMoveState(gCommPlayerManager->fieldSystem->playerAvatar);
+    if (moveState == 0 && Comm_IsNetIdConnected(Comm_GetLocalNetId()) && gCommPlayerManager->localPositionSent == 0) {
+        CommPlayerManager_SendLocalPosition(1);
+        gCommPlayerManager->localPositionSent = 1;
+    }
+    if (moveState == 1 && playerMoveState == 1) {
+        gCommPlayerManager->localPositionSent = 0;
+    }
+}
+
+static void CommPlayerManager_SendChangedHostPositions(FieldSystem *unused) {
+    int netId;
+
+    for (netId = 0; netId < 8; netId++) {
+        CommPlayerManager *manager = gCommPlayerManager;
+
+        if (manager->active[netId] != 0) {
+            u8 changed = manager->positionChanged[netId];
+            CommPlayerPosition *positions = manager->hostPositions;
+
+            if (changed != 0 || manager->sendAllPositions != 0) {
+                manager->positionChanged[netId] = 0;
+                CommPlayerManager_SendHostPosition(netId, &positions[netId]);
+            }
+        }
+    }
+    gCommPlayerManager->sendAllPositions = 0;
+}
+
+u32 CommPlayerManager_sizeof(void) {
+    return sizeof(CommPlayerManager);
+}
+
+static void CommPlayerManager_CreateAvatar(int netId) {
+    PlayerProfile *profile;
+    PlayerAvatar *avatar;
+    LocalMapObject *object;
+    u32 version;
+    u8 game;
+
+    if (gCommPlayerManager->avatars[netId] || gCommPlayerManager->unk_EE) {
+        return;
+    }
+    profile = CommPlayerInfo_GetProfile(netId);
+    if (!profile) {
+        return;
+    }
+    if (netId != Comm_GetLocalNetId()) {
+        object = MapObjectManager_GetFirstActiveObjectByID(gCommPlayerManager->fieldSystem->mapObjectManager, netId + 256);
+        if (object) {
+            MapObject_Remove(object);
+        }
+    }
+    version = 2;
+    game = PlayerProfile_GetVersion(profile);
+    if (game == 0) {
+        version = 1;
+    } else if (game == 12) {
+        version = 0;
+    }
+    avatar = PlayerAvatar_CreateWithParams(gCommPlayerManager->fieldSystem->mapObjectManager, gCommPlayerManager->positions[netId].x, gCommPlayerManager->positions[netId].z, gCommPlayerManager->positions[netId].facing, 0, PlayerProfile_GetTrainerGender(profile), version, 0);
+    GF_ASSERT(avatar);
+    gCommPlayerManager->avatars[netId] = avatar;
+    MapObject_SetID(PlayerAvatar_GetMapObject(avatar), netId + 256);
+    gCommPlayerManager->active[netId] = 1;
+}
+
+static void CommPlayerManager_RemovePlayer(int netId, int keepActive, int deleteFromMap) {
+    PlayerAvatar *avatar;
+    u8 *active;
+    if (gCommPlayerManager == NULL) {
+        return;
+    }
+    avatar = gCommPlayerManager->avatars[netId];
+    if (avatar != NULL) {
+        if (gCommPlayerManager->fieldSystem->playerAvatar != avatar) {
+            if (deleteFromMap != 0) {
+                PlayerAvatar_DeleteFromMap(avatar);
+            } else {
+                PlayerAvatar_FreeToHeap(avatar);
+            }
+        }
+        gCommPlayerManager->avatars[netId] = NULL;
+    }
+    active = gCommPlayerManager->active;
+    if (active[netId] != 0 && keepActive == 0) {
+        active[netId] = 0;
+    }
+    gCommPlayerManager->positionChanged[netId] = 1;
+}
+
+static void CommPlayerManager_UpdateLocalMoveSpeed(FieldSystem *fieldSystem) {
+    int mode = 2;
+    if (gSystem.heldKeys & PAD_BUTTON_B) {
+        mode = 1;
+    } else if (fieldSystem != NULL && PlayerAvatar_CheckRunningShoesLock(FieldSystem_GetPlayerAvatar(fieldSystem))) {
+        mode = 1;
+    }
+    Comm_SetLocalMoveSpeed(mode);
+}
+
+void CommPlayerManager_Task(SysTask *task, void *fieldSystem) {
+    if (Comm_IsActive()) {
+        CommPlayerManager_UpdateLocalMoveSpeed(fieldSystem);
+        if (Comm_GetLocalNetId() == 0) {
+            CommPlayerManager_SendChangedHostPositions(fieldSystem);
+            CommPlayerManager_SendPositionWhenStopped(fieldSystem);
+        } else {
+            CommPlayerManager_SendPositionWhenStopped(fieldSystem);
+        }
+        CommPlayerManager_UpdateAvatars(fieldSystem);
+    }
+}
+
+static void CommPlayerManager_UpdateAvatars(FieldSystem *unused) {
+    int i;
+    u8 netId;
+    for (i = 0; i < 8; i++) {
+        if (Comm_IsNetIdConnected((u16)i)) {
+            CommPlayerManager_MoveAvatar(i);
+        } else if (gCommPlayerManager->active[i] != 0) {
+            netId = i;
+            CommPlayerManager_ReceiveRemovePlayer(0, 1, &netId, gCommPlayerManager->fieldSystem);
+        }
+    }
+}
+
+static void CommPlayerManager_SendMoveEnabled(int value) {
+    if (gCommPlayerManager != NULL) {
+        if (gCommPlayerManager->localMoveEnabled != value) {
+            gCommPlayerManager->localMoveEnabled = value;
+        }
+        Comm_SendFixedCommand(0x3E, &gCommPlayerManager->localMoveEnabled);
+    }
+}
+
+static void CommPlayerManager_SetMoveEnabled(int value) {
+    if (gCommPlayerManager != NULL && gCommPlayerManager->localMoveEnabled != value) {
+        gCommPlayerManager->localMoveEnabled = value;
+        Comm_SendFixedCommand(0x3E, &gCommPlayerManager->localMoveEnabled);
+    }
+}
+
+void CommPlayerManager_ReceiveMoveEnabled(int netId, int size, const u8 *data) {
+    int valid;
+    if (gCommPlayerManager == NULL) {
+        return;
+    }
+    GF_ASSERT(size == 1);
+    GF_ASSERT(netId < 8);
+    valid = 1;
+    if (*data != 1 && *data != 0) {
+        valid = 0;
+    }
+    GF_ASSERT(valid);
+    CommPlayerManager_SetPlayerMoveEnabled(netId, *data);
+}
+
+void CommPlayerManager_FieldUpdate(FieldSystem *fieldSystem, int value) {
+    PlayerAvatar *avatar;
+    if (gCommPlayerManager == NULL) {
+        return;
+    }
+    CommPlayerManager_SetMoveEnabled(value);
+    gCommPlayerManager->localWalkEnabled = value;
+    avatar = fieldSystem->playerAvatar;
+    if (avatar != NULL) {
+        gCommPlayerManager->avatars[Comm_GetLocalNetId()] = avatar;
+    }
+    if (Comm_IsActive() && Comm_GetLocalNetId() == 0) {
+        CommPlayerManager_MoveHostPlayers(NULL, gCommPlayerManager);
+    }
+    if (Comm_IsActive() && Comm_GetLocalNetId() == 0) {
+        CommPlayerManager_HostLockFlaggedPlayersOnSpots();
+    }
+}
+
+static int CommPlayerManager_KeysToDirection(int unused, int keys) {
+    if (keys & PAD_KEY_LEFT) {
+        return DIR_WEST;
+    }
+    if (keys & PAD_KEY_RIGHT) {
+        return DIR_EAST;
+    }
+    if (keys & PAD_KEY_UP) {
+        return DIR_NORTH;
+    }
+    if (keys & PAD_KEY_DOWN) {
+        return DIR_SOUTH;
+    }
+    return -1;
+}
+
+static BOOL CommPlayerManager_IsObjectEventAt(int x, int z) {
+    int count = Field_GetNumObjectEvents(gCommPlayerManager->fieldSystem);
+    const ObjectEvent *events = Field_GetObjectEvents(gCommPlayerManager->fieldSystem);
+    int i;
+    for (i = 0; i < count; i++, events++) {
+        if (x == events->x && z == events->z) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL CommPlayerManager_IsPositionBlocked(int x, int z, int excludedNetId) {
+    int netId;
+    if (x != 0xFFFF && z != 0xFFFF) {
+        for (netId = 0; netId < 8; netId++) {
+            if (netId != excludedNetId && CommPlayerManager_GetHostX(netId) == x && CommPlayerManager_GetHostZ(netId) == z) {
+                return TRUE;
+            }
+        }
+        if (CommPlayerManager_IsObjectEventAt(x, z)) {
+            return TRUE;
+        }
+    }
+    return FieldSystem_CheckTileCollision(gCommPlayerManager->fieldSystem, x, z);
+}
+
+static u32 CommPlayerManager_GetMoveDelay(int speed) {
+    u32 delays[5] = { 2, 4, 8, 16, 2 };
+    GF_ASSERT(speed < 5);
+    return delays[speed];
+}
+
+static void CommPlayerManager_MoveHostPlayers(SysTask *task, CommPlayerManager *unused) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        CommPlayerPosition *position;
+        int direction;
+        int x;
+        int z;
+        if (!gCommPlayerManager->active[i] || !gCommPlayerManager->moveEnabled[i]) {
+            continue;
+        }
+        position = &gCommPlayerManager->hostPositions[i];
+        if (gCommPlayerManager->hostMoveTimer[i]) {
+            --gCommPlayerManager->hostMoveTimer[i];
+        }
+        if (gCommPlayerManager->inputLocked[i]) {
+            direction = 0;
+        } else {
+            direction = Comm_TakeDirectionKeys(i);
+        }
+        position->speed = Comm_GetMoveSpeed(i);
+        if (gCommPlayerManager->hostMoveTimer[i]) {
+            continue;
+        }
+        if (position->bumped == 1) {
+            gCommPlayerManager->positionChanged[i] = 1;
+        }
+        position->bumped = 0;
+        if (gCommPlayerManager->unk_C4[i] == 2) {
+            gCommPlayerManager->unk_C4[i] = 1;
+            continue;
+        }
+        direction = CommPlayerManager_KeysToDirection(direction, direction);
+        x = CommPlayerManager_GetHostFrontX(i);
+        z = CommPlayerManager_GetHostFrontZ(i);
+        if (x == 0xFFFF || z == 0xFFFF || direction == -1) {
+            continue;
+        }
+        if (position->facing != direction) {
+            position->facing = direction;
+            gCommPlayerManager->hostMoveTimer[i] = 4;
+            gCommPlayerManager->positionChanged[i] = 1;
+            if (gCommPlayerManager->unk_C4[i] > 2) {
+                --gCommPlayerManager->unk_C4[i];
+            }
+        } else if (!gCommPlayerManager->unk_C4[i]) {
+            if (CommPlayerManager_IsPositionBlocked(x, z, i)) {
+                position->bumped = 1;
+                gCommPlayerManager->positionChanged[i] = 1;
+                gCommPlayerManager->hostMoveTimer[i] = 4;
+            } else {
+                gCommPlayerManager->positionChanged[i] = 1;
+                position->x = x;
+                position->z = z;
+                position->facing = direction;
+                gCommPlayerManager->hostMoveTimer[i] = CommPlayerManager_GetMoveDelay(position->speed);
+            }
+        }
+    }
+}
+
+void CommPlayerManager_ReceivePosition(int netId, int size, const u8 *data) {
+    CommPlayerPosition *position;
+    int i;
+    if (gCommPlayerManager == NULL) {
+        return;
+    }
+    position = &gCommPlayerManager->hostPositions[netId];
+    if (data[4] & 0x80) {
+        gCommPlayerManager->sendAllPositions = 1;
+        return;
+    }
+    if (position->facing == -1) {
+        for (i = 0; i < 8; i++) {
+            gCommPlayerManager->positionChanged[i] = 1;
+        }
+    }
+    position->x = 0;
+    position->z = 0;
+    position->x += data[0];
+    position->x += (data[1] << 8) & 0xFF00;
+    position->z += data[2];
+    position->z += (data[3] << 8) & 0xFF00;
+    position->facing = data[4] & 15;
+    gCommPlayerManager->active[netId] = 1;
+    gCommPlayerManager->positionChanged[netId] = 1;
+    GF_ASSERT(FieldSystem_CheckTileCollision(gCommPlayerManager->fieldSystem, position->x, position->z) == 0);
+}
+
+void CommPlayerManager_ReceiveRemovePlayer(int unused, int size, const u8 *data, FieldSystem *fieldSystem) {
+    int netId = *data;
+    if (gCommPlayerManager != NULL && netId != Comm_GetLocalNetId()) {
+        CommPlayerManager_RemovePlayer(netId, 0, 0);
+        CommPlayerInfo_ClearPlayer(netId);
+    }
+}
+
+int CommPlayerManager_GetPositionSize(void) {
+    return 5;
+}
+
+void CommPlayerManager_ReceiveHostPosition(int unused, int size, const u8 *data) {
+    CommPlayerPosition *position;
+    int netId = data[0] & 0xF;
+    if (gCommPlayerManager != NULL) {
+        position = gCommPlayerManager->positions;
+        position += netId;
+        if (data[2] & 0x80) {
+            position->bumped = 1;
+        } else {
+            position->bumped = 0;
+        }
+        position->x = 0;
+        position->z = 0;
+        position->x += data[1];
+        position->x += (data[2] << 8) & 0x100;
+        position->z += data[3];
+        position->z += (data[2] << 7) & 0x100;
+        position->facing = (data[0] >> 4) & 3;
+        position->speed = (data[0] >> 6) & 3;
+        CommPlayerManager_CreateAvatar((u8)netId);
+    }
+}
+
+static void CommPlayerManager_MoveAvatar(int netId) {
+    CommPlayerPosition *position = &gCommPlayerManager->positions[netId];
+    if (gCommPlayerManager->moveTimer[netId]) {
+        gCommPlayerManager->moveTimer[netId]--;
+        return;
+    }
+    if (position->x != 0xFFFF && position->z != 0xFFFF && !gCommPlayerManager->unk_EE && (netId != Comm_GetLocalNetId() || gCommPlayerManager->localWalkEnabled)) {
+        PlayerAvatar *avatar;
+        int speed;
+        int dx;
+        int direction;
+        u32 moveSpeed;
+        int dz;
+        u16 keys;
+        int movement;
+
+        avatar = gCommPlayerManager->avatars[netId];
+        if (!avatar) {
+            return;
+        }
+        dx = (s32)((u32)PlayerAvatar_GetXCoord(avatar) - position->x);
+        dz = (s32)((u32)PlayerAvatar_GetZCoord(avatar) - position->z);
+        direction = PlayerAvatar_GetFacingDirection(avatar);
+        if (!dx && !dz) {
+            keys = 0;
+        } else if (abs(dx) > abs(dz)) {
+            if (dx > 0) {
+                keys = PAD_KEY_LEFT;
+            } else {
+                keys = PAD_KEY_RIGHT;
+            }
+        } else {
+            if (dz > 0) {
+                keys = PAD_KEY_UP;
+            } else {
+                keys = PAD_KEY_DOWN;
+            }
+        }
+        (void)abs(dz);
+        (void)abs(dx);
+        speed = position->speed;
+        movement = 255;
+        switch (speed) {
+        case 0:
+            moveSpeed = 5;
+            break;
+        case 1:
+            moveSpeed = 4;
+            keys |= PAD_BUTTON_B;
+            break;
+        case 2:
+            moveSpeed = 2;
+            break;
+        case 3:
+            moveSpeed = 1;
+            break;
+        }
+        if (gCommPlayerManager->localMoveDelay && netId == Comm_GetLocalNetId()) {
+            gCommPlayerManager->localMoveDelay--;
+        } else {
+            int dirKeys = keys & ~PAD_BUTTON_B;
+            if (!dirKeys && position->bumped) {
+                speed = 3;
+                switch (position->facing) {
+                case 0:
+                    movement = 28;
+                    break;
+                default:
+                case 1:
+                    movement = 29;
+                    break;
+                case 2:
+                    movement = 30;
+                    break;
+                case 3:
+                    movement = 31;
+                    break;
+                }
+            } else if (!dirKeys && position->facing != direction) {
+                movement = GetMovementForDirection(position->facing, 36);
+            } else {
+                movement = PlayerAvatar_GetMovementFromInput(avatar, keys, keys, moveSpeed, TRUE, 0);
+            }
+        }
+        if (PlayerAvatar_IsReadyForMovement(avatar) || PlayerAvatar_IsReadyOrBumpingWall(avatar)) {
+            if (movement != 255) {
+                PlayerAvatar_SetMovement(avatar, movement);
+                if (keys & ~PAD_BUTTON_B) {
+                    if (!gCommPlayerManager->moveTimer[netId]) {
+                        gCommPlayerManager->moveTimer[netId] = CommPlayerManager_GetMoveDelay(speed);
+                    }
+                    if (gCommPlayerManager->moveTimer[netId]) {
+                        gCommPlayerManager->moveTimer[netId]--;
+                    }
+                }
+            }
+        }
+    }
+}
+
+int CommPlayerManager_GetHostPositionSize(void) {
+    return 4;
+}
+
+BOOL CommPlayerManager_IsLocalPlayerConnected(void) {
+    int netId;
+    if (gCommPlayerManager == NULL) {
+        return FALSE;
+    }
+    netId = Comm_GetLocalNetId();
+    return Comm_IsNetIdConnected(netId) != 0;
+}
+
+int CommPlayerManager_GetPlayerX(int netId) {
+    if (gCommPlayerManager == NULL) {
+        return 0xFFFF;
+    }
+    if (netId == Comm_GetLocalNetId()) {
+        return gCommPlayerManager->positions[netId].x;
+    }
+    if (!CommPlayerManager_IsLocalPlayerConnected() || gCommPlayerManager->active[netId] == 0) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->positions[netId].x;
+}
+
+int CommPlayerManager_GetPlayerZ(int netId) {
+    if (gCommPlayerManager == NULL) {
+        return 0xFFFF;
+    }
+    if (netId == Comm_GetLocalNetId()) {
+        return gCommPlayerManager->positions[netId].z;
+    }
+    if (!CommPlayerManager_IsLocalPlayerConnected() || gCommPlayerManager->active[netId] == 0) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->positions[netId].z;
+}
+
+int CommPlayerManager_GetPlayerFrontX(int netId) {
+    int x = CommPlayerManager_GetPlayerX(netId);
+    if (x == 0xFFFF) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->positions[netId].x + GetDeltaXByFacingDirection(gCommPlayerManager->positions[netId].facing);
+}
+
+int CommPlayerManager_GetPlayerFrontZ(int netId) {
+    int z = CommPlayerManager_GetPlayerZ(netId);
+    if (z == 0xFFFF) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->positions[netId].z + GetDeltaYByFacingDirection(gCommPlayerManager->positions[netId].facing);
+}
+
+static int CommPlayerManager_GetHostX(int netId) {
+    if (gCommPlayerManager == NULL) {
+        return 0xFFFF;
+    }
+    if (netId == Comm_GetLocalNetId()) {
+        return gCommPlayerManager->hostPositions[netId].x;
+    }
+    if (!CommPlayerManager_IsLocalPlayerConnected() || gCommPlayerManager->active[netId] == 0) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->hostPositions[netId].x;
+}
+
+static int CommPlayerManager_GetHostZ(int netId) {
+    if (gCommPlayerManager == NULL) {
+        return 0xFFFF;
+    }
+    if (netId == Comm_GetLocalNetId()) {
+        return gCommPlayerManager->hostPositions[netId].z;
+    }
+    if (!CommPlayerManager_IsLocalPlayerConnected() || gCommPlayerManager->active[netId] == 0) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->hostPositions[netId].z;
+}
+
+static int CommPlayerManager_GetHostFrontX(int netId) {
+    if (CommPlayerManager_GetHostX(netId) == 0xFFFF) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->hostPositions[netId].x + GetDeltaXByFacingDirection(gCommPlayerManager->hostPositions[netId].facing);
+}
+
+static int CommPlayerManager_GetHostFrontZ(int netId) {
+    if (CommPlayerManager_GetHostZ(netId) == 0xFFFF) {
+        return 0xFFFF;
+    }
+    return gCommPlayerManager->hostPositions[netId].z + GetDeltaYByFacingDirection(gCommPlayerManager->hostPositions[netId].facing);
+}
+
+static void CommPlayerManager_SetPlayerMoveEnabled(int netId, int value) {
+    u8 *values = gCommPlayerManager->moveEnabled;
+    if (values[netId] != value) {
+        values[netId] = value;
+        gCommPlayerManager->hostPositions[netId].bumped = 0;
+        gCommPlayerManager->positionChanged[netId] = 1;
+        gCommPlayerManager->hostPositions[netId].speed = 2;
+    }
+}
+
+BOOL CommPlayerManager_AssignBattleSlots(void) {
+    u16 coords2[4];
+    u16 coords4[8];
+    int mapping[4];
+    int count;
+    BOOL result;
+    int maxPlayers;
+    int i;
+    int j;
+    const u16 *coords;
+
+    coords2[0] = gCommTwoPlayerBattleSpots[0];
+    {
+        const u16 *src = gCommFourPlayerBattleSpots;
+
+        coords2[1] = gCommTwoPlayerBattleSpots[1];
+        coords2[2] = gCommTwoPlayerBattleSpots[2];
+        coords2[3] = gCommTwoPlayerBattleSpots[3];
+        u32 copyCount;
+        u16 *dst;
+
+        dst = coords4;
+        copyCount = 8;
+
+        do {
+            *dst = *src;
+            src++;
+            dst++;
+        } while (--copyCount != 0);
+    }
+    maxPlayers = Comm_GetMaxPlayers(CommState_GetLinkMode());
+    count = 0;
+    result = FALSE;
+    coords = maxPlayers == 2 ? coords2 : coords4;
+    for (i = 0; i < maxPlayers; i++, coords += 2) {
+        for (j = 0; j < maxPlayers; j++) {
+            if (coords[0] == CommPlayerManager_GetPlayerX(j) && coords[1] == CommPlayerManager_GetPlayerZ(j)) {
+                count++;
+                mapping[j] = i;
+                if (j == Comm_GetLocalNetId()) {
+                    result = TRUE;
+                }
+                break;
+            }
+        }
+    }
+    if (count == maxPlayers) {
+        for (i = 0; i < maxPlayers; i++) {
+            Comm_SetBattleSlot(mapping[i], i);
+        }
+    }
+    return result;
+}
+
+void CommPlayerManager_RecvLockOnSpot(int netId, int size, const u8 *data) {
+    u8 value = *data;
+    if (value == 3) {
+        gCommPlayerManager->inputLocked[netId] = 0;
+    } else {
+        gCommPlayerManager->lockOnSpot[netId] = value;
+    }
+}
+
+static void CommPlayerManager_HostLockFlaggedPlayersOnSpots(void) {
+    int count;
+    const u16 *table;
+    u8 i;
+
+    count = Comm_GetMaxPlayers(CommState_GetLinkMode());
+    table = count == 2 ? sTwoPlayerLockSpots : sFourPlayerLockSpots;
+    i = 0;
+    while (i < count) {
+        if (gCommPlayerManager->lockOnSpot[i] != 0) {
+            int j;
+            const u16 *pair;
+            j = 0;
+            if (j < count) {
+                pair = table;
+                do {
+                    if (CommPlayerManager_GetHostX(i) == pair[0] && CommPlayerManager_GetHostZ(i) == pair[1]) {
+                        gCommPlayerManager->inputLocked[i] = 1;
+                        Comm_SendFixedParentCommand(0x5F, &i);
+                    }
+                    j++;
+                    pair += 2;
+                } while (j < count);
+            }
+        }
+        i++;
+    }
+}
+
+void CommPlayerManager_FaceRoomCenter(void) {
+    int netId = Comm_GetLocalNetId();
+    int movement;
+
+    if (CommPlayerManager_GetPlayerX(netId) > 8) {
+        CommPlayerManager_SetLocalFacing(2);
+        movement = GetMovementForDirection(2, 0x24);
+    } else {
+        CommPlayerManager_SetLocalFacing(3);
+        movement = GetMovementForDirection(3, 0x24);
+    }
+    PlayerAvatar_SetMovement(gCommPlayerManager->avatars[netId], movement);
+    CommPlayerManager_SetLocalMoveDelay();
+}
+
+BOOL CommPlayerManager_StepAllPlayersBack(void) {
+    int count;
+    int i;
+    CommPlayerPosition *position;
+
+    count = Comm_GetMaxPlayers(CommState_GetLinkMode());
+    for (i = 0; i < count; i++) {
+        if (gCommPlayerManager->active[i] == 0 || gCommPlayerManager->positionChanged[i] == 1) {
+            return FALSE;
+        }
+    }
+    for (i = 0; i < count; i++) {
+        int facing;
+        position = &gCommPlayerManager->hostPositions[i];
+        facing = CommPlayerManager_GetOppositeDirection(position->facing);
+        position->x += GetDeltaXByFacingDirection(facing);
+        position->z += GetDeltaYByFacingDirection(facing);
+        position->speed = 2;
+        gCommPlayerManager->positionChanged[i] = 1;
+        CommPlayerManager_SetPlayerMoveEnabled(i, 1);
+    }
+    return TRUE;
+}
+
+static int CommPlayerManager_GetOppositeDirection(int facing) {
+    if (facing == DIR_NORTH) {
+        return DIR_SOUTH;
+    }
+    if (facing == DIR_SOUTH) {
+        return DIR_NORTH;
+    }
+    if (facing == DIR_WEST) {
+        return DIR_EAST;
+    }
+    if (facing == DIR_EAST) {
+        return DIR_WEST;
+    }
+    GF_ASSERT(FALSE);
+    return DIR_WEST;
+}
+
+int CommPlayerManager_GetMoveTimer(int netId) {
+    return gCommPlayerManager->moveTimer[netId];
+}
+
+void CommPlayerManager_SetLocalFacing(int facing) {
+    PlayerAvatar_SetFacingDirection(gCommPlayerManager->fieldSystem->playerAvatar, facing);
+    gCommPlayerManager->positions[Comm_GetLocalNetId()].facing = facing;
+    CommPlayerManager_SendLocalPosition(0);
+}
+
+void CommPlayerManager_PauseField(void) {
+    FieldSystem_PauseProcesses();
+    gCommPlayerManager->localMoveEnabled = 0;
+}
+
+void CommPlayerManager_ResumeField(void) {
+    FieldSystem_ResumeProcesses();
+    CommPlayerManager_SendMoveEnabled(1);
+}
+
+void CommPlayerManager_ResumeFieldOnce(void) {
+    if (gCommPlayerManager->fieldResumed == 0) {
+        CommPlayerManager_ResumeField();
+        gCommPlayerManager->fieldResumed = 1;
+    }
+}
+
+void CommPlayerManager_ForcePosition(void) {
+    int i;
+    if (gCommPlayerManager == NULL) {
+        return;
+    }
+    for (i = 0; i < 8; i++) {
+        LocalMapObject *object;
+        u32 x;
+        u32 z;
+        u32 facing;
+
+        if (gCommPlayerManager->avatars[i] != NULL && i != Comm_GetLocalNetId()) {
+            object = PlayerAvatar_GetMapObject(gCommPlayerManager->avatars[i]);
+            x = gCommPlayerManager->positions[i].x;
+            z = gCommPlayerManager->positions[i].z;
+            facing = gCommPlayerManager->positions[i].facing;
+            MapObject_SetCurrentX(object, x);
+            MapObject_SetCurrentZ(object, z);
+            MapObject_SetPositionFromXYZAndDirection(object, x, 0, z, facing);
+        }
+    }
+}
+
+static void CommPlayerManager_SetLocalMoveDelay(void) {
+    gCommPlayerManager->localMoveDelay = 8;
+}

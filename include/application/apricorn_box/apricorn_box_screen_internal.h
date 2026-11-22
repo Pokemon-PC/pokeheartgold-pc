@@ -1,0 +1,158 @@
+#ifndef POKEHEARTGOLD_APPLICATION_APRICORN_BOX_APRICORN_BOX_SCREEN_INTERNAL_H
+#define POKEHEARTGOLD_APPLICATION_APRICORN_BOX_APRICORN_BOX_SCREEN_INTERNAL_H
+
+#include "application/apricorn_box/apricorn_box_overlay_internal.h"
+
+#include "bg_window.h"
+#include "filesystem.h"
+#include "list_menu_items.h"
+#include "message_format.h"
+#include "msgdata.h"
+#include "sprite_system.h"
+#include "touchscreen_list_menu.h"
+#include "yes_no_prompt.h"
+
+enum ApricornBoxScreenState {
+    APRICORN_BOX_SCREEN_STATE_FADE_IN,
+    APRICORN_BOX_SCREEN_STATE_FADE_OUT,
+    APRICORN_BOX_SCREEN_STATE_BLENDER_NEWS,
+    APRICORN_BOX_SCREEN_STATE_VIEW,
+    APRICORN_BOX_SCREEN_STATE_BLENDER,
+    APRICORN_BOX_SCREEN_STATE_KURT,
+    APRICORN_BOX_SCREEN_STATE_KURT_QUANTITY,
+    APRICORN_BOX_SCREEN_STATE_LIFT_APRICORN,
+    APRICORN_BOX_SCREEN_STATE_DRAG_APRICORN,
+    APRICORN_BOX_SCREEN_STATE_PUT_BACK_APRICORN,
+    APRICORN_BOX_SCREEN_STATE_BLEND_APRICORN,
+    APRICORN_BOX_SCREEN_STATE_JUICE_MENU,
+    APRICORN_BOX_SCREEN_STATE_WAIT_MESSAGE = 14,
+    APRICORN_BOX_SCREEN_STATE_WAIT_JUICE_TASTE,
+    APRICORN_BOX_SCREEN_STATE_EXIT,
+};
+
+// ApricornBoxScreen_PrintMessage / ApricornBoxScreen_PrintHeader texts, counted from msg_0021_00027
+enum ApricornBoxText {
+    APRICORN_BOX_TEXT_COLLECTED,
+    APRICORN_BOX_TEXT_PUT_IN_BLENDER,
+    APRICORN_BOX_TEXT_NOT_BLENDED_ENOUGH,
+    APRICORN_BOX_TEXT_ALMOST_DONE,
+    APRICORN_BOX_TEXT_BIT_LONGER,
+    APRICORN_BOX_TEXT_JUICE_READY,
+    APRICORN_BOX_TEXT_CAN_PUT_IN,
+    APRICORN_BOX_TEXT_BLENDER_FULL,
+    APRICORN_BOX_TEXT_JUICE_MENU,
+    APRICORN_BOX_TEXT_TASTED,
+    APRICORN_BOX_TEXT_SELECT_TO_GIVE,
+    APRICORN_BOX_TEXT_GIVE_HOW_MANY,
+    APRICORN_BOX_TEXT_GIVE_CONFIRM,
+    APRICORN_BOX_TEXT_APRICORN_INFO, // one per apricorn
+    APRICORN_BOX_TEXT_BLENDER_INFO = APRICORN_BOX_TEXT_APRICORN_INFO + APRICORN_TYPE_COUNT,
+    APRICORN_BOX_TEXT_JUICE_INFO,
+    APRICORN_BOX_TEXT_HOW_TO_MAKE,
+    APRICORN_BOX_TEXT_JUICE_MADE,
+    APRICORN_BOX_TEXT_FLAVOR_CHANGED,
+    APRICORN_BOX_TEXT_JUICE_NOT_DONE,
+    APRICORN_BOX_TEXT_SHAKE_BLENDER,
+    APRICORN_BOX_TEXT_BEING_MADE,
+    APRICORN_BOX_TEXT_IMPROVING,
+};
+
+// The Apricorn Box screen: view the apricorns, put them into the Apriblender, give them to Kurt.
+typedef struct ApricornBoxScreen {
+    enum HeapID heapId;
+    ApricornBoxApp *app;
+    u8 padding_08[8];
+    SaveApricornBox *apricornBox;
+    u8 juiceServings; // ApricornBox_GetJuiceServings
+    u8 flavorTotal;   // ApricornJuice_GetFlavorTotal(juiceRecord)
+    u8 juiceMildness; // juiceRecord.mildness
+    u8 topMixIndex;   // ApricornJuice_GetTopMixIndex(juiceRecord)
+    u8 numBlending;   // apricorns in the blender (ApricornBox_CountQueuedApricorns, at most 5)
+    u8 mixStage;      // ApricornBox_GetMixProgressLevel
+    u8 apricornCounts[APRICORN_TYPE_COUNT];
+    u8 padding_21;
+    ApricornJuice juiceRecord;
+    ApricornJuiceRanking juice;
+    u32 steps;
+    u16 subState;
+    u16 animState;
+    MenuInputState menuInputState;
+    u8 mode; // ApricornBoxApp.mode
+    u8 textFrameDelay;
+    u8 frame;
+    u8 textPrinterId;
+    u8 quantityInputResult;
+    u8 cursorArea; // 0/1: apricorn columns, 2/3: buttons
+    u8 cursorRow;
+    u8 lastRowLeft;
+    u8 lastRowRight;
+    u8 selectedApricorn;
+    u8 quantity;
+    u8 maxQuantity;
+    u8 activeTasks;
+    vu8 timer;
+    u8 unk_52;
+    u8 overBlender;
+    BgConfig *bgConfig;
+    TouchscreenListMenuSpawner *spawner;
+    MsgData *msgData;
+    MessageFormat *msgFormat;
+    String *string;
+    String *string2;
+    String *closeText; // message 1 "CLOSE"
+    String *unk_70;
+    String *numberTemplate;                     // message 25
+    String *infoTexts[22];                      // messages 27-48
+    String *apricornNames[APRICORN_TYPE_COUNT]; // messages 7-13
+    u8 padding_EC[0x3C];
+    Window windows[18];
+    YesNoPrompt *yesNoPrompt;
+    SpriteSystem *spriteSystem;
+    SpriteManager *spriteManager;
+    Sprite *sprites[15];
+    NARC *narc;
+    ListMenuItem *listMenuItems;
+    TouchscreenListMenu *listMenu;
+} ApricornBoxScreen;
+
+void ApricornBoxScreen_DrawCloseButton(ApricornBoxScreen *screen, int sequence);
+void ApricornBoxScreen_DrawConfirmButton(ApricornBoxScreen *screen, int index, int sequence);
+void ApricornBoxScreen_UpdateCursor(ApricornBoxScreen *screen);
+void ApricornBoxScreen_PrintQuantity(ApricornBoxScreen *screen, int value);
+void ApricornBoxScreen_PrintMessage(ApricornBoxScreen *screen, int msgNo, int speed);
+void ApricornBoxScreen_SetApricornsFocus(ApricornBoxScreen *screen, int mode);
+u8 ApricornBoxScreen_GetCursorTarget(ApricornBoxScreen *screen);
+int ApricornBoxScreen_HandleViewInput(ApricornBoxScreen *screen);
+int ApricornBoxScreen_HandleBlenderInput(ApricornBoxScreen *screen);
+int ApricornBoxScreen_HandleDrag(ApricornBoxScreen *screen);
+int ApricornBoxScreen_HandleKurtInput(ApricornBoxScreen *screen);
+int ApricornBoxScreen_HandleQuantityInput(ApricornBoxScreen *screen);
+
+typedef struct ApricornBoxListDesc {
+    u16 count;
+    u8 x;
+    u8 y;
+    const u8 *messages;
+} ApricornBoxListDesc;
+
+extern const u8 gApricornBoxQuantityDigitX[];
+extern const TouchscreenListMenuTemplate gApricornBoxListMenuTemplates[2];
+extern const ResdatIdList gApricornBoxSpriteResources;
+extern const GraphicsModes gApricornBoxGraphicsModes;
+extern const u8 gApricornBoxListMenu0Messages[3];
+extern const u8 gApricornBoxListMenu1Messages[2];
+extern const ApricornBoxListDesc gApricornBoxListMenus[2];
+extern const OamCharTransferParam gApricornBoxOamCharTransferParam;
+extern const BgTemplate gApricornBoxBgTemplate_Sub3;
+extern const BgTemplate gApricornBoxBgTemplate_Main0;
+extern const u16 gApricornBoxApricornPositions[7][2];
+extern const BgTemplate gApricornBoxBgTemplate_Main3;
+extern const BgTemplate gApricornBoxBgTemplate_Main1;
+extern const BgTemplate gApricornBoxBgTemplate_Sub0;
+extern const BgTemplate gApricornBoxBgTemplate_Main2;
+extern const OamManagerParam gApricornBoxOamManagerParam;
+extern const GraphicsBanks gApricornBoxGraphicsBanks;
+extern const WindowTemplate gApricornBoxWindowTemplates[];
+extern const UnmanagedSpriteTemplate gApricornBoxSpriteTemplates[7];
+
+#endif // POKEHEARTGOLD_APPLICATION_APRICORN_BOX_APRICORN_BOX_SCREEN_INTERNAL_H

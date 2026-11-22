@@ -1,0 +1,11 @@
+#ifndef POKEHEARTGOLD_APPLICATION_MAIN_MENU_CONNECT_TO_RANGER_H
+#define POKEHEARTGOLD_APPLICATION_MAIN_MENU_CONNECT_TO_RANGER_H
+
+#include "overlay_manager.h"
+
+typedef struct ConnectToRangerApp ConnectToRangerApp;
+
+extern const OverlayManagerTemplate gApp_MainMenu_SelectOption_ConnectToRanger;
+
+
+#endif // POKEHEARTGOLD_APPLICATION_MAIN_MENU_CONNECT_TO_RANGER_H

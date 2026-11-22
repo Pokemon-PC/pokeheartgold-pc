@@ -1,0 +1,31 @@
+footprint_stamp_data.s: data before any label in section rodata: .byte 0x00, 0x00, 0xFB, 0xFF, 0x00, 0x00, 0x05, 0x00, 0x00, 
+global_terminal_socket_data.s: aliases inside sGlobalTerminalServerCommandIds: _0222A9AC@+0x0
+global_terminal_socket_data.s: aliases inside sGlobalTerminalSocket: ov39_0222AB8A@+0x6, sGlobalTerminalSocketHost@+0x140, sGlobalTerminalSocketSettings@+0x200
+global_terminal_socket_data.s: aliases inside sGlobalTerminalSocketThread: sGlobalTerminalSocketMutex@+0xc0
+gts_data.s: aliases inside gGtsServer: gGtsServerFriendKey@+0xc, gGtsServerRequest@+0x14, gGtsServerPending@+0x100, gGtsServerAnswer@+0x120
+main_menu_bss.s: aliases inside gPmAgbSave: gPmAgbSaveCounter@+0x10, gPmAgbRomHeader@+0x18
+main_menu_data.s: aliases inside gMainMenuUtilSprites: gMainMenuUtilRenderer@+0x4
+nintendo_wfc_connect_data.s: aliases inside gNintendoWfcHttp: gNintendoWfcHttpFriendKey@+0xc, gNintendoWfcHttpRequestBuffer@+0x14
+nintendo_wfc_connect_data.s: aliases inside gNintendoWfcHttpResponse: gNintendoWfcHttpShortResponse@+0x3
+palpad_data.s: aliases inside gPalPadRosterNameColors: sPalPadRosterFriendMenuTemplate@+0x8
+palpad_data.s: aliases inside gPalPadRosterSlotRects: gPalPadRosterSlotY@+0x2
+palpad_data.s: aliases inside gPalPadArrowSpriteTemplates: gPalPadArrowTemplateScale@+0x14
+plaza_game_data.s: aliases inside gPlazaGameResultsBanks: gPlazaGameSeatRowsByCount@+0x1c, gPlazaGameScreenRowsByCount@+0x20, gPlazaGameSeatAnimsByCount@+0x24
+plaza_game_mime_jr_top_data.s: aliases inside gMimeJrTopTouchData: gMimeJrTopSelectionHitboxes@+0x8
+plaza_game_swalot_plop_data.s: aliases inside gSwalotPlopSub3BgTemplate: gSwalotPlopSeatAngles@+0x14
+pokeathlon_goal_roll_rodata.s: aliases inside gPokeathlonGoalRollPaletteData: gPokeathlonGoalRollWindowData@+0x4
+safari_area_customizer_data.s: aliases inside gSafariAreaCustomizerConsts: gSafariAreaCustomizerLabelColors@+0x4
+scratch_off_cards_data.s: aliases inside gScratchOffCardsCardChoicePositions: gScratchOffCardsCardChoicePositionsY@+0x2
+wifi_setup_data.s: aliases inside gWifiSetupSocket: sWifiSetupSocConfig@+0x8
+wifi_setup_data.s: aliases inside gWifiSetupState: ov13_0224CF9C@+0x4, ov13_0224CFB8@+0x20, ov13_0224CFBC@+0x24
+wifi_setup_data.s: aliases inside gWifiSetupSecurityRecords: gWifiSetupWep64Record@+0x8, gWifiSetupWep128Record@+0x138, ov13_0224D8C0@+0x268, ov13_0224D930@+0x2d8
+wifi_setup_data.s: aliases inside gWifiSetupRuntime: gWifiSetupFreeHook@+0xc
+wifi_setup_data.s: aliases inside gWifiSetupWork: gWifiSetupExtendedRequest@+0x50
+wifi_setup_data.s: aliases inside gWifiSetupThread: gWifiSetupResult@+0xc0
+wifi_setup_data.s: aliases inside gWifiSetupClientSettings: gWifiSetupRecvSsid@+0x14
+field_emote_mark_data.s: sEmoteMarkTemplate: no C type and mixes integers with addresses (skipped; needs a declaration)
+field_very_tall_grass_data.s: sUnusedBillboardEffectTemplate: no C type and mixes integers with addresses (skipped; needs a declaration)
+plaza_game_data.s: gPlazaGameCommands: no C type, emitted as an array of pointers
+plaza_game_mime_jr_top_data.s: gMimeJrTopRoutineTasks: relocations at [320] not matched to pointer fields
+vs_recorder_screen_data.s: sVsRecorderMode6Menu: 4 trailing byte(s) beyond 3 element(s) dropped
+wifi_setup_data.s: sWifiSetupLinkSocConfig: relocations at [72] not matched to pointer fields

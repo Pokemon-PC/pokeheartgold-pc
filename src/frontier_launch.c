@@ -1,0 +1,25 @@
+#include "frontier_launch.h"
+
+#include "global.h"
+
+#include "frontier/frontier.h"
+
+#include "field_system.h"
+
+FrontierLaunchArgs *Frontier_LaunchApp(FieldSystem *fieldSystem, void *frontierFsys) {
+    FrontierLaunchArgs *args = Heap_AllocAtEnd(HEAP_ID_FIELD2, sizeof(FrontierLaunchArgs));
+    MI_CpuFill8(args, 0, sizeof(FrontierLaunchArgs));
+
+    args->frontierFsys = frontierFsys;
+    args->options = Save_PlayerData_GetOptionsAddr(fieldSystem->saveData);
+    args->saveData = fieldSystem->saveData;
+    args->bagCursor = fieldSystem->bagCursor;
+    args->keyPressedSave = fieldSystem->keyPressedSave;
+    args->unk10 = 0;
+    args->unk14 = 0;
+    args->mapId = fieldSystem->location->mapId;
+    args->frontierMapId = 14;
+    args->fieldSystem = fieldSystem;
+    FieldSystem_LaunchApplication(fieldSystem, &gOverlayTemplate_Frontier, args);
+    return args;
+}

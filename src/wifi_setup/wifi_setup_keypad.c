@@ -1,0 +1,417 @@
+#include "wifi_setup/wifi_setup_keypad.h"
+
+#include "global.h"
+
+#include "wifi_setup/wifi_setup_keyboard.h"
+
+#include <nitro/code32.h>
+
+static void WifiSetupKeypad_SlideInRow0Task(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_SlideInRow1Task(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_SlideInRow2Task(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_SlideInRow3Task(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_SlideInButtonsTask(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_InputTask(WifiSetupTask *task, void *arg);
+static void WifiSetupKeypad_HandleTouchPress(void);
+static void WifiSetupKeypad_HandleTouchRelease(void);
+static void WifiSetupKeypad_HandleTouchHold(void);
+static void WifiSetupKeypad_SetHoveredKey(int key);
+static void WifiSetupKeypad_HandleButtons(void);
+
+// Numeric keypad, first part: creation, the accessors used by the screens, the slide-in animation
+// and the per-frame input handling (touch press, release and hold, D-pad and buttons).
+
+static inline void DrawKeyLabel(WifiSetupCanvas *canvas, volatile WifiSetupTextBox *box, const u16 *label) {
+    WifiSetupText_DrawInRect(canvas, box->x, box->y, box->width, box->height, 2, 1152, label);
+}
+
+void WifiSetupKeypad_Create(void) {
+    WifiSetupTextBox box;
+    u32 numObjs;
+    u16 label[2];
+    int firstLabel;
+    int labelIndex;
+    int i;
+#ifdef PLATFORM_PC
+    // The DS reads past gWifiSetupKeypadDigitKeySize into sLabelBoxPos[2..3] (wifi_setup_keypad_layout.c);
+    // the PC .rodata layout differs.
+    box.x = 0;
+    box.y = 0;
+#else
+    box.x = ((const u16 *)&gWifiSetupKeypadDigitKeySize)[16];
+    box.y = ((const u16 *)&gWifiSetupKeypadDigitKeySize)[17];
+#endif
+    box.width = 28;
+    box.height = 20;
+    gWifiSetupKeypad = WifiSetupHeap_AllocZeroed(sizeof(WifiSetupKeypad), 4);
+    gWifiSetupKeypad->input = WIFI_SETUP_KEYPAD_INPUT_BUSY;
+    gWifiSetupKeypad->cursorKey = 0;
+    gWifiSetupKeypad->canDelete = TRUE;
+    gWifiSetupKeypad->canType = TRUE;
+    gWifiSetupKeypad->canAdvance = TRUE;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_DIGIT_KEYS; i++) {
+        gWifiSetupKeypad->keys[i] = WifiSetupOamTemplate_AllocOam(WIFI_SETUP_SCREEN_MAIN, 54);
+        gWifiSetupKeypad->keys[i]->attr01 = (gWifiSetupKeypad->keys[i]->attr01 & 0xc1fffcff) | 0x200;
+        gWifiSetupKeypad->keys[i]->attr2 = (gWifiSetupKeypad->keys[i]->attr2 & ~0xc00) | 0xc00;
+    }
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_EXTRA_KEYS; i++) {
+        gWifiSetupKeypad->extraKeys[i] = WifiSetupOamTemplate_AllocOam(WIFI_SETUP_SCREEN_MAIN, gWifiSetupKeypadExtraKeyTemplates[i]);
+        gWifiSetupKeypad->extraKeys[i]->attr01 = (gWifiSetupKeypad->extraKeys[i]->attr01 & 0xc1fffcff) | 0x200;
+        gWifiSetupKeypad->extraKeys[i]->attr2 = (gWifiSetupKeypad->extraKeys[i]->attr2 & ~0xc00) | 0xc00;
+    }
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_BUTTONS; i++) {
+        gWifiSetupKeypad->buttons[i] = WifiSetupOamTemplate_AllocBlock(WIFI_SETUP_SCREEN_MAIN, gWifiSetupKeypadButtonTemplates[i], TRUE);
+        WifiSetupOamBlock_SetAffineMode(gWifiSetupKeypad->buttons[i], -1, 512, 0);
+        WifiSetupOamBlock_SetPriority(gWifiSetupKeypad->buttons[i], -1, 3);
+    }
+    i = 0;
+    firstLabel = i;
+    label[1] = i;
+    for (; i < 4; i++) {
+        int j;
+        gWifiSetupKeypad->rows[i] = WifiSetupText_AllocObjCanvas(WIFI_SETUP_SCREEN_MAIN, 12, 4, FALSE, &numObjs, 0);
+        labelIndex = firstLabel;
+        box.x = 0;
+        for (j = 0; j < 3; j++) {
+            label[0] = gWifiSetupKeypadKeyLabels[labelIndex];
+            DrawKeyLabel(gWifiSetupKeypad->rows[i], &box, label);
+            box.x += 32;
+            labelIndex++;
+        }
+        gWifiSetupKeypad->rowBlocks[i] = WifiSetupOamBlock_Alloc(WIFI_SETUP_SCREEN_MAIN, numObjs, FALSE);
+        firstLabel += 3;
+    }
+    gWifiSetupKeypad->cursor = WifiSetupOamTemplate_AllocBlock(WIFI_SETUP_SCREEN_MAIN, 68, TRUE);
+    WifiSetupOamBlock_SetAffineMode(gWifiSetupKeypad->cursor, -1, 512, 0);
+    WifiSetupOamBlock_SetPriority(gWifiSetupKeypad->cursor, -1, 2);
+    gWifiSetupKeypad->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupKeypad_SlideInRow0Task, NULL, 120);
+    WifiSetupKeypad_SetRowY(0, 192);
+}
+
+void WifiSetupKeypad_Close(void) {
+    WifiSetupOamBlock_Free(gWifiSetupKeypad->cursor);
+    WifiSetupTask_SetFunc(gWifiSetupKeypad->task, WifiSetupKeypad_SlideOutButtonsTask);
+}
+
+int WifiSetupKeypad_GetInput(void) {
+    return gWifiSetupKeypad->input;
+}
+
+void WifiSetupKeypad_SetCanDelete(BOOL canDelete) {
+    gWifiSetupKeypad->canDelete = canDelete;
+}
+
+void WifiSetupKeypad_SetCanType(BOOL canType) {
+    gWifiSetupKeypad->canType = canType;
+}
+
+void WifiSetupKeypad_SetCanAdvance(BOOL canAdvance) {
+    gWifiSetupKeypad->canAdvance = canAdvance;
+}
+
+BOOL WifiSetupKeypad_Exists(void) {
+    return gWifiSetupKeypad != NULL;
+}
+
+// Each slide-in task raises one row by 12 pixels per frame until it reaches its place, then starts
+// the next row from the bottom of the screen.
+
+static void WifiSetupKeypad_SlideInRow0Task(WifiSetupTask *task, void *arg) {
+    WifiSetupKeyRowPosition pos;
+    WifiSetupKeyRowPosition *rowPos = &pos;
+    u32 attr = gWifiSetupKeypad->keys[0]->attr01;
+    rowPos->x = (attr & 0x1ff0000) >> 16;
+    rowPos->y = (attr & 0xff) - 12;
+    if (rowPos->y > 76) {
+        WifiSetupKeypad_SetRowY(0, rowPos->y);
+        return;
+    }
+    WifiSetupKeypad_SetRowY(0, 76);
+    WifiSetupKeypad_SetRowY(1, 192);
+    WifiSetupTask_SetFunc(task, WifiSetupKeypad_SlideInRow1Task);
+}
+
+static void WifiSetupKeypad_SlideInRow1Task(WifiSetupTask *task, void *arg) {
+    WifiSetupKeyRowPosition pos;
+    WifiSetupKeyRowPosition *rowPos = &pos;
+    u32 attr = gWifiSetupKeypad->keys[3]->attr01;
+    rowPos->x = (attr & 0x1ff0000) >> 16;
+    rowPos->y = (attr & 0xff) - 12;
+    if (rowPos->y > 99) {
+        WifiSetupKeypad_SetRowY(1, rowPos->y);
+        return;
+    }
+    WifiSetupKeypad_SetRowY(1, 99);
+    WifiSetupKeypad_SetRowY(2, 192);
+    WifiSetupTask_SetFunc(task, WifiSetupKeypad_SlideInRow2Task);
+}
+
+static void WifiSetupKeypad_SlideInRow2Task(WifiSetupTask *task, void *arg) {
+    WifiSetupKeyRowPosition pos;
+    WifiSetupKeyRowPosition *rowPos = &pos;
+    u32 attr = gWifiSetupKeypad->keys[6]->attr01;
+    rowPos->x = (attr & 0x1ff0000) >> 16;
+    rowPos->y = (attr & 0xff) - 12;
+    if (rowPos->y > 122) {
+        WifiSetupKeypad_SetRowY(2, rowPos->y);
+        return;
+    }
+    WifiSetupKeypad_SetRowY(2, 122);
+    WifiSetupKeypad_SetRowY(3, 192);
+    WifiSetupTask_SetFunc(task, WifiSetupKeypad_SlideInRow3Task);
+}
+
+static void WifiSetupKeypad_SlideInRow3Task(WifiSetupTask *task, void *arg) {
+    WifiSetupKeyRowPosition pos;
+    WifiSetupKeyRowPosition *rowPos = &pos;
+    u32 attr = gWifiSetupKeypad->keys[9]->attr01;
+    rowPos->x = (attr & 0x1ff0000) >> 16;
+    rowPos->y = (attr & 0xff) - 12;
+    if (rowPos->y > 145) {
+        WifiSetupKeypad_SetRowY(3, rowPos->y);
+        return;
+    }
+    WifiSetupKeypad_SetRowY(3, 145);
+    WifiSetupKeypad_SetRowY(4, 192);
+    WifiSetupTask_SetFunc(task, WifiSetupKeypad_SlideInButtonsTask);
+}
+
+static void WifiSetupKeypad_SlideInButtonsTask(WifiSetupTask *task, void *arg) {
+    int x, y;
+    WifiSetupOamBlock_GetPosition(gWifiSetupKeypad->buttons[0], 0, &x, &y);
+    y -= 12;
+    if (y > 170) {
+        WifiSetupKeypad_SetRowY(4, y);
+        return;
+    }
+    WifiSetupKeypad_SetRowY(4, 170);
+    WifiSetupKeypad_UpdateCursor();
+    WifiSetupTask_SetFunc(task, WifiSetupKeypad_InputTask);
+}
+
+static void WifiSetupKeypad_InputTask(WifiSetupTask *task, void *arg) {
+    WifiSetupKeypad_HandleTouchPress();
+    WifiSetupKeypad_HandleTouchRelease();
+    WifiSetupKeypad_HandleTouchHold();
+    WifiSetupKeypad_HandleButtons();
+}
+
+static void WifiSetupKeypad_HandleTouchPress(void) {
+    WifiSetupRect rect;
+    int i;
+    const WifiSetupPoint *pos;
+    if (!WifiSetupInput_IsTouchPressed(&gWifiSetupInputPanelRect)) {
+        return;
+    }
+    gWifiSetupKeypad->pressedKey = -1;
+    pos = gWifiSetupKeypadDigitKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_DIGIT_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadDigitKeySize, &rect);
+        if (WifiSetupInput_IsTouchPressed(&rect)) {
+            if (!gWifiSetupKeypad->canType) {
+                WifiSetupSound_Play(9);
+                return;
+            }
+            WifiSetupSound_Play(0);
+            gWifiSetupKeypad->pressedKey = i;
+            return;
+        }
+    }
+    pos = gWifiSetupKeypadExtraKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_EXTRA_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadExtraKeySize, &rect);
+        if (WifiSetupInput_IsTouchPressed(&rect)) {
+            if ((i == 0 && !gWifiSetupKeypad->canDelete) || (i == 1 && !gWifiSetupKeypad->canAdvance)) {
+                WifiSetupSound_Play(9);
+                return;
+            }
+            WifiSetupSound_Play(0);
+            gWifiSetupKeypad->pressedKey = i + WIFI_SETUP_KEYPAD_KEY_DELETE;
+            return;
+        }
+    }
+    pos = gWifiSetupKeypadButtonPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_BUTTONS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadButtonSize, &rect);
+        if (WifiSetupInput_IsTouchPressed(&rect)) {
+            WifiSetupSound_Play(0);
+            gWifiSetupKeypad->pressedKey = i + WIFI_SETUP_KEYPAD_KEY_BUTTON_0;
+            return;
+        }
+    }
+}
+
+// A key is typed when the stylus is lifted on the key it went down on.
+static void WifiSetupKeypad_HandleTouchRelease(void) {
+    WifiSetupRect rect;
+    int i;
+    const WifiSetupPoint *pos;
+    gWifiSetupKeypad->input = WIFI_SETUP_KEYPAD_INPUT_NONE;
+    if (!WifiSetupInput_IsTouchReleased(&gWifiSetupInputPanelRect)) {
+        return;
+    }
+    pos = gWifiSetupKeypadDigitKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_DIGIT_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadDigitKeySize, &rect);
+        if (WifiSetupInput_IsTouchReleased(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i) {
+                return;
+            }
+            gWifiSetupKeypad->input = gWifiSetupKeypadDigitKeys[i];
+            gWifiSetupKeypad->cursorKey = i;
+            WifiSetupKeypad_UpdateCursor();
+            return;
+        }
+    }
+    pos = gWifiSetupKeypadExtraKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_EXTRA_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadExtraKeySize, &rect);
+        if (WifiSetupInput_IsTouchReleased(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i + WIFI_SETUP_KEYPAD_KEY_DELETE) {
+                return;
+            }
+            gWifiSetupKeypad->input = gWifiSetupKeypadExtraKeyCodes[i];
+            gWifiSetupKeypad->cursorKey = i + WIFI_SETUP_KEYPAD_KEY_DELETE;
+            WifiSetupKeypad_UpdateCursor();
+            return;
+        }
+    }
+    pos = gWifiSetupKeypadButtonPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_BUTTONS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadButtonSize, &rect);
+        if (WifiSetupInput_IsTouchReleased(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i + WIFI_SETUP_KEYPAD_KEY_BUTTON_0) {
+                return;
+            }
+            gWifiSetupKeypad->input = gWifiSetupKeypadButtonCodes[i];
+            gWifiSetupKeypad->cursorKey = i + WIFI_SETUP_KEYPAD_KEY_BUTTON_0;
+            WifiSetupKeypad_UpdateCursor();
+            return;
+        }
+    }
+}
+
+// Highlights the key under the stylus while it stays on the key it went down on. Holding the
+// delete key repeats it: after 40 frames, then every 7 frames.
+static void WifiSetupKeypad_HandleTouchHold(void) {
+    WifiSetupRect rect;
+    int i;
+    const WifiSetupPoint *pos;
+    if (!WifiSetupInput_IsTouchHeld(&gWifiSetupInputPanelRect)) {
+        goto cancel;
+    }
+    pos = gWifiSetupKeypadDigitKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_DIGIT_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadDigitKeySize, &rect);
+        if (WifiSetupInput_IsTouchHeld(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i) {
+                goto cancel;
+            }
+            WifiSetupKeypad_SetHoveredKey(i);
+            goto done;
+        }
+    }
+    pos = gWifiSetupKeypadExtraKeyPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_EXTRA_KEYS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadExtraKeySize, &rect);
+        if (WifiSetupInput_IsTouchHeld(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i + WIFI_SETUP_KEYPAD_KEY_DELETE) {
+                goto cancel;
+            }
+            WifiSetupKeypad_SetHoveredKey(i + WIFI_SETUP_KEYPAD_KEY_DELETE);
+            if (i != 0) {
+                goto done;
+            }
+            gWifiSetupKeypad->repeatTimer++;
+            if (gWifiSetupKeypad->repeatTimer < 40) {
+                return;
+            }
+            if (!gWifiSetupKeypad->canDelete) {
+                WifiSetupSound_Play(9);
+                gWifiSetupKeypad->pressedKey = -1;
+                return;
+            }
+            gWifiSetupKeypad->input = WIFI_SETUP_KEYPAD_INPUT_DELETE;
+            gWifiSetupKeypad->repeatTimer -= 7;
+            return;
+        }
+    }
+    pos = gWifiSetupKeypadButtonPositions;
+    for (i = 0; i < WIFI_SETUP_KEYPAD_NUM_BUTTONS; i++, pos++) {
+        WifiSetup_RectFromPosSize(pos, &gWifiSetupKeypadButtonSize, &rect);
+        if (WifiSetupInput_IsTouchHeld(&rect)) {
+            if (gWifiSetupKeypad->pressedKey != i + WIFI_SETUP_KEYPAD_KEY_BUTTON_0) {
+                goto cancel;
+            }
+            WifiSetupKeypad_SetHoveredKey(i + WIFI_SETUP_KEYPAD_KEY_BUTTON_0);
+            goto done;
+        }
+    }
+cancel:
+    WifiSetupKeypad_SetHoveredKey(-1);
+done:
+    gWifiSetupKeypad->repeatTimer = 0;
+}
+
+static void WifiSetupKeypad_SetHoveredKey(int key) {
+    if (key == gWifiSetupKeypad->hoveredKey) {
+        return;
+    }
+    WifiSetupKeypad_SetKeyHighlight(key, TRUE);
+    WifiSetupKeypad_SetKeyHighlight(gWifiSetupKeypad->hoveredKey, FALSE);
+    gWifiSetupKeypad->hoveredKey = key;
+}
+
+// D-pad moves the cursor, A types the key under it, B deletes.
+static void WifiSetupKeypad_HandleButtons(void) {
+    WifiSetupKeypad *keypad;
+    if (WifiSetupInput_IsKeyRepeated(PAD_KEY_LEFT)) {
+        WifiSetupKeypad_MoveCursor(WIFI_SETUP_CURSOR_LEFT);
+    }
+    if (WifiSetupInput_IsKeyRepeated(PAD_KEY_UP)) {
+        WifiSetupKeypad_MoveCursor(WIFI_SETUP_CURSOR_UP);
+    }
+    if (WifiSetupInput_IsKeyRepeated(PAD_KEY_RIGHT)) {
+        WifiSetupKeypad_MoveCursor(WIFI_SETUP_CURSOR_RIGHT);
+    }
+    if (WifiSetupInput_IsKeyRepeated(PAD_KEY_DOWN)) {
+        WifiSetupKeypad_MoveCursor(WIFI_SETUP_CURSOR_DOWN);
+    }
+    if (WifiSetupInput_IsKeyPressed(PAD_BUTTON_A)) {
+        keypad = gWifiSetupKeypad;
+        int key = keypad->cursorKey;
+        if (key < WIFI_SETUP_KEYPAD_NUM_DIGIT_KEYS) {
+            if (keypad->canType) {
+                keypad->input = gWifiSetupKeypadDigitKeys[key];
+            } else {
+                WifiSetupSound_Play(9);
+            }
+            return;
+        } else if (key - WIFI_SETUP_KEYPAD_KEY_DELETE < WIFI_SETUP_KEYPAD_NUM_EXTRA_KEYS) {
+            if ((key - WIFI_SETUP_KEYPAD_KEY_DELETE == 0 && !keypad->canDelete) || (key - WIFI_SETUP_KEYPAD_KEY_DELETE == 1 && !keypad->canAdvance)) {
+                WifiSetupSound_Play(9);
+                return;
+            }
+            keypad->input = gWifiSetupKeypadExtraKeyCodes[key - WIFI_SETUP_KEYPAD_KEY_DELETE];
+            return;
+        } else {
+            keypad->input = gWifiSetupKeypadButtonCodes[key - WIFI_SETUP_KEYPAD_KEY_BUTTON_0];
+        }
+    }
+    if (WifiSetupInput_IsKeyRepeated(PAD_BUTTON_B)) {
+        keypad = gWifiSetupKeypad;
+        if (!keypad->canDelete) {
+            if (keypad->deleteErrorPlayed) {
+                return;
+            }
+            WifiSetupSound_Play(9);
+            gWifiSetupKeypad->deleteErrorPlayed = TRUE;
+            return;
+        }
+        keypad->input = WIFI_SETUP_KEYPAD_INPUT_DELETE;
+        return;
+    }
+    if (WifiSetupInput_IsKeyReleased(PAD_BUTTON_B)) {
+        gWifiSetupKeypad->deleteErrorPlayed = FALSE;
+    }
+}

@@ -1,0 +1,250 @@
+#include "global.h"
+
+#include "constants/sndseq.h"
+
+#include "application/palpad/palpad_internal.h"
+#include "msgdata/msg/msg_0779.h"
+
+#include "ascii_util.h"
+#include "code_entry.h"
+#include "font.h"
+#include "gf_gfx_loader.h"
+#include "heap.h"
+#include "player_data.h"
+#include "sound_playback.h"
+#include "system.h"
+#include "text.h"
+#include "touchscreen.h"
+
+// Screen 2 runs the naming screen (friend name) and the number entry (friend code) as nested
+// applications; screen 3 shows the player's own friend code.
+
+// palettes of the return button: normal, pressed
+typedef struct PalPadButtonPalettes {
+    u8 palettes[2];
+} PalPadButtonPalettes;
+
+extern const struct {
+    u8 unk0;
+    PalPadButtonPalettes returnButton;
+} gPalPadTables;
+
+static NamingScreenArgs *PalPadNaming_CreateNamingArgs(PalPadNaming *naming, PalPadShared *shared, enum HeapID heapId);
+static BOOL PalPadFriendCode_HandleInput(PalPadFriendCode *friendCode, PalPadShared *shared);
+static void PalPadFriendCode_Show(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx);
+static void PalPadFriendCode_Hide(PalPadFriendCode *friendCode, PalPadGfx *gfx);
+static void PalPadFriendCode_HighlightReturn(PalPadFriendCode *friendCode, PalPadGfx *gfx, int highlight);
+
+BOOL PalPadNaming_Main(PalPadNaming *naming, PalPadWork *work, PalPadShared *shared, PalPadGfx *gfx, enum HeapID heapId) {
+    u32 codeEntryParams[4];
+
+    switch (shared->subState) {
+    case PALPAD_NAMING_STATE_REGISTER: // register a friend: name, then friend code
+        naming->namingArgs = PalPadNaming_CreateNamingArgs(naming, shared, heapId);
+        codeEntryParams[0] = 4;
+        codeEntryParams[1] = 4;
+        codeEntryParams[2] = 4;
+        codeEntryParams[3] = 0;
+        naming->codeEntryArgs = CodeEntryArgs_New(heapId, 12, codeEntryParams, Save_PlayerData_GetOptionsAddr(shared->saveData), 0, FALSE);
+        PalPad_TeardownScreens(work);
+        naming->manager = OverlayManager_New(&gOverlayTemplate_NamingScreen, naming->namingArgs, heapId);
+        shared->subState = PALPAD_NAMING_STATE_ENTER_NAME;
+        break;
+    case PALPAD_NAMING_STATE_ENTER_NAME:
+        if (OverlayManager_Run(naming->manager)) {
+            OverlayManager_Delete(naming->manager);
+            if (!naming->namingArgs->noInput) {
+                naming->manager = OverlayManager_New(&gOverlayTemplate_CodeEntry, naming->codeEntryArgs, heapId);
+                shared->subState = PALPAD_NAMING_STATE_ENTER_CODE;
+            } else {
+                PalPadShared_SetNextScreen(shared, PALPAD_SCREEN_MENU, PALPAD_MENU_STATE_FADE_IN);
+                shared->subState = PALPAD_NAMING_STATE_EXIT_REGISTER;
+            }
+        }
+        break;
+    case PALPAD_NAMING_STATE_ENTER_CODE:
+        if (OverlayManager_Run(naming->manager)) {
+            OverlayManager_Delete(naming->manager);
+            PalPadShared_SetNameAndCode(shared, naming->namingArgs->nameInputString, naming->codeEntryArgs->text);
+            PalPadShared_SetNextScreen(shared, PALPAD_SCREEN_MENU, PALPAD_MENU_STATE_RETURN_FROM_NAMING);
+            shared->subState = PALPAD_NAMING_STATE_EXIT_REGISTER;
+        }
+        break;
+    case PALPAD_NAMING_STATE_EXIT_REGISTER:
+        NamingScreen_DeleteArgs(naming->namingArgs);
+        CodeEntryArgs_Delete(naming->codeEntryArgs);
+        PalPad_SetupScreens(work, heapId);
+        return TRUE;
+    case PALPAD_NAMING_STATE_RENAME: // rewrite a friend's name
+        naming->namingArgs = PalPadNaming_CreateNamingArgs(naming, shared, heapId);
+        PalPad_TeardownScreens(work);
+        naming->manager = OverlayManager_New(&gOverlayTemplate_NamingScreen, naming->namingArgs, heapId);
+        shared->subState = PALPAD_NAMING_STATE_ENTER_NEW_NAME;
+        break;
+    case PALPAD_NAMING_STATE_ENTER_NEW_NAME:
+        if (OverlayManager_Run(naming->manager)) {
+            OverlayManager_Delete(naming->manager);
+            if (!naming->namingArgs->noInput) {
+                PalPadShared_SetNextScreen(shared, PALPAD_SCREEN_ROSTER, PALPAD_ROSTER_STATE_SET_NEW_NAME);
+                PalPadShared_SetNameAndCode(shared, naming->namingArgs->nameInputString, NULL);
+                shared->subState = PALPAD_NAMING_STATE_EXIT_RENAME;
+            } else {
+                PalPadShared_SetNextScreen(shared, PALPAD_SCREEN_ROSTER, PALPAD_ROSTER_STATE_RETURN_FROM_NAMING);
+                shared->subState = PALPAD_NAMING_STATE_EXIT_RENAME;
+            }
+        }
+        break;
+    case PALPAD_NAMING_STATE_EXIT_RENAME:
+        NamingScreen_DeleteArgs(naming->namingArgs);
+        PalPad_SetupScreens(work, heapId);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void PalPadNaming_Exit(PalPadNaming *naming, PalPadShared *shared, PalPadGfx *gfx) {
+    PalPadNaming_Teardown(naming, shared, gfx);
+}
+
+void PalPadNaming_Setup(PalPadNaming *naming, PalPadShared *shared, PalPadGfx *gfx, enum HeapID heapId) {
+}
+
+void PalPadNaming_Teardown(PalPadNaming *naming, PalPadShared *shared, PalPadGfx *gfx) {
+}
+
+static NamingScreenArgs *PalPadNaming_CreateNamingArgs(PalPadNaming *naming, PalPadShared *shared, enum HeapID heapId) {
+    Options *options = Save_PlayerData_GetOptionsAddr(shared->saveData);
+    NamingScreenArgs *args = NamingScreen_CreateArgs(heapId, NAME_SCREEN_UNK7, 0, 7, options, NULL);
+
+    if (shared->useInitialName == TRUE) {
+        if (!IsCharCodeBelowDigit0(shared->initialName[0])) {
+            CopyU16ArrayToString(args->nameInputString, shared->initialName);
+        } else {
+            String_SetEmpty(args->nameInputString);
+        }
+        shared->useInitialName = FALSE;
+    }
+    return args;
+}
+
+void PalPadFriendCode_Init(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx, enum HeapID heapId) {
+    PalPadFriendCode_Setup(friendCode, shared, gfx, heapId);
+}
+
+BOOL PalPadFriendCode_Main(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx) {
+    switch (shared->subState) {
+    case PALPAD_FRIEND_CODE_STATE_SHOW:
+        PalPadFriendCode_Show(friendCode, shared, gfx);
+        shared->subState = PALPAD_FRIEND_CODE_STATE_INPUT;
+        break;
+    case PALPAD_FRIEND_CODE_STATE_INPUT:
+        if (PalPadFriendCode_HandleInput(friendCode, shared)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PalPadFriendCode_HighlightReturn(friendCode, gfx, TRUE);
+            friendCode->timer = 4;
+            shared->subState = PALPAD_FRIEND_CODE_STATE_EXIT_DELAY;
+        }
+        break;
+    case PALPAD_FRIEND_CODE_STATE_EXIT_DELAY:
+        friendCode->timer--;
+        if (friendCode->timer <= 0) {
+            PalPadFriendCode_HighlightReturn(friendCode, gfx, FALSE);
+            PalPadShared_SetNextScreen(shared, PALPAD_SCREEN_MENU, PALPAD_MENU_STATE_SHOW);
+            PalPadFriendCode_Hide(friendCode, gfx);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+void PalPadFriendCode_Exit(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx) {
+    PalPadFriendCode_Teardown(friendCode, shared, gfx);
+}
+
+static BOOL PalPadFriendCode_HandleInput(PalPadFriendCode *friendCode, PalPadShared *shared) {
+    if (TouchscreenHitbox_FindHitboxAtTouchNew(gPalPadFriendCodeHitboxes) == 0) {
+        shared->inputState = TRUE;
+        return TRUE;
+    }
+    PalPadShared_ResetInputStateOnKey(&shared->inputState);
+    if (gSystem.newKeys & (PAD_BUTTON_A | PAD_BUTTON_B)) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void PalPadFriendCode_Setup(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx, enum HeapID heapId) {
+    String *text, *buffer;
+    u64 ownCode;
+    u32 x;
+
+    InitWindow(&friendCode->windows[0]);
+    AddWindowParameterized(gfx->bgConfig, &friendCode->windows[0], GF_BG_LYR_MAIN_3, 4, 11, 24, 8, 11, 1);
+    InitWindow(&friendCode->windows[1]);
+    AddWindowParameterized(gfx->bgConfig, &friendCode->windows[1], GF_BG_LYR_MAIN_3, 9, 6, 14, 2, 11, 193);
+    InitWindow(&friendCode->windows[2]);
+    AddWindowParameterized(gfx->bgConfig, &friendCode->windows[2], GF_BG_LYR_MAIN_3, 21, 21, 9, 2, 11, 221);
+    FillWindowPixelBuffer(&friendCode->windows[0], 0);
+    FillWindowPixelBuffer(&friendCode->windows[1], 0);
+    FillWindowPixelBuffer(&friendCode->windows[2], 0);
+    text = String_New(0x80, heapId);
+    buffer = String_New(0x80, heapId);
+    ownCode = DWC_CreateFriendKey(FriendRoster_GetUserData(Save_FriendRoster_Get(shared->saveData)));
+    if (ownCode) {
+        ReadMsgDataIntoString(gfx->msgData, msg_0779_00053, text);
+        x = (192 - FontID_String_GetWidthMultiline(0, text, 0)) / 2;
+        AddTextPrinterParameterizedWithColor(&friendCode->windows[0], 0, text, x, 0, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(1, 2, 0), NULL);
+        PalPadGfx_BufferFriendCode(gfx, ownCode);
+        ReadMsgDataIntoString(gfx->msgData, msg_0779_00052, buffer);
+        StringExpandPlaceholders(gfx->msgFormat, text, buffer);
+        AddTextPrinterParameterizedWithColor(&friendCode->windows[1], 0, text, 0, 0, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(15, 2, 0), NULL);
+    } else { // no friend code yet (never connected)
+        ReadMsgDataIntoString(gfx->msgData, msg_0779_00054, text);
+        x = (192 - FontID_String_GetWidthMultiline(0, text, 0)) / 2;
+        AddTextPrinterParameterizedWithColor(&friendCode->windows[0], 0, text, x, 0, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(1, 2, 0), NULL);
+    }
+    ReadMsgDataIntoString(gfx->msgData, msg_0779_00051, text);
+    AddTextPrinterParameterizedWithColor(&friendCode->windows[2], 4, text, 0, 0, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(1, 15, 0), NULL);
+    String_Delete(text);
+    String_Delete(buffer);
+    friendCode->screenFile = GfGfxLoader_GetScrnDataFromOpenNarc(gfx->narc, 14, TRUE, &friendCode->screen, heapId);
+}
+
+void PalPadFriendCode_Teardown(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx) {
+    RemoveWindow(&friendCode->windows[0]);
+    RemoveWindow(&friendCode->windows[1]);
+    RemoveWindow(&friendCode->windows[2]);
+    Heap_Free(friendCode->screenFile);
+}
+
+static void PalPadFriendCode_Show(PalPadFriendCode *friendCode, PalPadShared *shared, PalPadGfx *gfx) {
+    NNSG2dScreenData *screen;
+
+    BufferPlayersName(gfx->msgFormat, 0, Save_PlayerData_GetProfile(shared->saveData));
+    PalPadGfx_PrintTitle(gfx, &gfx->titleWindow, msg_0779_00050);
+    screen = friendCode->screen;
+    LoadRectToBgTilemapRect(gfx->bgConfig, GF_BG_LYR_MAIN_2, screen->rawData, 0, 0, screen->screenWidth >> 3, screen->screenHeight >> 3);
+    ScheduleBgTilemapBufferTransfer(gfx->bgConfig, GF_BG_LYR_MAIN_2);
+    ScheduleWindowCopyToVram(&friendCode->windows[0]);
+    ScheduleWindowCopyToVram(&friendCode->windows[1]);
+    ScheduleWindowCopyToVram(&friendCode->windows[2]);
+}
+
+static void PalPadFriendCode_Hide(PalPadFriendCode *friendCode, PalPadGfx *gfx) {
+    PalPadGfx_ClearTitle(gfx);
+    FillBgTilemapRect(gfx->bgConfig, GF_BG_LYR_MAIN_2, 0, 0, 0, 32, 24, 0);
+    ScheduleBgTilemapBufferTransfer(gfx->bgConfig, GF_BG_LYR_MAIN_2);
+    ClearWindowTilemapAndScheduleTransfer(&friendCode->windows[0]);
+    ClearWindowTilemapAndScheduleTransfer(&friendCode->windows[1]);
+    ClearWindowTilemapAndScheduleTransfer(&friendCode->windows[2]);
+    FillBgTilemapRect(gfx->bgConfig, GF_BG_LYR_MAIN_3, 0, 0, 0, 32, 24, 0);
+    ScheduleBgTilemapBufferTransfer(gfx->bgConfig, GF_BG_LYR_MAIN_3);
+}
+
+static void PalPadFriendCode_HighlightReturn(PalPadFriendCode *friendCode, PalPadGfx *gfx, int highlight) {
+    PalPadButtonPalettes button = gPalPadTables.returnButton;
+
+    BgTilemapRectChangePalette(gfx->bgConfig, GF_BG_LYR_MAIN_2, 17, 20, 14, 4, button.palettes[highlight]);
+    ScheduleBgTilemapBufferTransfer(gfx->bgConfig, GF_BG_LYR_MAIN_2);
+}

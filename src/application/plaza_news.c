@@ -1,0 +1,1133 @@
+#include "application/plaza_news.h"
+
+#include "global.h"
+
+#include "constants/sndseq.h"
+
+#include "msgdata/msg.naix"
+
+#include "bg_window.h"
+#include "filesystem.h"
+#include "font.h"
+#include "gf_gfx_loader.h"
+#include "gf_gfx_planes.h"
+#include "heap.h"
+#include "msgdata.h"
+#include "oam_manager.h"
+#include "obj_char_transfer.h"
+#include "obj_pltt_transfer.h"
+#include "palette.h"
+#include "pm_string.h"
+#include "screen_fade.h"
+#include "sound_playback.h"
+#include "sprite.h"
+#include "sprite_resource.h"
+#include "sprite_resource_header.h"
+#include "system.h"
+#include "text.h"
+#include "vram_transfer_manager.h"
+#include "wireless_status_icon.h"
+#include "wifi_plaza/wifi_plaza_internal.h"
+
+enum PlazaNewsState {
+    PLAZA_NEWS_STATE_FADE_IN,
+    PLAZA_NEWS_STATE_WAIT_FADE_IN,
+    PLAZA_NEWS_STATE_SHOW_NEWS,
+    PLAZA_NEWS_STATE_FADE_OUT,
+    PLAZA_NEWS_STATE_WAIT_FADE_OUT,
+};
+
+typedef struct PlazaNewsGraphics {
+    BgConfig *bgConfig;
+    SpriteList *spriteList;
+    G2dRenderer renderer;
+    GF_2DGfxResMan *resourceManagers[4];
+    NARC *narc;
+} PlazaNewsGraphics;
+
+// Screen data the clock gauge and the people grid copy their cells from.
+typedef struct PlazaNewsTileset {
+    void *rawData;
+    NNSG2dScreenData *screenData;
+} PlazaNewsTileset;
+
+// TIME panel: a gauge of 40 cells (10 columns, 4 rows) counting down the plaza time.
+typedef struct PlazaNewsClock {
+    WiFiPlazaTime time;
+    u8 isWaiting;
+    u8 needsRedraw;
+    u16 blinkTimer;
+    u32 secondsPerCell;
+} PlazaNewsClock;
+
+// PLAZA PEOPLE panel: a grid of 5x4 visitor icons.
+typedef struct PlazaNewsPeople {
+    s16 frame;
+    u16 state;
+} PlazaNewsPeople;
+
+// One scrolling line of the LATEST NEWS HEADLINES panel.
+typedef struct PlazaNewsTicker {
+    u8 active;
+    u8 paletteNum;
+    u16 position;
+    u16 duration;
+    u16 width;
+    String *text;
+    Window bitmap;
+    u8 nameColors[4];
+} PlazaNewsTicker;
+
+typedef struct PlazaNewsHeadlines {
+    PlazaNewsTicker tickers[3];
+    Window windows[3];
+    String *string;
+    void *paletteFile;
+    NNSG2dPaletteData *palette;
+} PlazaNewsHeadlines;
+
+// Palette flash (with a sound effect) played on a panel title when its contents change.
+typedef struct PlazaNewsFlash {
+    u16 active;
+    u16 timer;
+    u16 color;
+    u16 paletteOffset;
+    u32 sound;
+} PlazaNewsFlash;
+
+typedef struct PlazaNewsTitles {
+    Window windows[4];
+    PlazaNewsFlash flashes[4];
+} PlazaNewsTitles;
+
+typedef struct PlazaNewsTitleTemplate {
+    u8 left;
+    u8 top;
+    u8 width;
+    u8 height;
+    u16 baseTile;
+    u8 palette;
+    u8 x;
+    u8 y;
+    u8 alignment;
+    u8 padding_0A[2];
+    u32 color;
+} PlazaNewsTitleTemplate;
+
+typedef struct PlazaNewsWork {
+    WiFiPlazaNews *news;
+    const WiFiPlazaTime *time;
+    PlazaNewsGraphics graphics;
+    PlazaNewsTileset tileset;
+    PlazaNewsClock clock;
+    PlazaNewsPeople people;
+    PlazaNewsHeadlines headlines;
+    PlazaNewsTitles titles;
+} PlazaNewsWork;
+
+static void PlazaNews_VBlankCallback(void *data);
+static void PlazaNews_Update(PlazaNewsWork *work, WiFiPlazaWork *lobby);
+static void PlazaNewsGraphics_Init(PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsGraphics_Exit(PlazaNewsGraphics *graphics);
+static void PlazaNewsGraphics_DrawSprites(PlazaNewsGraphics *graphics);
+static void PlazaNewsGraphics_VBlank(PlazaNewsGraphics *graphics);
+static void PlazaNewsGraphics_InitBgs(PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsGraphics_FreeBgs(PlazaNewsGraphics *graphics);
+static void PlazaNewsGraphics_InitSprites(PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsGraphics_FreeSprites(PlazaNewsGraphics *graphics);
+static void PlazaNewsTileset_Load(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsTileset_Free(PlazaNewsTileset *tileset);
+static void PlazaNewsClock_DrawCell(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, u32 tile, u8 col, u8 row);
+static void PlazaNewsPeople_DrawIcon(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, u32 col, u32 row, u32 tile, u32 altRow, u32 usePalette3, u32 altPage, u32 usePalette4);
+static void PlazaNewsClock_Init(PlazaNewsClock *clock, PlazaNewsGraphics *graphics, PlazaNewsTileset *tileset, WiFiPlazaNews *news, const WiFiPlazaTime *endTime, WiFiPlazaWork *lobby, enum HeapID heapID);
+static void PlazaNewsClock_Free(PlazaNewsClock *clock);
+static BOOL PlazaNewsClock_UpdateTime(PlazaNewsClock *clock, WiFiPlazaNews *news, const WiFiPlazaTime *endTime);
+static void PlazaNewsClock_Draw(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics);
+static void PlazaNewsClock_DrawWaiting(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics);
+static void PlazaNewsClock_DrawGauge(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics);
+static void PlazaNewsPeople_Init(PlazaNewsPeople *people, PlazaNewsGraphics *graphics, PlazaNewsTileset *tileset, WiFiPlazaNews *news, WiFiPlazaWork *lobby, enum HeapID heapID);
+static void PlazaNewsPeople_Free(PlazaNewsPeople *people);
+static BOOL PlazaNewsPeople_UpdateState(PlazaNewsPeople *people, WiFiPlazaNews *news);
+static void PlazaNewsPeople_Draw(PlazaNewsPeople *people, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby);
+static void PlazaNewsPeople_DrawGrid(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, int mode);
+static void PlazaNewsPeople_BlinkMode2(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, u32 frame);
+static void PlazaNewsPeople_BlinkMode1(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, u32 frame);
+static void PlazaNewsHeadlines_GetNameColors(u8 *colors, WiFiPlazaNews *news, int type, WiFiPlazaWork *lobby);
+static void PlazaNewsHeadlines_LoadNameColors(const u8 *colors, NNSG2dPaletteData *palette, int paletteNum);
+static void PlazaNewsHeadlines_Init(PlazaNewsHeadlines *headlines, PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsHeadlines_Free(PlazaNewsHeadlines *headlines);
+static BOOL PlazaNewsHeadlines_Update(PlazaNewsHeadlines *headlines, WiFiPlazaNews *news, WiFiPlazaWork *lobby, enum HeapID heapID);
+static void PlazaNewsHeadlines_Draw(PlazaNewsHeadlines *headlines);
+static void PlazaNewsTicker_Init(PlazaNewsTicker *ticker, PlazaNewsGraphics *graphics, int row, enum HeapID heapID);
+static void PlazaNewsTicker_Free(PlazaNewsTicker *ticker);
+static void PlazaNewsTicker_SetText(PlazaNewsTicker *ticker, String *text, u32 duration, u8 *nameColors, NNSG2dPaletteData *palette);
+static void PlazaNewsTicker_Stop(PlazaNewsTicker *ticker);
+static BOOL PlazaNewsTicker_Advance(PlazaNewsTicker *ticker);
+static void PlazaNewsTicker_Draw(PlazaNewsTicker *ticker, Window *window);
+static void PlazaNewsTitles_Init(PlazaNewsTitles *titles, PlazaNewsGraphics *graphics, enum HeapID heapID);
+static void PlazaNewsTitles_Free(PlazaNewsTitles *titles);
+static void PlazaNewsTitles_Update(PlazaNewsTitles *titles);
+static void PlazaNewsTitles_StartFlash(PlazaNewsTitles *titles, u32 index);
+static void PlazaNewsFlash_Init(PlazaNewsFlash *flash, u16 paletteOffset, u32 sound);
+static void PlazaNewsFlash_Clear(PlazaNewsFlash *flash);
+static void PlazaNewsFlash_Start(PlazaNewsFlash *flash);
+static void PlazaNewsFlash_Update(PlazaNewsFlash *flash);
+
+static const u8 sPlazaNewsHeadlineRowTops[3] = { 15, 18, 21 };
+
+static const u32 sPlazaNewsHeadlineRowDurations[3] = { 336, 288, 240 };
+
+static const int sPlazaNewsClockBlinkTiles[4] = { 1, 4, 5, 6 };
+
+static const GraphicsModes sPlazaNewsGraphicsModes = {
+    .dispMode = GX_DISPMODE_GRAPHICS,
+    .bgMode = GX_BGMODE_0,
+    .subMode = GX_BGMODE_0,
+    ._2d3dMode = GX_BG0_AS_2D,
+};
+
+static const ObjCharTransferTemplate sPlazaNewsObjCharTransfer = {
+    .maxTasks = 32,
+    .sizeMain = 0x18000,
+    .sizeSub = 0x4000,
+    .heapID = HEAP_ID_114,
+};
+
+static const u32 sPlazaNewsBgIds[5] = { GF_BG_LYR_MAIN_0, GF_BG_LYR_MAIN_1, GF_BG_LYR_MAIN_2, GF_BG_LYR_MAIN_3, GF_BG_LYR_SUB_0 };
+
+static const GraphicsBanks sPlazaNewsBanks = {
+    .bg = GX_VRAM_BG_256_AB,
+    .bgextpltt = GX_VRAM_BGEXTPLTT_NONE,
+    .subbg = GX_VRAM_SUB_BG_128_C,
+    .subbgextpltt = GX_VRAM_SUB_BGEXTPLTT_NONE,
+    .obj = GX_VRAM_OBJ_96_EFG,
+    .objextpltt = GX_VRAM_OBJEXTPLTT_NONE,
+    .subobj = GX_VRAM_SUB_OBJ_16_I,
+    .subobjextpltt = GX_VRAM_SUB_OBJEXTPLTT_NONE,
+    .tex = GX_VRAM_TEX_NONE,
+    .texpltt = GX_VRAM_TEXPLTT_NONE,
+};
+
+static const PlazaNewsTitleTemplate sPlazaNewsTitleTemplates[4] = {
+    {
+     .left = 6,
+     .top = 0,
+     .width = 20,
+     .height = 8,
+     .baseTile = 1,
+     .palette = 10,
+     .x = 80,
+     .y = 6,
+     .alignment = 1,
+     .color = MAKE_TEXT_COLOR(3, 4, 0),
+     },
+    {
+     .left = 0,
+     .top = 6,
+     .width = 6,
+     .height = 3,
+     .baseTile = 0xA1,
+     .palette = 7,
+     .x = 16,
+     .y = 4,
+     .alignment = 1,
+     .color = MAKE_TEXT_COLOR(13,                     14,                0),
+     },
+    {
+     .left = 15,
+     .top = 6,
+     .width = 6,
+     .height = 5,
+     .baseTile = 0xB3,
+     .palette = 7,
+     .x = 24,
+     .y = 4,
+     .alignment = 1,
+     .color = MAKE_TEXT_COLOR(13,               14,                       0),
+     },
+    {
+     .left = 4,
+     .top = 12,
+     .width = 18,
+     .height = 3,
+     .baseTile = 0xD1,
+     .palette = 7,
+     .x = 4,
+     .y = 4,
+     .alignment = 0,
+     .color = MAKE_TEXT_COLOR(13,                14,              0),
+     },
+};
+
+static const BgTemplate sPlazaNewsBgTemplates[5] = {
+    {
+     .x = 0,
+     .y = 0,
+     .bufferSize = GF_BG_BUF_SIZE_256x256_4BPP,
+     .baseTile = 0,
+     .size = GF_BG_SCR_SIZE_256x256,
+     .colorMode = GX_BG_COLORMODE_16,
+     .screenBase = GX_BG_SCRBASE_0xe800,
+     .charBase = GX_BG_CHARBASE_0x00000,
+     .bgExtPltt = GX_BG_EXTPLTT_01,
+     .priority = 0,
+     .areaOver = GX_BG_AREAOVER_XLU,
+     .mosaic = FALSE,
+     },
+    {
+     .x = 0,
+     .y = 0,
+     .bufferSize = GF_BG_BUF_SIZE_256x256_4BPP,
+     .baseTile = 0,
+     .size = GF_BG_SCR_SIZE_256x256,
+     .colorMode = GX_BG_COLORMODE_16,
+     .screenBase = GX_BG_SCRBASE_0xe000,
+     .charBase = GX_BG_CHARBASE_0x10000,
+     .bgExtPltt = GX_BG_EXTPLTT_01,
+     .priority = 1,
+     .areaOver = GX_BG_AREAOVER_XLU,
+     .mosaic = FALSE,
+     },
+    {
+     .x = 0,
+     .y = 0,
+     .bufferSize = GF_BG_BUF_SIZE_256x256_4BPP,
+     .baseTile = 0,
+     .size = GF_BG_SCR_SIZE_256x256,
+     .colorMode = GX_BG_COLORMODE_16,
+     .screenBase = GX_BG_SCRBASE_0xd800,
+     .charBase = GX_BG_CHARBASE_0x10000,
+     .bgExtPltt = GX_BG_EXTPLTT_01,
+     .priority = 3,
+     .areaOver = GX_BG_AREAOVER_XLU,
+     .mosaic = FALSE,
+     },
+    {
+     .x = 0,
+     .y = 0,
+     .bufferSize = GF_BG_BUF_SIZE_256x256_4BPP,
+     .baseTile = 0,
+     .size = GF_BG_SCR_SIZE_256x256,
+     .colorMode = GX_BG_COLORMODE_16,
+     .screenBase = GX_BG_SCRBASE_0xd000,
+     .charBase = GX_BG_CHARBASE_0x10000,
+     .bgExtPltt = GX_BG_EXTPLTT_01,
+     .priority = 2,
+     .areaOver = GX_BG_AREAOVER_XLU,
+     .mosaic = FALSE,
+     },
+    {
+     .x = 0,
+     .y = 0,
+     .bufferSize = GF_BG_BUF_SIZE_256x256_4BPP,
+     .baseTile = 0,
+     .size = GF_BG_SCR_SIZE_256x256,
+     .colorMode = GX_BG_COLORMODE_16,
+     .screenBase = GX_BG_SCRBASE_0xe800,
+     .charBase = GX_BG_CHARBASE_0x00000,
+     .bgExtPltt = GX_BG_EXTPLTT_01,
+     .priority = 0,
+     .areaOver = GX_BG_AREAOVER_XLU,
+     .mosaic = FALSE,
+     },
+};
+
+static u16 sPlazaNewsTitlePaletteOffsets[4] = { 0, 0x18, 0x1A, 0x1E };
+
+static u32 sPlazaNewsTitleSEs[6] = { 0, SEQ_SE_DP_DECIDE, SEQ_SE_DP_BUTTON9, SEQ_SE_DP_PIRORIRO2, 0, 0 };
+
+BOOL PlazaNews_Init(OverlayManager *man, int *state) {
+    PlazaNewsArgs *args;
+    PlazaNewsWork *work;
+#pragma unused(state)
+    args = OverlayManager_GetArgs(man);
+    Heap_Create(HEAP_ID_3, HEAP_ID_114, 5 << 16);
+    work = OverlayManager_CreateAndGetData(man, sizeof(PlazaNewsWork), HEAP_ID_114);
+    memset(work, 0, sizeof(PlazaNewsWork));
+    work->news = args->news;
+    work->time = args->time;
+    PlazaNewsGraphics_Init(&work->graphics, HEAP_ID_114);
+    PlazaNewsTileset_Load(&work->tileset, &work->graphics, HEAP_ID_114);
+    PlazaNewsClock_Init(&work->clock, &work->graphics, &work->tileset, work->news, work->time, args->lobby, HEAP_ID_114);
+    PlazaNewsPeople_Init(&work->people, &work->graphics, &work->tileset, work->news, args->lobby, HEAP_ID_114);
+    PlazaNewsHeadlines_Init(&work->headlines, &work->graphics, HEAP_ID_114);
+    PlazaNewsTitles_Init(&work->titles, &work->graphics, HEAP_ID_114);
+    Main_SetVBlankIntrCB(PlazaNews_VBlankCallback, work);
+    HBlankInterruptDisable();
+    return TRUE;
+}
+
+BOOL PlazaNews_Main(OverlayManager *man, int *state) {
+    PlazaNewsWork *work = OverlayManager_GetData(man);
+    PlazaNewsArgs *args = OverlayManager_GetArgs(man);
+    switch (*state) {
+    case PLAZA_NEWS_STATE_FADE_IN:
+        BeginNormalPaletteFade(FADE_BOTH_SCREENS, FADE_TYPE_BRIGHTNESS_IN, FADE_TYPE_BRIGHTNESS_IN, RGB_BLACK, 6, 1, HEAP_ID_114);
+        WiFiPlazaWork_SetLowVolume(args->lobby, 1);
+        (*state)++;
+        break;
+    case PLAZA_NEWS_STATE_WAIT_FADE_IN:
+        if (IsPaletteFadeFinished() == TRUE) {
+            (*state)++;
+        }
+        break;
+    case PLAZA_NEWS_STATE_SHOW_NEWS:
+        if ((gSystem.newKeys & PAD_BUTTON_B) || WiFiPlazaWork_IsClosing(args->lobby) == 1 || WiFiPlaza_HasConnectionFailed() == 1) {
+            if (WiFiPlazaWork_IsClosing(args->lobby) == 1) {
+                WiFiPlazaWork_SetAppQuitForClosing(args->lobby);
+            }
+            *state = PLAZA_NEWS_STATE_FADE_OUT;
+        } else {
+            if (PlazaNewsClock_UpdateTime(&work->clock, work->news, work->time) == TRUE) {
+                PlazaNewsTitles_StartFlash(&work->titles, 1);
+            }
+            if (PlazaNewsPeople_UpdateState(&work->people, work->news) == TRUE) {
+                PlazaNewsTitles_StartFlash(&work->titles, 2);
+            }
+            if (PlazaNewsHeadlines_Update(&work->headlines, work->news, args->lobby, HEAP_ID_114) == TRUE) {
+                PlazaNewsTitles_StartFlash(&work->titles, 3);
+            }
+        }
+        break;
+    case PLAZA_NEWS_STATE_FADE_OUT:
+        BeginNormalPaletteFade(FADE_BOTH_SCREENS, FADE_TYPE_BRIGHTNESS_OUT, FADE_TYPE_BRIGHTNESS_OUT, RGB_BLACK, 6, 1, HEAP_ID_114);
+        (*state)++;
+        break;
+    case PLAZA_NEWS_STATE_WAIT_FADE_OUT:
+        if (IsPaletteFadeFinished() == TRUE) {
+            return TRUE;
+        }
+        break;
+    }
+    PlazaNews_Update(work, args->lobby);
+    return FALSE;
+}
+
+BOOL PlazaNews_Exit(OverlayManager *man, int *state) {
+    PlazaNewsWork *work;
+#pragma unused(state)
+    work = OverlayManager_GetData(man);
+    OverlayManager_GetArgs(man);
+    PlazaNewsTitles_Free(&work->titles);
+    PlazaNewsClock_Free(&work->clock);
+    PlazaNewsPeople_Free(&work->people);
+    PlazaNewsHeadlines_Free(&work->headlines);
+    PlazaNewsTileset_Free(&work->tileset);
+    Main_SetVBlankIntrCB(NULL, NULL);
+    HBlankInterruptDisable();
+    PlazaNewsGraphics_Exit(&work->graphics);
+    OverlayManager_FreeData(man);
+    Heap_Destroy(HEAP_ID_114);
+    return TRUE;
+}
+
+static void PlazaNews_VBlankCallback(void *data) {
+    PlazaNewsWork *work = data;
+    PlazaNewsGraphics_VBlank(&work->graphics);
+}
+
+static void PlazaNews_Update(PlazaNewsWork *work, WiFiPlazaWork *lobby) {
+    PlazaNewsClock_Draw(&work->clock, &work->tileset, &work->graphics);
+    PlazaNewsPeople_Draw(&work->people, &work->tileset, &work->graphics, work->news, lobby);
+    PlazaNewsHeadlines_Draw(&work->headlines);
+    PlazaNewsTitles_Update(&work->titles);
+    PlazaNewsGraphics_DrawSprites(&work->graphics);
+}
+
+static void PlazaNewsGraphics_Init(PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    graphics->narc = NARC_New(NARC_a_1_9_6, heapID);
+    GF_CreateVramTransferManager(0x30, heapID);
+    GfGfx_SetBanks(&sPlazaNewsBanks);
+    PlazaNewsGraphics_InitBgs(graphics, heapID);
+    PlazaNewsGraphics_InitSprites(graphics, heapID);
+}
+
+static void PlazaNewsGraphics_Exit(PlazaNewsGraphics *graphics) {
+    NARC_Delete(graphics->narc);
+    GF_DestroyVramTransferManager();
+    PlazaNewsGraphics_FreeBgs(graphics);
+    PlazaNewsGraphics_FreeSprites(graphics);
+}
+
+static void PlazaNewsGraphics_DrawSprites(PlazaNewsGraphics *graphics) {
+    SpriteList_RenderAndAnimateSprites(graphics->spriteList);
+}
+
+static void PlazaNewsGraphics_VBlank(PlazaNewsGraphics *graphics) {
+    DoScheduledBgGpuUpdates(graphics->bgConfig);
+    OamManager_ApplyAndResetBuffers();
+    GF_RunVramTransferTasks();
+}
+
+static void PlazaNewsGraphics_InitBgs(PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    int i;
+
+    SetBothScreensModesAndDisable(&sPlazaNewsGraphicsModes);
+    graphics->bgConfig = BgConfig_Alloc(heapID);
+    gSystem.screensFlipped = FALSE;
+    GfGfx_SwapDisplay();
+    for (i = 0; i < 5; i++) {
+        InitBgFromTemplate(graphics->bgConfig, sPlazaNewsBgIds[i], &sPlazaNewsBgTemplates[i], GF_BG_TYPE_TEXT);
+        BG_ClearCharDataRange(sPlazaNewsBgIds[i], 0x20, 0, heapID);
+        BgClearTilemapBufferAndCommit(graphics->bgConfig, sPlazaNewsBgIds[i]);
+    }
+    GfGfxLoader_GXLoadPalFromOpenNarc(graphics->narc, 0, GF_PAL_LOCATION_MAIN_BG, GF_PAL_SLOT_0_OFFSET, 0, heapID);
+    LoadFontPal1(GF_PAL_LOCATION_MAIN_BG, GF_PAL_SLOT_10_OFFSET, heapID);
+    GfGfxLoader_LoadCharDataFromOpenNarc(graphics->narc, 1, graphics->bgConfig, GF_BG_LYR_MAIN_1, 0, 0, FALSE, heapID);
+    GfGfxLoader_LoadScrnDataFromOpenNarc(graphics->narc, 3, graphics->bgConfig, GF_BG_LYR_MAIN_1, 0, 0, FALSE, heapID);
+    GfGfxLoader_LoadScrnDataFromOpenNarc(graphics->narc, 4, graphics->bgConfig, GF_BG_LYR_MAIN_2, 0, 0, FALSE, heapID);
+    GfGfxLoader_GXLoadPalFromOpenNarc(graphics->narc, 0, GF_PAL_LOCATION_SUB_BG, GF_PAL_SLOT_0_OFFSET, 0, heapID);
+    GfGfxLoader_LoadCharDataFromOpenNarc(graphics->narc, 2, graphics->bgConfig, GF_BG_LYR_SUB_0, 0, 0, FALSE, heapID);
+    GfGfxLoader_LoadScrnDataFromOpenNarc(graphics->narc, 6, graphics->bgConfig, GF_BG_LYR_SUB_0, 0, 0, FALSE, heapID);
+}
+
+static void PlazaNewsGraphics_FreeBgs(PlazaNewsGraphics *graphics) {
+    int i;
+
+    for (i = 0; i < 5; i++) {
+        FreeBgTilemapBuffer(graphics->bgConfig, sPlazaNewsBgIds[i]);
+    }
+    Heap_Free(graphics->bgConfig);
+    gSystem.screensFlipped = FALSE;
+    GfGfx_SwapDisplay();
+}
+
+static void PlazaNewsGraphics_InitSprites(PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    int i;
+    u32 mode = 0x00200010;
+
+    NNS_G2dInitOamManagerModule();
+    OamManager_Create(0, 0x7E, 0, 0x1F, 0, 0x7E, 0, 0x1F, heapID);
+    ObjCharTransfer_InitEx(&sPlazaNewsObjCharTransfer, (GXOBJVRamModeChar)mode, (GXOBJVRamModeChar)(u8)mode);
+    ObjPlttTransfer_Init(0x20, heapID);
+    ObjCharTransfer_ClearBuffers();
+    ObjPlttTransfer_Reset();
+    G2dRenderer_SetObjCharTransferReservedRegion(NNS_G2D_VRAM_TYPE_2DMAIN, (GXOBJVRamModeChar)mode);
+    G2dRenderer_SetPlttTransferReservedRegion(NNS_G2D_VRAM_TYPE_2DMAIN);
+    graphics->spriteList = G2dRenderer_Init(0x20, &graphics->renderer, heapID);
+    G2dRenderer_SetSubSurfaceCoords(&graphics->renderer, 0, 1 << 20);
+    for (i = 0; i < 4; i++) {
+        graphics->resourceManagers[i] = Create2DGfxResObjMan(0x20, (GfGfxResType)i, heapID);
+    }
+    WirelessStatusIcon_Create();
+    GfGfx_EngineATogglePlanes(GX_PLANEMASK_OBJ, TRUE);
+    GfGfx_EngineBTogglePlanes(GX_PLANEMASK_OBJ, TRUE);
+}
+
+static void PlazaNewsGraphics_FreeSprites(PlazaNewsGraphics *graphics) {
+    int i;
+
+    SpriteList_Delete(graphics->spriteList);
+    for (i = 0; i < 4; i++) {
+        Destroy2DGfxResObjMan(graphics->resourceManagers[i]);
+    }
+    ObjCharTransfer_Destroy();
+    ObjPlttTransfer_Destroy();
+    OamManager_Free();
+}
+
+static void PlazaNewsTileset_Load(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    tileset->rawData = GfGfxLoader_GetScrnDataFromOpenNarc(graphics->narc, 5, FALSE, &tileset->screenData, heapID);
+}
+
+static void PlazaNewsTileset_Free(PlazaNewsTileset *tileset) {
+    Heap_Free(tileset->rawData);
+}
+
+static void PlazaNewsClock_DrawCell(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, u32 tile, u8 col, u8 row) {
+    NNSG2dScreenData *screen = tileset->screenData;
+    CopyToBgTilemapRect(graphics->bgConfig, GF_BG_LYR_MAIN_3, col + 5, row * 2 + 4, 1, 2, screen->rawData, tile + 6, 0, screen->screenWidth >> 3, screen->screenHeight >> 3);
+    ScheduleBgTilemapBufferTransfer(graphics->bgConfig, GF_BG_LYR_MAIN_3);
+}
+
+static void PlazaNewsPeople_DrawIcon(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, u32 col, u32 row, u32 tile, u32 altRow, u32 usePalette3, u32 altPage, u32 usePalette4) {
+    NNSG2dScreenData *screen;
+    u32 srcX = tile % 3;
+    u32 srcY = tile / 3;
+    u32 y;
+    u32 x;
+    if (altPage != 0) {
+        srcY += 2;
+    }
+    if (altRow == 1) {
+        srcY++;
+    }
+    screen = tileset->screenData;
+    y = row * 2 + 4;
+    x = col * 2 + 0x15;
+    CopyToBgTilemapRect(graphics->bgConfig, GF_BG_LYR_MAIN_3, x, y, 2, 2, screen->rawData, srcX * 2, srcY * 2, screen->screenWidth >> 3, screen->screenHeight >> 3);
+    if (usePalette4 != 0) {
+        BgTilemapRectChangePalette(graphics->bgConfig, GF_BG_LYR_MAIN_3, x, y, 2, 2, 4);
+    } else if (usePalette3 != 0) {
+        BgTilemapRectChangePalette(graphics->bgConfig, GF_BG_LYR_MAIN_3, x, y, 2, 2, 3);
+    }
+    ScheduleBgTilemapBufferTransfer(graphics->bgConfig, GF_BG_LYR_MAIN_3);
+}
+
+static void PlazaNewsClock_Init(PlazaNewsClock *clock, PlazaNewsGraphics *graphics, PlazaNewsTileset *tileset, WiFiPlazaNews *news, const WiFiPlazaTime *endTime, WiFiPlazaWork *lobby, enum HeapID heapID) {
+    u32 seconds = WiFiPlazaWork_GetOpenDuration(lobby);
+    clock->time.field.hour = 0;
+    clock->time.field.minute = seconds / 60 + 1;
+    clock->time.field.second = 0;
+    clock->secondsPerCell = seconds / 40;
+    clock->isWaiting = TRUE;
+    clock->blinkTimer = 0;
+    clock->needsRedraw = FALSE;
+    PlazaNewsClock_UpdateTime(clock, news, endTime);
+    PlazaNewsClock_Draw(clock, tileset, graphics);
+}
+
+static void PlazaNewsClock_Free(PlazaNewsClock *clock) {
+}
+
+static BOOL PlazaNewsClock_UpdateTime(PlazaNewsClock *clock, WiFiPlazaNews *news, const WiFiPlazaTime *endTime) {
+    WiFiPlazaTime now;
+    WiFiPlazaTime remaining;
+    WiFiPlazaTime diff;
+    int changed = FALSE;
+    if (WiFiPlazaNews_GetOpenTime(news, &now.word) == 0) {
+        return changed;
+    }
+    if (clock->isWaiting == TRUE) {
+        clock->isWaiting = FALSE;
+        changed = TRUE;
+        clock->needsRedraw = changed;
+    }
+    WiFiPlazaTime_Subtract(endTime, &now, &remaining);
+    WiFiPlazaTime_Subtract(&remaining, &clock->time, &diff);
+    if (diff.field.second >= clock->secondsPerCell || diff.field.minute != 0 || diff.field.hour != 0) {
+        changed = TRUE;
+        clock->needsRedraw = changed;
+        clock->time = remaining;
+    }
+    return changed;
+}
+
+static void PlazaNewsClock_Draw(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics) {
+    if (clock->isWaiting == TRUE) {
+        PlazaNewsClock_DrawWaiting(clock, tileset, graphics);
+    } else {
+        PlazaNewsClock_DrawGauge(clock, tileset, graphics);
+    }
+}
+
+static void PlazaNewsClock_DrawWaiting(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics) {
+    clock->blinkTimer++;
+    if (clock->blinkTimer > 16) {
+        clock->blinkTimer = 0;
+    }
+}
+
+static void PlazaNewsClock_DrawGauge(PlazaNewsClock *clock, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics) {
+    int i;
+    int cell = (clock->time.field.minute * 60 + clock->time.field.second + clock->time.field.hour * 3600) / clock->secondsPerCell;
+    if (clock->needsRedraw) {
+        int j;
+        clock->blinkTimer = 0;
+        clock->needsRedraw = FALSE;
+        FillBgTilemapRect(graphics->bgConfig, GF_BG_LYR_MAIN_3, 0, 5, 4, 10, 8, 0);
+        ScheduleBgTilemapBufferTransfer(graphics->bgConfig, GF_BG_LYR_MAIN_3);
+        for (i = 0; i < 4; i++) {
+            int row = 3 - i;
+            for (j = 0; j < 10; j++) {
+                int col = 9 - j;
+                u32 index = col + row * 10;
+                if (index >= cell) {
+                    u32 tile;
+                    if (index == cell) {
+                        tile = 1;
+                    } else if (row == 3) {
+                        tile = 2;
+                    } else {
+                        tile = 0;
+                    }
+                    PlazaNewsClock_DrawCell(tileset, graphics, tile, col, row);
+                }
+            }
+        }
+    } else if ((u32)cell < 40) {
+        int timer;
+        int row;
+        int col;
+        int phase;
+        clock->blinkTimer++;
+        timer = clock->blinkTimer;
+        phase = timer % 32;
+        col = (u32)cell % 10;
+        row = (u32)cell / 10;
+        if (phase == 0) {
+            u32 step = (30 * clock->secondsPerCell) / 4;
+            int tile = 6;
+            for (int k = 0; k < 4; k++) {
+                if (step * (k + 1) > (u32)timer) {
+                    tile = sPlazaNewsClockBlinkTiles[k];
+                    break;
+                }
+            }
+            PlazaNewsClock_DrawCell(tileset, graphics, tile, col, row);
+        } else if (phase == 16) {
+            PlazaNewsClock_DrawCell(tileset, graphics, 3, col, row);
+        }
+    }
+}
+
+static void PlazaNewsPeople_Init(PlazaNewsPeople *people, PlazaNewsGraphics *graphics, PlazaNewsTileset *tileset, WiFiPlazaNews *news, WiFiPlazaWork *lobby, enum HeapID heapID) {
+    PlazaNewsPeople_DrawGrid(tileset, graphics, news, lobby, 0);
+}
+
+static void PlazaNewsPeople_Free(PlazaNewsPeople *people) {
+}
+
+static BOOL PlazaNewsPeople_UpdateState(PlazaNewsPeople *people, WiFiPlazaNews *news) {
+    int ret = FALSE;
+    switch (WiFiPlazaNews_GetSlotChange(news)) {
+    case 0:
+        break;
+    case 1:
+        ret = TRUE;
+        people->state = ret;
+        break;
+    case 2:
+        people->state = 3;
+        ret = TRUE;
+        break;
+    default:
+        break;
+    }
+    return ret;
+}
+
+static void PlazaNewsPeople_Draw(PlazaNewsPeople *people, PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby) {
+    switch (people->state) {
+    case 1:
+        people->state = 2;
+        people->frame = 0;
+        return;
+    case 2:
+        PlazaNewsPeople_BlinkMode2(tileset, graphics, news, lobby, people->frame);
+        people->frame++;
+        if (people->frame >= 32) {
+            people->state = 0;
+            return;
+        }
+        break;
+    case 3:
+        people->state = 4;
+        people->frame = 0;
+        return;
+    case 4:
+        PlazaNewsPeople_BlinkMode1(tileset, graphics, news, lobby, people->frame);
+        people->frame++;
+        if (people->frame >= 32) {
+            people->state = 0;
+        }
+        break;
+    }
+}
+
+static void PlazaNewsPeople_DrawGrid(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, int mode) {
+    struct {
+        int altPage;
+        int usePalette3;
+        int altRow;
+        int row;
+        volatile int isLastJoined;
+        int rowU8;
+    } f;
+    int col;
+    int base;
+    int nextRow;
+    FillBgTilemapRect(graphics->bgConfig, GF_BG_LYR_MAIN_3, 0, 21, 4, 10, 8, 0);
+    base = 0;
+    f.row = 0;
+    do {
+        f.rowU8 = (u8)f.row;
+        col = 0;
+        do {
+            if (WiFiPlazaNews_IsSlotOccupied(news, col + base)) {
+                int highlight;
+                int tile;
+                f.altRow = WiFiPlazaNews_GetSlotGender(news, col + base);
+                f.usePalette3 = WiFiPlazaNews_IsOwnSlot(news, col + base);
+                f.altPage = WiFiPlazaNews_IsOldestSlot(news, col + base);
+                f.isLastJoined = WiFiPlazaNews_IsLastJoinedSlot(news, col + base);
+                highlight = WiFiPlazaWork_IsSpecialVisitor(lobby, col + base);
+                if (mode == 2 && f.isLastJoined == 1) {
+                    tile = 0;
+                } else {
+                    tile = mode;
+                }
+                PlazaNewsPeople_DrawIcon(tileset, graphics, (u8)col, f.rowU8, tile, f.altRow, f.usePalette3, f.altPage, highlight);
+            }
+            col++;
+        } while (col < 5);
+        nextRow = f.row + 1;
+        base += 5;
+        f.row = nextRow;
+    } while (nextRow < 4);
+}
+
+static void PlazaNewsPeople_BlinkMode2(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, u32 frame) {
+    int mode;
+    if ((frame & 7) != 0) {
+        return;
+    }
+    frame >>= 3;
+    if ((frame & 1) == 0) {
+        mode = 2;
+    } else {
+        mode = 0;
+    }
+    PlazaNewsPeople_DrawGrid(tileset, graphics, news, lobby, mode);
+}
+
+static void PlazaNewsPeople_BlinkMode1(PlazaNewsTileset *tileset, PlazaNewsGraphics *graphics, WiFiPlazaNews *news, WiFiPlazaWork *lobby, u32 frame) {
+    int mode;
+    if ((frame & 7) != 0) {
+        return;
+    }
+    frame >>= 3;
+    if ((frame & 1) == 0) {
+        mode = 1;
+    } else {
+        mode = 0;
+    }
+    PlazaNewsPeople_DrawGrid(tileset, graphics, news, lobby, mode);
+}
+
+static void PlazaNewsHeadlines_GetNameColors(u8 *colors, WiFiPlazaNews *news, int type, WiFiPlazaWork *lobby) {
+    int i;
+    for (i = 0; i < 4; i++) {
+        int person = WiFiPlazaNews_GetEventSlot(news, type, i);
+        if (person != WIFI_PLAZA_NEWS_NO_SLOT) {
+            if (WiFiPlazaWork_IsSpecialVisitor(lobby, person) == 1) {
+                colors[i] = 9;
+            } else {
+                colors[i] = 5;
+            }
+        }
+    }
+}
+
+static void PlazaNewsHeadlines_LoadNameColors(const u8 *colors, NNSG2dPaletteData *palette, int paletteNum) {
+    int i = 0;
+    int base = paletteNum * 32;
+    u8 *data = palette->pRawData;
+    int offset = i;
+    base += 10;
+    for (; i < 4; i++, offset += 4) {
+        if (!GF_CreateNewVramTransferTask(NNS_GFD_DST_2D_BG_PLTT_MAIN, base + offset, data + (colors[i] * 2 + 224), 4)) {
+            GF_ASSERT(FALSE);
+        }
+    }
+}
+
+static void PlazaNewsHeadlines_Init(PlazaNewsHeadlines *headlines, PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    int i = 0;
+    PlazaNewsTicker *ticker = headlines->tickers;
+    int baseTile = 768;
+    Window *window = &headlines->windows[0];
+    const u8 *top = sPlazaNewsHeadlineRowTops;
+
+    for (; i < 3; i++) {
+        PlazaNewsTicker_Init(ticker, graphics, i, heapID);
+        AddWindowParameterized(graphics->bgConfig, window, GF_BG_LYR_MAIN_3, 1, *top, 30, 2, i + 7, baseTile);
+        FillWindowPixelBuffer(window, 0);
+        ScheduleWindowCopyToVram(window);
+        ticker++;
+        baseTile += 60;
+        top++;
+        window++;
+    }
+    headlines->string = String_New(256, heapID);
+    headlines->paletteFile = GfGfxLoader_GetPlttDataFromOpenNarc(graphics->narc, 0, &headlines->palette, heapID);
+    BG_LoadPlttData(0, (u8 *)headlines->palette->pRawData + 238, 4, 250);
+    BG_LoadPlttData(0, (u8 *)headlines->palette->pRawData + 238, 4, 282);
+    BG_LoadPlttData(0, (u8 *)headlines->palette->pRawData + 238, 4, 314);
+}
+
+static void PlazaNewsHeadlines_Free(PlazaNewsHeadlines *headlines) {
+    int i;
+    Window *window;
+    PlazaNewsTicker *ticker;
+    Heap_Free(headlines->paletteFile);
+    String_Delete(headlines->string);
+    ticker = headlines->tickers;
+    i = 0;
+    window = headlines->windows;
+    while (i < 3) {
+        RemoveWindow(window);
+        PlazaNewsTicker_Free(ticker);
+        i++;
+        window++;
+        ticker++;
+    }
+}
+
+static BOOL PlazaNewsHeadlines_Update(PlazaNewsHeadlines *headlines, WiFiPlazaNews *news, WiFiPlazaWork *lobby, enum HeapID heapID) {
+    u8 specialVisitors[WIFI_PLAZA_MAX_PLAYERS];
+    u8 nameColors[4];
+    int i;
+    PlazaNewsTicker *ticker;
+    const u32 *duration;
+    int type;
+    WiFiPlazaWork_GetSpecialVisitors(lobby, specialVisitors);
+    i = 2;
+    ticker = &headlines->tickers[2];
+    duration = &sPlazaNewsHeadlineRowDurations[2];
+    for (; i >= 0; i--) {
+        if (ticker->active) {
+            if (PlazaNewsTicker_Advance(ticker) == TRUE) {
+                if (i + 1 < 3) {
+                    PlazaNewsTicker_SetText(&headlines->tickers[i + 1], ticker->text, duration[1], ticker->nameColors, headlines->palette);
+                }
+                PlazaNewsTicker_Stop(ticker);
+            }
+        }
+        ticker--;
+        duration--;
+    }
+    if (!headlines->tickers[0].active) {
+        if (WiFiPlazaNews_HasEvent(news) == TRUE) {
+            do {
+                type = WiFiPlazaNews_GetEventType(news);
+                if (WiFiPlazaNews_FormatEvent(news, specialVisitors, type, headlines->string, heapID) == 1) {
+                    PlazaNewsHeadlines_GetNameColors(nameColors, news, type, lobby);
+                    PlazaNewsTicker_SetText(&headlines->tickers[0], headlines->string, 336, nameColors, headlines->palette);
+                    WiFiPlazaNews_RemoveCurrentEvent(news);
+                    return TRUE;
+                }
+                WiFiPlazaNews_RemoveCurrentEvent(news);
+            } while (WiFiPlazaNews_HasEvent(news) == TRUE);
+        }
+    }
+    return FALSE;
+}
+
+static void PlazaNewsHeadlines_Draw(PlazaNewsHeadlines *headlines) {
+    int i;
+    PlazaNewsTicker *ticker;
+    Window *window;
+    PlazaNewsTicker *cur;
+
+    ticker = headlines->tickers;
+    i = 0;
+    window = headlines->windows;
+    cur = ticker;
+    while (i < 3) {
+        if (ticker->active == TRUE) {
+            PlazaNewsTicker_Draw(cur, window);
+        }
+        i++;
+        ticker++;
+        window++;
+        cur++;
+    }
+}
+
+static void PlazaNewsTicker_Init(PlazaNewsTicker *ticker, PlazaNewsGraphics *graphics, int row, enum HeapID heapID) {
+    ticker->active = FALSE;
+    ticker->position = 0;
+    ticker->text = String_New(0x100, heapID);
+    ticker->paletteNum = row + 7;
+    AddWindowParameterized(graphics->bgConfig, &ticker->bitmap, GF_BG_LYR_MAIN_3, 0, 0, 180, 2, 7, 0);
+}
+
+static void PlazaNewsTicker_Free(PlazaNewsTicker *ticker) {
+    String_Delete(ticker->text);
+    RemoveWindow(&ticker->bitmap);
+}
+
+static void PlazaNewsTicker_SetText(PlazaNewsTicker *ticker, String *text, u32 duration, u8 *nameColors, NNSG2dPaletteData *palette) {
+    String_Copy(ticker->text, text);
+    ticker->active = TRUE;
+    ticker->position = 0;
+    ticker->duration = duration;
+    ticker->width = FontID_String_GetWidth(1, text, 0);
+    ticker->width += 256;
+    GF_ASSERT(ticker->width <= 1440);
+    FillWindowPixelBuffer(&ticker->bitmap, 0);
+    AddTextPrinterParameterized(&ticker->bitmap, 1, ticker->text, 0, 0, TEXT_SPEED_NOTRANSFER, NULL);
+    ticker->nameColors[0] = nameColors[0];
+    ticker->nameColors[1] = nameColors[1];
+    ticker->nameColors[2] = nameColors[2];
+    ticker->nameColors[3] = nameColors[3];
+    PlazaNewsHeadlines_LoadNameColors(ticker->nameColors, palette, ticker->paletteNum);
+}
+
+static void PlazaNewsTicker_Stop(PlazaNewsTicker *ticker) {
+    ticker->active = FALSE;
+}
+
+static BOOL PlazaNewsTicker_Advance(PlazaNewsTicker *ticker) {
+    BOOL finished = TRUE;
+    int position = ticker->position + 1;
+    if (position <= ticker->duration) {
+        ticker->position = position;
+        finished = FALSE;
+    }
+    return finished;
+}
+
+static void PlazaNewsTicker_Draw(PlazaNewsTicker *ticker, Window *window) {
+    volatile int width = ticker->width;
+    int scroll = *(volatile u16 *)&ticker->position * width / ticker->duration;
+    int x;
+    int srcX;
+    if (scroll < 256) {
+        x = 255 - scroll;
+        srcX = 0;
+    } else {
+        srcX = scroll - 256;
+        x = 0;
+        scroll = width - scroll;
+        if (scroll > 255) {
+            scroll = 255;
+        }
+    }
+    FillWindowPixelRect(window, 0, 0, 0, 255, 16);
+    BlitBitmapRect(window, ticker->bitmap.pixelBuffer, srcX, 0, 1440, 16, x, 0, scroll, 16, 15);
+    ScheduleWindowCopyToVram(window);
+}
+
+static void PlazaNewsTitles_Init(PlazaNewsTitles *titles, PlazaNewsGraphics *graphics, enum HeapID heapID) {
+    int messageNo;
+    MsgData *msgData;
+    String *message;
+    u32 lineCount;
+    int x;
+    const u32 *sound;
+    const u16 *paletteOffset;
+    PlazaNewsFlash *flash;
+    Window *window;
+    String *line;
+    const PlazaNewsTitleTemplate *titleTemplate;
+
+    memset(titles, 0, sizeof(PlazaNewsTitles));
+    msgData = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0757_bin, heapID);
+    message = String_New(0x80, heapID);
+    messageNo = 0;
+    sound = sPlazaNewsTitleSEs;
+    titleTemplate = sPlazaNewsTitleTemplates;
+    paletteOffset = sPlazaNewsTitlePaletteOffsets;
+    window = titles->windows;
+    flash = titles->flashes;
+
+    do {
+        u32 i;
+        int y;
+
+        PlazaNewsFlash_Init(flash, *paletteOffset, *sound);
+        AddWindowParameterized(graphics->bgConfig, window, GF_BG_LYR_MAIN_0, titleTemplate->left, titleTemplate->top, titleTemplate->width, titleTemplate->height, titleTemplate->palette, titleTemplate->baseTile);
+        FillWindowPixelBuffer(window, 0);
+        ReadMsgDataIntoString(msgData, messageNo, message);
+        lineCount = String_CountLines(message);
+        y = titleTemplate->y;
+        line = String_New(String_GetLength(message) + 1, heapID);
+        for (i = 0; i < lineCount; i++) {
+            String_GetLineN(line, message, i);
+            switch (titleTemplate->alignment) {
+            case 0:
+                x = titleTemplate->x;
+                break;
+            case 1:
+                x = titleTemplate->x - ((FontID_String_GetWidthMultiline(0, line, 0) + 1) >> 1);
+                break;
+            case 2:
+                x = titleTemplate->x - FontID_String_GetWidthMultiline(0, line, 0);
+                break;
+            default:
+                break;
+            }
+            AddTextPrinterParameterizedWithColor(window, 0, line, x, y, TEXT_SPEED_NOTRANSFER, titleTemplate->color, NULL);
+            y += 0x10;
+        }
+        String_Delete(line);
+        ScheduleWindowCopyToVram(window);
+        sound++;
+        titleTemplate++;
+        paletteOffset++;
+        flash++;
+        window++;
+        messageNo++;
+    } while (messageNo < 4);
+
+    String_Delete(message);
+    DestroyMsgData(msgData);
+}
+
+static void PlazaNewsTitles_Free(PlazaNewsTitles *titles) {
+    Window *window;
+    PlazaNewsFlash *flash;
+    int i;
+
+    window = titles->windows;
+    i = 0;
+    flash = titles->flashes;
+    do {
+        RemoveWindow(window);
+        PlazaNewsFlash_Clear(flash);
+        i++;
+        window++;
+        flash++;
+    } while (i < 4);
+}
+
+static void PlazaNewsTitles_Update(PlazaNewsTitles *titles) {
+    int i;
+    PlazaNewsFlash *flash;
+
+    i = 0;
+    flash = titles->flashes;
+    do {
+        PlazaNewsFlash_Update(flash);
+        i++;
+        flash++;
+    } while (i < 4);
+}
+
+static void PlazaNewsTitles_StartFlash(PlazaNewsTitles *titles, u32 index) {
+    GF_ASSERT(index < 4);
+    GF_ASSERT(index != 0);
+    PlazaNewsFlash_Start(&titles->flashes[index]);
+}
+
+static void PlazaNewsFlash_Init(PlazaNewsFlash *flash, u16 paletteOffset, u32 sound) {
+    memset(flash, 0, sizeof(PlazaNewsFlash));
+    flash->paletteOffset = paletteOffset;
+    flash->sound = sound;
+}
+
+static void PlazaNewsFlash_Clear(PlazaNewsFlash *flash) {
+    memset(flash, 0, sizeof(PlazaNewsFlash));
+}
+
+static void PlazaNewsFlash_Start(PlazaNewsFlash *flash) {
+    flash->active = TRUE;
+    flash->timer = 0;
+}
+
+static void PlazaNewsFlash_Update(PlazaNewsFlash *flash) {
+    if (flash->timer > 28) {
+        flash->active = FALSE;
+    }
+    if (flash->active) {
+        int amount;
+        u16 color;
+        if (flash->timer == 0) {
+            PlaySE(flash->sound);
+        }
+        if (flash->timer < 2) {
+            amount = (flash->timer * 16) / 2;
+        } else if (flash->timer < 14) {
+            amount = 16;
+        } else {
+            amount = 16 - ((flash->timer - 14) * 16) / 14;
+        }
+        color = 14;
+        BlendPalette(&color, &flash->color, 1, amount, 25);
+        DC_FlushRange(&flash->color, 2);
+        GX_LoadBGPltt(&flash->color, flash->paletteOffset, 2);
+        flash->timer++;
+    }
+}

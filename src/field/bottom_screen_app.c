@@ -1,0 +1,425 @@
+#include "field/bottom_screen_app.h"
+
+#include "global.h"
+
+#include "constants/sprites.h"
+
+#include "field/field_hook_unused.h"
+#include "field/pal_pad_registration.h"
+#include "field/touchscreen_choice_menu.h"
+#include "field/touchscreen_menu.h"
+
+#include "assert.h"
+#include "overlay_01.h"
+#include "poke_overlay.h"
+#include "screen_fade.h"
+#include "sys_task_api.h"
+#include "systask_environment.h"
+
+FS_EXTERN_OVERLAY(OVY_27);
+FS_EXTERN_OVERLAY(touch_save_app);
+FS_EXTERN_OVERLAY(OVY_28);
+FS_EXTERN_OVERLAY(OVY_29);
+FS_EXTERN_OVERLAY(OVY_31);
+FS_EXTERN_OVERLAY(OVY_32);
+FS_EXTERN_OVERLAY(OVY_33);
+FS_EXTERN_OVERLAY(OVY_34);
+
+typedef void *(*BottomScreenAppInitFunc)(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+typedef void (*BottomScreenAppExitFunc)(BgConfig *bgConfig, void *app);
+typedef BOOL (*BottomScreenAppIsExitDoneFunc)(BgConfig *bgConfig);
+
+enum PalPadTouchYesNoState {
+    PAL_PAD_YES_NO_STATE_OPEN_MENU,
+    PAL_PAD_YES_NO_STATE_SHOW_BUTTONS,
+    PAL_PAD_YES_NO_STATE_WAIT_ANSWER,
+};
+
+typedef struct BottomScreenAppTemplate {
+    BottomScreenAppInitFunc init;
+    BottomScreenAppExitFunc exit;
+    BottomScreenAppIsExitDoneFunc isExitDone;
+    u32 overlayId; // -1: the app is in a loaded overlay
+} BottomScreenAppTemplate;
+
+typedef struct BottomScreenAppManager {
+    u8 appId;
+    u8 state;
+    u8 nextAppId;
+    void *app;
+    FieldSystem *fieldSystem;
+    void *args;
+} BottomScreenAppManager;
+
+void *TouchscreenMenu_Create(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void TouchscreenMenu_Destroy(BgConfig *bgConfig, void *app);
+BOOL TouchscreenMenu_IsExitDone(BgConfig *bgConfig);
+void *TouchSaveApp_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void TouchSaveApp_Exit(BgConfig *bgConfig, void *app);
+BOOL TouchSaveApp_IsExitDone(BgConfig *bgConfig);
+void *TouchMartApp_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void TouchMartApp_Exit(BgConfig *bgConfig, void *app);
+BOOL TouchMartApp_IsExitDone(BgConfig *bgConfig);
+void *TouchscreenChoiceMenu_Create(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void TouchscreenChoiceMenu_Destroy(BgConfig *bgConfig, void *app);
+BOOL TouchscreenChoiceMenu_IsExitDone(BgConfig *bgConfig);
+void *DowsingMchn_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void DowsingMchn_Exit(BgConfig *bgConfig, void *app);
+BOOL DowsingMchn_IsExitDone(BgConfig *bgConfig);
+void *NumberEntry_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void NumberEntry_Exit(BgConfig *bgConfig, void *app);
+BOOL NumberEntry_IsExitDone(BgConfig *bgConfig);
+void *FriendRosterApp_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void FriendRosterApp_Exit(BgConfig *bgConfig, void *app);
+BOOL FriendRosterApp_IsExitDone(BgConfig *bgConfig);
+void *CommClubButtons_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+void CommClubButtons_Exit(BgConfig *bgConfig, void *app);
+BOOL CommClubButtons_IsExitDone(BgConfig *bgConfig);
+void *UnionChatLog_Init(FieldSystem *fieldSystem);
+void UnionChatLog_Exit(void *data);
+
+static SysTask *BottomScreenApps_CreateTask(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem);
+static void BottomScreenApps_ExitApp(FieldSystem *fieldSystem);
+static BOOL BottomScreenApps_IsExitDone(FieldSystem *fieldSystem);
+static void BottomScreenApps_InitApp(BottomScreenAppManager *manager);
+static void BottomScreenApps_UnloadApp(BottomScreenAppManager *manager);
+static void Task_BottomScreenApps(SysTask *task, void *env);
+static void *UnionChatLogApp_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args);
+static void UnionChatLogApp_Exit(BgConfig *bgConfig, void *app);
+static BOOL UnionChatLogApp_IsExitDone(BgConfig *bgConfig);
+static BOOL PalPadRegistration_TryShowTouchYesNo(PalPadRegistration *registration);
+static BOOL PalPadRegistration_IsTouchYesNoDone(PalPadRegistration *registration);
+
+// Facing one of these objects does not offer the touchscreen menu's talk action.
+static const u16 sSpriteIdsWithoutTalkAction[] = {
+    SPRITE_ICE,
+    SPRITE_GTOROPHY,
+    SPRITE_MEDAL,
+    SPRITE_ROTOMF,
+    SPRITE_ROTOMS,
+    SPRITE_ROTOMI,
+    SPRITE_ROTOMW,
+    SPRITE_ROTOMG,
+    SPRITE_STATUEHERO,
+    SPRITE_STATUEHEROINE,
+    SPRITE_ROCK,
+    SPRITE_BREAKROCK,
+    SPRITE_TREE,
+    SPRITE_MONSTARBALL,
+    SPRITE_BONGURI,
+    SPRITE_USOKKY,
+    SPRITE_AJI_PERU,
+    SPRITE_BTOROPHY,
+    SPRITE_SCROLL,
+    SPRITE_SIGNSHOES,
+    SPRITE_SIGNCLOTHES,
+    SPRITE_SIGNFLAG,
+    SPRITE_SIGNPOKEGEAR,
+    SPRITE_SIGNBALL,
+    SPRITE_BABYBOY1_10,
+    SPRITE_BABYBOY1_2,
+    SPRITE_BABYBOY1_11,
+    SPRITE_LEAG_DOOR2,
+    SPRITE_BABYBOY1_12,
+    SPRITE_BABYBOY1_13,
+    SPRITE_STOP,
+    SPRITE_STOROPHY,
+    SPRITE_POKEWALL,
+    SPRITE_JUPETTA,
+    SPRITE_MONO_PIP,
+    SPRITE_BONGURI, // listed twice
+    SPRITE_GATE_RIGHT,
+    SPRITE_GATE_LEFT,
+    SPRITE_BABYBOY1_5,
+    SPRITE_GATE_TOP,
+    SPRITE_GATE_BOTTOM,
+    SPRITE_BABYBOY1_8,
+    SPRITE_BABYBOY1_9,
+};
+
+static const BottomScreenAppTemplate sBottomScreenApps[] = {
+    [BOTTOM_SCREEN_APP_TOUCHSCREEN_MENU] = { TouchscreenMenu_Create,       TouchscreenMenu_Destroy,       TouchscreenMenu_IsExitDone,       (u32)-1                       },
+    [BOTTOM_SCREEN_APP_TOUCH_SAVE] = { TouchSaveApp_Init,            TouchSaveApp_Exit,             TouchSaveApp_IsExitDone,          FS_OVERLAY_ID(touch_save_app) },
+    [BOTTOM_SCREEN_APP_TOUCH_MART] = { TouchMartApp_Init,            TouchMartApp_Exit,             TouchMartApp_IsExitDone,          FS_OVERLAY_ID(OVY_31)         },
+    [BOTTOM_SCREEN_APP_CHOICE_MENU] = { TouchscreenChoiceMenu_Create, TouchscreenChoiceMenu_Destroy, TouchscreenChoiceMenu_IsExitDone, (u32)-1                       },
+    [BOTTOM_SCREEN_APP_DOWSING_MCHN] = { DowsingMchn_Init,             DowsingMchn_Exit,              DowsingMchn_IsExitDone,           FS_OVERLAY_ID(OVY_28)         },
+    [BOTTOM_SCREEN_APP_NUMBER_ENTRY] = { NumberEntry_Init,             NumberEntry_Exit,              NumberEntry_IsExitDone,           FS_OVERLAY_ID(OVY_29)         },
+    [BOTTOM_SCREEN_APP_FRIEND_ROSTER] = { FriendRosterApp_Init,         FriendRosterApp_Exit,          FriendRosterApp_IsExitDone,       FS_OVERLAY_ID(OVY_32)         },
+    [BOTTOM_SCREEN_APP_COMM_CLUB_BUTTONS] = { CommClubButtons_Init,         CommClubButtons_Exit,          CommClubButtons_IsExitDone,       FS_OVERLAY_ID(OVY_33)         },
+    [BOTTOM_SCREEN_APP_UNION_CHAT_LOG] = { UnionChatLogApp_Init,         UnionChatLogApp_Exit,          UnionChatLogApp_IsExitDone,       FS_OVERLAY_ID(OVY_34)         },
+};
+
+void FieldSystem_SendBottomScreenEvent(FieldSystem *fieldSystem, int event, int unused) {
+    FieldHookState *state = (FieldHookState *)fieldSystem->mapSystems->hookState;
+    if (state != NULL) {
+        FieldHookUnused_OnEvent(state, event);
+    }
+}
+
+void BottomScreen_TouchSave_Init(FieldSystem *fieldSystem) {
+    HandleLoadOverlay(FS_OVERLAY_ID(OVY_27), OVY_LOAD_ASYNC);
+    fieldSystem->touchSaveTask = TouchSaveApp_Init(fieldSystem->bgConfig, &fieldSystem->lastTouchMenuInput, fieldSystem, NULL);
+}
+
+void BottomScreen_TouchSave_End(FieldSystem *fieldSystem) {
+    TouchSaveApp_Exit(fieldSystem->bgConfig, fieldSystem->touchSaveTask);
+}
+
+BOOL BottomScreen_TouchSave_IsDone(FieldSystem *fieldSystem) {
+    if (TouchSaveApp_IsExitDone(fieldSystem->bgConfig)) {
+        UnloadOverlayByID(FS_OVERLAY_ID(OVY_27));
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void BottomScreen_Apps_Init(FieldSystem *fieldSystem) {
+    HandleLoadOverlay(FS_OVERLAY_ID(OVY_27), OVY_LOAD_ASYNC);
+    fieldSystem->bottomScreenTask = BottomScreenApps_CreateTask(fieldSystem->bgConfig, &fieldSystem->lastTouchMenuInput, fieldSystem);
+}
+
+void BottomScreen_Apps_End(FieldSystem *fieldSystem) {
+    BottomScreenApps_ExitApp(fieldSystem);
+}
+
+BOOL BottomScreen_Apps_IsDone(FieldSystem *fieldSystem) {
+    if (BottomScreenApps_IsExitDone(fieldSystem)) {
+        UnloadOverlayByID(FS_OVERLAY_ID(OVY_27));
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static SysTask *BottomScreenApps_CreateTask(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem) {
+    SysTask *task;
+    BottomScreenAppManager *manager;
+
+    task = CreateSysTaskAndEnvironment(Task_BottomScreenApps, sizeof(BottomScreenAppManager), 10, HEAP_ID_FIELD1);
+    manager = SysTask_GetData(task);
+    manager->appId = fieldSystem->savedBottomScreenAppId;
+    manager->state = BOTTOM_SCREEN_APP_STATE_INIT;
+    manager->app = NULL;
+    manager->nextAppId = 0;
+    manager->fieldSystem = fieldSystem;
+    manager->args = NULL;
+    return task;
+}
+
+static void BottomScreenApps_ExitApp(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    sBottomScreenApps[manager->appId].exit(fieldSystem->bgConfig, manager->app);
+}
+
+static BOOL BottomScreenApps_IsExitDone(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    if (sBottomScreenApps[manager->appId].isExitDone(fieldSystem->bgConfig) == TRUE) {
+        BottomScreenApps_UnloadApp(manager);
+        DestroySysTaskAndEnvironment(fieldSystem->bottomScreenTask);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void BottomScreenApps_InitApp(BottomScreenAppManager *manager) {
+    if (sBottomScreenApps[manager->appId].overlayId != (u32)-1) {
+        HandleLoadOverlay(sBottomScreenApps[manager->appId].overlayId, OVY_LOAD_ASYNC);
+    }
+    manager->app = sBottomScreenApps[manager->appId].init(manager->fieldSystem->bgConfig, &manager->fieldSystem->lastTouchMenuInput, manager->fieldSystem, manager->args);
+}
+
+static void BottomScreenApps_UnloadApp(BottomScreenAppManager *manager) {
+    if (sBottomScreenApps[manager->appId].overlayId != (u32)-1) {
+        UnloadOverlayByID(sBottomScreenApps[manager->appId].overlayId);
+    }
+}
+
+static void Task_BottomScreenApps(SysTask *task, void *env) {
+    BottomScreenAppManager *manager = env;
+    switch (manager->state) {
+    case BOTTOM_SCREEN_APP_STATE_INIT:
+        BottomScreenApps_InitApp(manager);
+        manager->state = BOTTOM_SCREEN_APP_STATE_RUNNING;
+        break;
+    case BOTTOM_SCREEN_APP_STATE_SWITCH_REQUESTED:
+        BeginNormalPaletteFade(FADE_SUB_ONLY, FADE_TYPE_BRIGHTNESS_OUT, FADE_TYPE_BRIGHTNESS_OUT, 0, 2, 1, HEAP_ID_FIELD1);
+        manager->state = BOTTOM_SCREEN_APP_STATE_FADE_OUT;
+        break;
+    case BOTTOM_SCREEN_APP_STATE_FADE_OUT:
+        if (IsPaletteFadeFinished()) {
+            manager->state = BOTTOM_SCREEN_APP_STATE_EXIT;
+        }
+        break;
+    case BOTTOM_SCREEN_APP_STATE_EXIT:
+        sBottomScreenApps[manager->appId].exit(manager->fieldSystem->bgConfig, manager->app);
+        manager->state = BOTTOM_SCREEN_APP_STATE_WAIT_EXIT;
+        break;
+    case BOTTOM_SCREEN_APP_STATE_WAIT_EXIT:
+        if (sBottomScreenApps[manager->appId].isExitDone(manager->fieldSystem->bgConfig) == TRUE) {
+            BottomScreenApps_UnloadApp(manager);
+            manager->appId = manager->nextAppId;
+            manager->state = BOTTOM_SCREEN_APP_STATE_START_NEXT;
+        }
+        break;
+    case BOTTOM_SCREEN_APP_STATE_START_NEXT:
+        BottomScreenApps_InitApp(manager);
+        BeginNormalPaletteFade(FADE_SUB_ONLY, FADE_TYPE_BRIGHTNESS_IN, FADE_TYPE_BRIGHTNESS_IN, 0, 2, 1, HEAP_ID_FIELD1);
+        manager->state = BOTTOM_SCREEN_APP_STATE_FADE_IN;
+        break;
+    case BOTTOM_SCREEN_APP_STATE_FADE_IN:
+        if (IsPaletteFadeFinished()) {
+            manager->state = BOTTOM_SCREEN_APP_STATE_RUNNING;
+        }
+        break;
+    }
+}
+
+// Ignored unless the current app is running; args is passed to the next app's init.
+void FieldSystem_SwitchBottomScreenApp(FieldSystem *fieldSystem, int appId, void *args) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    if (manager->state == BOTTOM_SCREEN_APP_STATE_RUNNING) {
+        manager->state = BOTTOM_SCREEN_APP_STATE_SWITCH_REQUESTED;
+        manager->nextAppId = appId;
+        manager->args = args;
+    }
+}
+
+// The choice menu app: TOUCHSCREEN_CHOICE_MENU_STATE_SHOW_YES_NO / SHOW_LIST; the answer is written to *result.
+void FieldSystem_SetTouchscreenChoiceMenuState(FieldSystem *fieldSystem, enum BottomScreenAppId appId, enum TouchscreenChoiceMenuState state, void *result) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    TouchscreenChoiceMenuData *menu = SysTask_GetData(manager->app);
+    if (appId != FieldSystem_GetBottomScreenAppId(fieldSystem)) {
+        GF_ASSERT(FALSE);
+    }
+    menu->state = state;
+    menu->result = result;
+}
+
+enum TouchscreenChoiceMenuState FieldSystem_GetTouchscreenChoiceMenuState(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    TouchscreenChoiceMenuData *menu = SysTask_GetData(manager->app);
+    return menu->state;
+}
+
+u8 FieldSystem_GetBottomScreenAppId(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    return manager->appId;
+}
+
+u8 FieldSystem_GetBottomScreenAppState(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    return manager->state;
+}
+
+struct ScriptMenu **FieldSystem_GetTouchscreenChoiceMenuList(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    TouchscreenChoiceMenuData *menu = SysTask_GetData(manager->app);
+    return &menu->menu;
+}
+
+void FieldSystem_SetTouchscreenChoiceMenuCallback(FieldSystem *fieldSystem, TouchscreenChoiceMenuCallback callback, struct ScriptMenu *menu) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    TouchscreenChoiceMenu_SetCallback(manager->app, callback, menu);
+}
+
+void FieldSystem_RequestTouchscreenMenuSelectedIconAnim(FieldSystem *fieldSystem) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    TouchscreenMenu_RequestSelectedIconAnim(manager->app);
+}
+
+void FieldSystem_RequestTouchscreenMenuRegisteredItemAnim(FieldSystem *fieldSystem, int item) {
+    BottomScreenAppManager *manager = SysTask_GetData(fieldSystem->bottomScreenTask);
+    GF_ASSERT(item > 0 && item < 3);
+    TouchscreenMenu_RequestRegisteredItemAnim(manager->app, item);
+}
+
+// The chat log is kept in the view photo slot, which the Union Room never uses for a photo.
+static void *UnionChatLogApp_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, void *args) {
+    fieldSystem->viewPhotoTask = UnionChatLog_Init(fieldSystem);
+    return fieldSystem->viewPhotoTask;
+}
+
+static void UnionChatLogApp_Exit(BgConfig *bgConfig, void *app) {
+    UnionChatLog_Exit(app);
+}
+
+static BOOL UnionChatLogApp_IsExitDone(BgConfig *bgConfig) {
+    return TRUE;
+}
+
+BOOL IsSpriteIdWithoutTalkAction(int spriteId) {
+    u32 i;
+    const u16 *entry = sSpriteIdsWithoutTalkAction;
+    for (i = 0; i < NELEMS(sSpriteIdsWithoutTalkAction); i++, entry++) {
+        if (spriteId == *entry) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOL IsScriptIdWithoutTalkAction(int scriptId) {
+    if (scriptId >= 7000 && scriptId <= 8799) {
+        return TRUE;
+    }
+    if (scriptId >= 2800 && scriptId <= 2999) {
+        return TRUE;
+    }
+    if (scriptId >= 10000 && scriptId <= 10099) {
+        return TRUE;
+    }
+    if (scriptId >= 10100 && scriptId <= 10149) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// Touch helpers of the Pal Pad registration task.
+BOOL PalPadRegistration_IsFriendRosterAppRunning(PalPadRegistration *registration) {
+    u8 appId = FieldSystem_GetBottomScreenAppId(registration->fieldSystem);
+    u8 state = FieldSystem_GetBottomScreenAppState(registration->fieldSystem);
+    if (appId == BOTTOM_SCREEN_APP_FRIEND_ROSTER && state == BOTTOM_SCREEN_APP_STATE_RUNNING) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL PalPadRegistration_TryShowTouchYesNo(PalPadRegistration *registration) {
+    u8 appId = FieldSystem_GetBottomScreenAppId(registration->fieldSystem);
+    u8 state = FieldSystem_GetBottomScreenAppState(registration->fieldSystem);
+    if (appId == BOTTOM_SCREEN_APP_CHOICE_MENU && state == BOTTOM_SCREEN_APP_STATE_RUNNING) {
+        FieldSystem_SetTouchscreenChoiceMenuState(registration->fieldSystem, BOTTOM_SCREEN_APP_CHOICE_MENU, TOUCHSCREEN_CHOICE_MENU_STATE_SHOW_YES_NO, &registration->yesNoAnswer);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL PalPadRegistration_IsTouchYesNoDone(PalPadRegistration *registration) {
+    u8 appId = FieldSystem_GetBottomScreenAppId(registration->fieldSystem);
+    u32 state = FieldSystem_GetTouchscreenChoiceMenuState(registration->fieldSystem);
+    if (appId == BOTTOM_SCREEN_APP_CHOICE_MENU && state == TOUCHSCREEN_CHOICE_MENU_STATE_DONE) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// Returns FALSE once the player answered (registration->yesNoAnswer).
+BOOL PalPadRegistration_RunTouchYesNo(PalPadRegistration *registration) {
+    switch (registration->yesNoState) {
+    case PAL_PAD_YES_NO_STATE_OPEN_MENU:
+        FieldSystem_SwitchBottomScreenApp(registration->fieldSystem, BOTTOM_SCREEN_APP_CHOICE_MENU, NULL);
+        registration->yesNoState++;
+        break;
+    case PAL_PAD_YES_NO_STATE_SHOW_BUTTONS:
+        if (PalPadRegistration_TryShowTouchYesNo(registration) == TRUE) {
+            registration->yesNoState++;
+        }
+        break;
+    case PAL_PAD_YES_NO_STATE_WAIT_ANSWER:
+        if (PalPadRegistration_IsTouchYesNoDone(registration) == TRUE) {
+            registration->yesNoState = PAL_PAD_YES_NO_STATE_OPEN_MENU;
+            return FALSE;
+        }
+        break;
+    }
+    return TRUE;
+}

@@ -1,0 +1,47 @@
+#include "list_menu_cursor.h"
+
+#include "global.h"
+
+#include "bg_window.h"
+#include "heap.h"
+#include "pm_string.h"
+#include "text.h"
+
+typedef struct ListMenuCursor {
+    u32 color;
+    String *string;
+} ListMenuCursor;
+
+static const u16 sListMenuCursorChar[] = { 0x11F, EOS };
+
+struct ListMenuCursor *ListMenuCursorNew(enum HeapID heapID) {
+    ListMenuCursor *cursor = Heap_Alloc(heapID, sizeof(ListMenuCursor));
+    if (cursor != NULL) {
+        cursor->color = MAKE_TEXT_COLOR(1, 2, 15);
+        cursor->string = String_New(4, heapID);
+        CopyU16ArrayToString(cursor->string, sListMenuCursorChar);
+    }
+    return cursor;
+}
+
+void DestroyListMenuCursorObj(struct ListMenuCursor *cursor) {
+    GF_ASSERT(cursor != NULL);
+    if (cursor != NULL) {
+        if (cursor->string != NULL) {
+            String_Delete(cursor->string);
+        }
+        Heap_Free(cursor);
+    }
+}
+
+void ListMenuCursorSetColor(struct ListMenuCursor *cursor, u32 color) {
+    GF_ASSERT(cursor != NULL);
+    if (cursor != NULL) {
+        cursor->color = color;
+    }
+}
+
+void ListMenuUpdateCursorObj(struct ListMenuCursor *cursor, Window *window, u8 x, u8 y) {
+    AddTextPrinterParameterizedWithColor(window, 0, cursor->string, x, y, TEXT_SPEED_NOTRANSFER, cursor->color, NULL);
+    CopyWindowPixelsToVram_TextMode(window);
+}

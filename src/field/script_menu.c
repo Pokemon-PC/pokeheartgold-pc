@@ -1,0 +1,873 @@
+#include "field/script_menu.h"
+
+#include "global.h"
+
+#include "constants/maps.h"
+#include "constants/sndseq.h"
+
+#include "msgdata/msg.naix"
+#include "msgdata/msg/msg_0191.h"
+#include "msgdata/msg/msg_0435.h"
+#include "pokeathlon/pokeathlon_save.h"
+
+#include "coins.h"
+#include "font.h"
+#include "frontier_data.h"
+#include "gf_gfx_planes.h"
+#include "heap.h"
+#include "list_menu_2d.h"
+#include "money_box.h"
+#include "overlay_01.h"
+#include "overlay_03.h"
+#include "player_data.h"
+#include "pm_string.h"
+#include "render_window.h"
+#include "save_pokegear.h"
+#include "screen_fade.h"
+#include "sound_playback.h"
+#include "string_util.h"
+#include "sys_task_api.h"
+#include "system.h"
+#include "text.h"
+
+#define SCRIPT_MENU_MAX_ITEMS   28
+#define SCRIPT_MENU_NO_HELP_MSG 0xFF
+
+typedef struct ScriptMenuItem {
+    String *text;
+    u32 value;
+} ScriptMenuItem;
+
+// A script multichoice (2D menu of entries) or scrolling list (items with optional help messages printed
+// to printWindow); the chosen value or SCRIPT_MENU_RESULT_CANCEL is written to *ret_p.
+struct ScriptMenu {
+    FieldSystem *fieldSystem;
+    SysTask *task;
+    Window window;
+    Window *printWindow;
+    String *strbufs[SCRIPT_MENU_MAX_ITEMS];
+    MsgData *msgData;
+    MessageFormat *msgFmt;
+    u8 delay;
+    u8 unk_95;
+    u8 initCursorPos;
+    u8 cancellable : 1;
+    u8 ownMsgData : 1;
+    u8 unk_97_2 : 4;
+    u8 anchorRight : 1;
+    u8 anchorBottom : 1;
+    u8 x;
+    u8 y;
+    u8 unk_9A;
+    u8 count;
+    u8 unk_9C[4];
+    u16 *ret_p;
+    u16 *scroll_p;
+    u16 *row_p;
+    struct ListMenu2DTemplate menu2d;
+    struct ListMenu2D *menu2dPtr;
+    ScriptMenuItem entries[SCRIPT_MENU_MAX_ITEMS];
+    ListMenuTemplate listTemplate;
+    ListMenu *listMenu;
+    u16 unk_1C0;
+    u16 cursorPos;
+    ListMenuItem items[SCRIPT_MENU_MAX_ITEMS];
+    u16 msgIds[SCRIPT_MENU_MAX_ITEMS];
+    u16 lastRow;
+    u16 unk_2DE;
+};
+
+static void ScriptMenu_Init(FieldSystem *fieldSystem, ScriptMenu *menu, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData);
+static ScriptMenu *ScriptMenu_New(FieldSystem *fieldSystem, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData);
+static void ScriptMenu_AppendItem(ScriptMenu *menu, u32 msgId, u32 value);
+static u32 ScriptMenu_GetItemsWidth(ScriptMenu *menu);
+static void ScriptMenu_SetupMultichoiceTemplate(ScriptMenu *menu);
+static void ScriptMenu_MultichoiceTask(SysTask *task, void *data);
+static void ScriptMenu_OpenListWindow(ScriptMenu *menu, u32 width);
+static void ScriptMenu_AppendListItem(ScriptMenu *menu, int msgId, int helpMsgId, int value);
+static u32 ScriptMenu_GetListItemsWidth(ScriptMenu *menu);
+static void ScriptMenu_SetupListTemplate(ScriptMenu *menu);
+static void ScriptMenu_ListItemPrintCallback(ListMenu *listMenu, s32 itemId, u8 y);
+static void ScriptMenu_ListMoveCursorCallback(ListMenu *listMenu, s32 itemId, u8 onInit);
+static void ScriptMenu_ListTask(SysTask *task, void *data);
+static void ScriptMenu_CloseList(ScriptMenu *menu);
+static void ScriptMenu_PrintHelpMessage(ScriptMenu *menu, u32 msgId, u32 textSpeed);
+static void ScriptMenu_PrintCursorHelpMessage(ScriptMenu *menu);
+static void ScriptMenu_PrintMessage(ScriptMenu *menu, u16 msgId, u8 x, u8 y);
+static void ScriptMenu_FloorWindowTask(SysTask *task, void *data);
+static int GetFloorNameMessage(u32 mapId, int floor, u8 *width_p);
+static void ScriptMenu_SetupGridTemplate(ScriptMenu *menu, u8 wide, u8 high);
+
+static void ScriptMenu_Init(FieldSystem *fieldSystem, ScriptMenu *menu, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData) {
+    int i;
+
+    if (msgData == NULL) {
+        menu->msgData = NewMsgDataFromNarc(MSGDATA_LOAD_LAZY, NARC_msgdata_msg, NARC_msg_msg_0191_bin, HEAP_ID_FIELD1);
+        menu->ownMsgData = TRUE;
+    } else {
+        menu->msgData = msgData;
+        menu->ownMsgData = FALSE;
+    }
+    menu->msgFmt = msgFmt;
+    menu->fieldSystem = fieldSystem;
+    menu->ret_p = ret_p;
+    menu->scroll_p = NULL;
+    menu->row_p = NULL;
+    menu->cancellable = cancellable;
+    menu->initCursorPos = initCursorPos;
+    menu->anchorRight = 0;
+    menu->anchorBottom = 0;
+    menu->x = x;
+    menu->y = y;
+    menu->count = 0;
+    menu->printWindow = window;
+    menu->delay = 3;
+    menu->lastRow = initCursorPos;
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        menu->entries[i].text = NULL;
+        menu->entries[i].value = 0;
+    }
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        menu->items[i].text = NULL;
+        menu->items[i].value = 0;
+        menu->msgIds[i] = SCRIPT_MENU_NO_HELP_MSG;
+    }
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        menu->strbufs[i] = String_New(80, HEAP_ID_FIELD1);
+    }
+    *menu->ret_p = SCRIPT_MENU_RESULT_WAITING;
+}
+
+static ScriptMenu *ScriptMenu_New(FieldSystem *fieldSystem, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData) {
+    ScriptMenu *menu = Heap_Alloc(HEAP_ID_FIELD1, sizeof(ScriptMenu));
+    if (menu == NULL) {
+        return NULL;
+    }
+    memset(menu, 0, sizeof(ScriptMenu));
+    ScriptMenu_Init(fieldSystem, menu, x, y, initCursorPos, cancellable, ret_p, msgFmt, window, msgData);
+    return menu;
+}
+
+void ScriptMenu_AddItem(ScriptMenu *menu, u32 msgId, u32 value) {
+    ScriptMenu_AppendItem(menu, msgId, value);
+}
+
+void ScriptMenu_ShowMultichoice(ScriptMenu *menu) {
+    u32 width;
+
+    width = ScriptMenu_GetItemsWidth(menu);
+    if ((width & 7) == 0) {
+        width = width >> 3;
+    } else {
+        width = (width >> 3) + 1;
+    }
+    if (menu->anchorRight) {
+        menu->x -= width;
+    }
+    if (menu->anchorBottom) {
+        menu->y -= menu->count * 2;
+    }
+    AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, width, menu->count * 2, 13, 0x3D);
+    LoadUserFrameGfx1(menu->fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(&menu->window, TRUE, 0x3D9, 11);
+    ScriptMenu_SetupMultichoiceTemplate(menu);
+    menu->menu2dPtr = Create2dMenu(&menu->menu2d, menu->initCursorPos, HEAP_ID_FIELD1);
+    menu->task = SysTask_CreateOnMainQueue(ScriptMenu_MultichoiceTask, menu, 0);
+}
+
+static void ScriptMenu_AppendItem(ScriptMenu *menu, u32 msgId, u32 value) {
+    String *template = String_New(80, HEAP_ID_FIELD1);
+    ReadMsgDataIntoString(menu->msgData, msgId, template);
+    StringExpandPlaceholders(menu->msgFmt, menu->strbufs[menu->count], template);
+    menu->entries[menu->count].text = menu->strbufs[menu->count];
+    String_Delete(template);
+    menu->entries[menu->count].value = value;
+    menu->count++;
+}
+
+static u32 ScriptMenu_GetItemsWidth(ScriptMenu *menu) {
+    u32 maxWidth = 0;
+    int i;
+
+    for (i = 0; i < menu->count; i++) {
+        if (menu->entries[i].text == NULL) {
+            break;
+        }
+        {
+            u32 width = FontID_String_GetWidth(0, menu->entries[i].text, 0);
+            if (maxWidth < width) {
+                maxWidth = width;
+            }
+        }
+    }
+    return maxWidth + 12;
+}
+
+static void ScriptMenu_SetupMultichoiceTemplate(ScriptMenu *menu) {
+    menu->menu2d.items = (ListMenuItem *)menu->entries;
+    menu->menu2d.window = &menu->window;
+    menu->menu2d.fontId = 0;
+    menu->menu2d.itemsWide = 1;
+    menu->menu2d.itemsHigh = menu->count;
+    menu->menu2d.yTop = 0;
+    menu->menu2d.cursorType = 0;
+    if (menu->count >= 4) {
+        menu->menu2d.enableWrap = 1;
+    } else {
+        menu->menu2d.enableWrap = 0;
+    }
+}
+
+static void ScriptMenu_MultichoiceTask(SysTask *task, void *data) {
+    ScriptMenu *menu = data;
+    if (menu->delay != 0) {
+        menu->delay--;
+        return;
+    }
+    if (IsPaletteFadeFinished()) {
+        int input = Handle2dMenuInput(menu->menu2dPtr);
+        switch (input) {
+        case LIST_CANCEL:
+            if (menu->cancellable == 1) {
+                *menu->ret_p = SCRIPT_MENU_RESULT_CANCEL;
+                ScriptMenu_CloseMultichoice(menu);
+                return;
+            }
+            break;
+        case LIST_NOTHING_CHOSEN:
+            break;
+        default:
+            *menu->ret_p = input;
+            ScriptMenu_CloseMultichoice(menu);
+            break;
+        }
+    }
+}
+
+void ScriptMenu_Free(ScriptMenu *menu) {
+    int i;
+
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        String_Delete(menu->strbufs[i]);
+    }
+    if (menu->ownMsgData == 1) {
+        DestroyMsgData(menu->msgData);
+    }
+    Heap_Free(menu);
+}
+
+void ScriptMenu_CloseMultichoice(ScriptMenu *menu) {
+    PlaySE(SEQ_SE_DP_SELECT);
+    Delete2dMenu(menu->menu2dPtr, NULL);
+    EraseFrameAndWindow1(menu->menu2d.window, FALSE);
+    RemoveWindow(menu->menu2d.window);
+    SysTask_Destroy(menu->task);
+    ScriptMenu_Free(menu);
+}
+
+ScriptMenu *ScriptMenu_Create(FieldSystem *fieldSystem, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData) {
+    return ScriptMenu_New(fieldSystem, x, y, initCursorPos, cancellable, ret_p, msgFmt, window, msgData);
+}
+
+void ScriptMenu_AddListItem(ScriptMenu *menu, int msgId, int helpMsgId, int value) {
+    ScriptMenu_AppendListItem(menu, msgId, helpMsgId, value);
+}
+
+void ScriptMenu_ShowList(ScriptMenu *menu) {
+    u32 width = ScriptMenu_GetListItemsWidth(menu);
+    u32 tiles;
+    if ((width & 7) == 0) {
+        tiles = width >> 3;
+    } else {
+        tiles = (width >> 3) + 1;
+    }
+    if (menu->anchorRight) {
+        menu->x -= tiles;
+    }
+    if (menu->anchorBottom) {
+        if (menu->count > 8) {
+            menu->y -= 16;
+        } else {
+            menu->y -= menu->count * 2;
+        }
+    }
+    ScriptMenu_OpenListWindow(menu, tiles);
+}
+
+void ScriptMenu_ShowListWithWidth(ScriptMenu *menu, u16 width) {
+    ScriptMenu_OpenListWindow(menu, width);
+}
+
+static void ScriptMenu_OpenListWindow(ScriptMenu *menu, u32 width) {
+    if (menu->count > 8) {
+        AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, width, 16, 13, 0x3D);
+    } else {
+        AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, width, menu->count * 2, 13, 0x3D);
+    }
+    LoadUserFrameGfx1(menu->fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(&menu->window, TRUE, 0x3D9, 11);
+    ScriptMenu_SetupListTemplate(menu);
+    menu->listMenu = ListMenuInit(&menu->listTemplate, 0, menu->initCursorPos, HEAP_ID_FIELD1);
+    ScriptMenu_PrintCursorHelpMessage(menu);
+    menu->task = SysTask_CreateOnMainQueue(ScriptMenu_ListTask, menu, 0);
+}
+
+void ScriptMenu_ShowListAtPosition(ScriptMenu *menu, u16 *scroll_p, u16 *row_p) {
+    u32 width = ScriptMenu_GetListItemsWidth(menu);
+    u32 tiles;
+    if ((width & 7) == 0) {
+        tiles = width >> 3;
+    } else {
+        tiles = (width >> 3) + 1;
+    }
+    if (menu->anchorRight) {
+        menu->x -= tiles;
+    }
+    if (menu->anchorBottom) {
+        if (menu->count > 8) {
+            menu->y -= 16;
+        } else {
+            menu->y -= menu->count * 2;
+        }
+    }
+    if (menu->count > 8) {
+        AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, tiles, 16, 13, 0x3D);
+    } else {
+        AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, tiles, menu->count * 2, 13, 0x3D);
+    }
+    LoadUserFrameGfx1(menu->fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(&menu->window, TRUE, 0x3D9, 11);
+    ScriptMenu_SetupListTemplate(menu);
+    menu->scroll_p = scroll_p;
+    menu->row_p = row_p;
+    menu->lastRow = *menu->scroll_p + *menu->row_p;
+    menu->listMenu = ListMenuInit(&menu->listTemplate, *scroll_p, *row_p, HEAP_ID_FIELD1);
+    ScriptMenu_PrintCursorHelpMessage(menu);
+    menu->task = SysTask_CreateOnMainQueue(ScriptMenu_ListTask, menu, 0);
+}
+
+static void ScriptMenu_AppendListItem(ScriptMenu *menu, int msgId, int helpMsgId, int value) {
+    String *template = String_New(80, HEAP_ID_FIELD1);
+    ReadMsgDataIntoString(menu->msgData, msgId, template);
+    StringExpandPlaceholders(menu->msgFmt, menu->strbufs[menu->count], template);
+    menu->items[menu->count].text = menu->strbufs[menu->count];
+    String_Delete(template);
+    if (value == 0xFA) {
+        menu->items[menu->count].value = LIST_HEADER;
+    } else {
+        menu->items[menu->count].value = value;
+    }
+    menu->msgIds[menu->count] = helpMsgId;
+    menu->count++;
+}
+
+static u32 ScriptMenu_GetListItemsWidth(ScriptMenu *menu) {
+    u32 maxWidth = 0;
+    int i;
+
+    for (i = 0; i < menu->count; i++) {
+        if (menu->items[i].text == NULL) {
+            break;
+        }
+        {
+            u32 width = FontID_String_GetWidth(0, menu->items[i].text, 0);
+            if (maxWidth < width) {
+                maxWidth = width;
+            }
+        }
+    }
+    return maxWidth + 12;
+}
+
+static void ScriptMenu_SetupListTemplate(ScriptMenu *menu) {
+    menu->listTemplate.items = menu->items;
+    menu->listTemplate.moveCursorFunc = ScriptMenu_ListMoveCursorCallback;
+    menu->listTemplate.itemPrintFunc = ScriptMenu_ListItemPrintCallback;
+    menu->listTemplate.window = &menu->window;
+    menu->listTemplate.totalItems = menu->count;
+    menu->listTemplate.maxShowed = 8;
+    menu->listTemplate.header_X = 1;
+    menu->listTemplate.item_X = 12;
+    menu->listTemplate.cursor_X = 2;
+    menu->listTemplate.upText_Y = 1;
+    menu->listTemplate.cursorPal = 1;
+    menu->listTemplate.fillValue = 15;
+    menu->listTemplate.cursorShadowPal = 2;
+    menu->listTemplate.lettersSpacing = 0;
+    menu->listTemplate.itemVerticalPadding = 0;
+    menu->listTemplate.scrollMultiple = 1;
+    menu->listTemplate.fontId = 0;
+    menu->listTemplate.cursorKind = 0;
+    menu->listTemplate.data = menu;
+}
+
+static void ScriptMenu_ListItemPrintCallback(ListMenu *listMenu, s32 itemId, u8 y) {
+    if (itemId == LIST_HEADER) {
+        ListMenuOverrideSetColors(listMenu, 3, 15, 4);
+    } else {
+        ListMenuOverrideSetColors(listMenu, 1, 15, 2);
+    }
+}
+
+static void ScriptMenu_ListMoveCursorCallback(ListMenu *listMenu, s32 itemId, u8 onInit) {
+    u16 row;
+    u16 scroll;
+    ScriptMenu *menu;
+
+    row = 0;
+    scroll = 0;
+    menu = (ScriptMenu *)ListMenuGetTemplateField(listMenu, LISTMENUATTR_DATA);
+    ListMenuGetScrollAndRow(listMenu, &row, &scroll);
+    if (menu->scroll_p != NULL && menu->row_p != NULL) {
+        *menu->scroll_p = row;
+        *menu->row_p = scroll;
+    }
+}
+
+static void ScriptMenu_ListTask(SysTask *task, void *data) {
+    ScriptMenu *menu = data;
+    if (menu->delay != 0) {
+        menu->delay--;
+        return;
+    }
+    if (IsPaletteFadeFinished()) {
+        u16 oldRow;
+        int input = ListMenu_ProcessInput(menu->listMenu);
+        oldRow = menu->lastRow;
+        ListMenuGetCurrentItemArrayId(menu->listMenu, &menu->lastRow);
+        if (oldRow != menu->lastRow) {
+            PlaySE(SEQ_SE_DP_SELECT);
+        }
+        int keys = gSystem.newAndRepeatedKeys;
+        if ((keys & PAD_KEY_UP) || (keys & PAD_KEY_DOWN) || (keys & PAD_KEY_LEFT) || (keys & PAD_KEY_RIGHT)) {
+            ScriptMenu_PrintCursorHelpMessage(menu);
+        }
+        switch (input) {
+        case LIST_CANCEL:
+            if (menu->cancellable == 1) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                *menu->ret_p = SCRIPT_MENU_RESULT_CANCEL;
+                ScriptMenu_CloseList(menu);
+                return;
+            }
+            break;
+        case LIST_NOTHING_CHOSEN:
+            break;
+        default:
+            PlaySE(SEQ_SE_DP_SELECT);
+            *menu->ret_p = input;
+            ScriptMenu_CloseList(menu);
+            break;
+        }
+    }
+}
+
+static void ScriptMenu_CloseList(ScriptMenu *menu) {
+    int i;
+
+    PlaySE(SEQ_SE_DP_SELECT);
+    DestroyListMenu(menu->listMenu, NULL, NULL);
+    EraseFrameAndWindow1(menu->listTemplate.window, FALSE);
+    RemoveWindow(&menu->window);
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        String_Delete(menu->strbufs[i]);
+    }
+    if (menu->ownMsgData == 1) {
+        DestroyMsgData(menu->msgData);
+    }
+    SysTask_Destroy(menu->task);
+    Heap_Free(menu);
+}
+
+static void ScriptMenu_PrintHelpMessage(ScriptMenu *menu, u32 msgId, u32 textSpeed) {
+    String *template = String_New(90, HEAP_ID_FIELD1);
+    String *dest = String_New(90, HEAP_ID_FIELD1);
+    FillWindowPixelBuffer(menu->printWindow, 15);
+    ReadMsgDataIntoString(menu->msgData, msgId, template);
+    StringExpandPlaceholders(menu->msgFmt, dest, template);
+    AddTextPrinterParameterized(menu->printWindow, 1, dest, 0, 0, textSpeed, NULL);
+    String_Delete(template);
+    String_Delete(dest);
+}
+
+static void ScriptMenu_PrintCursorHelpMessage(ScriptMenu *menu) {
+    ListMenuGetCurrentItemArrayId(menu->listMenu, &menu->cursorPos);
+    if (menu->msgIds[menu->cursorPos] != SCRIPT_MENU_NO_HELP_MSG) {
+        ScriptMenu_PrintHelpMessage(menu, menu->msgIds[menu->cursorPos], 0);
+    }
+}
+
+#pragma opt_propagation off
+
+void PrintCurFloorInNewWindow(FieldSystem *fieldSystem, u8 x, u8 y, u16 *p_ret, MessageFormat *msgFmt, u16 floor) {
+    u32 tiles;
+    u8 flag;
+    ScriptMenu *menu;
+    u32 width;
+    u32 msg;
+
+    menu = ScriptMenu_New(fieldSystem, x, y, 0, 0, p_ret, msgFmt, NULL, NULL);
+    {
+        u8 fontId = 0;
+        width = GetFontAttribute(fontId, 0) * 8;
+    }
+    if (width % 8 == 0) {
+        tiles = width / 8;
+    } else {
+        u32 roundedUp = 1 + width / 8;
+        tiles = roundedUp;
+    }
+    AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, tiles, 4, 13, 221);
+    LoadUserFrameGfx1(menu->fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 985, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(&menu->window, TRUE, 985, 11);
+    FillWindowPixelRect(&menu->window, 15, 0, 0, tiles * 8, 32);
+    ScriptMenu_PrintMessage(menu, msg_0191_00016, 0, 0);
+    msg = GetFloorNameMessage(fieldSystem->location->mapId, floor, &flag);
+    ScriptMenu_PrintMessage(menu, msg, flag, 16);
+    menu->menu2d.window = &menu->window;
+    CopyWindowToVram(&menu->window);
+    menu->task = SysTask_CreateOnMainQueue(ScriptMenu_FloorWindowTask, menu, 0);
+}
+
+#pragma opt_propagation reset
+
+static void ScriptMenu_PrintMessage(ScriptMenu *menu, u16 msgId, u8 x, u8 y) {
+    String *template = String_New(90, HEAP_ID_FIELD1);
+    String *dest = String_New(90, HEAP_ID_FIELD1);
+    ReadMsgDataIntoString(menu->msgData, msgId, template);
+    StringExpandPlaceholders(menu->msgFmt, dest, template);
+    AddTextPrinterParameterized(&menu->window, 0, dest, x, y, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(template);
+    String_Delete(dest);
+}
+
+static void ScriptMenu_FloorWindowTask(SysTask *task, void *data) {
+    ScriptMenu *menu = data;
+    int i;
+
+    if (*menu->ret_p != 0xFFFF) {
+        return;
+    }
+    EraseFrameAndWindow1(menu->menu2d.window, FALSE);
+    RemoveWindow(menu->menu2d.window);
+    for (i = 0; i < SCRIPT_MENU_MAX_ITEMS; i++) {
+        String_Delete(menu->strbufs[i]);
+    }
+    if (menu->ownMsgData == 1) {
+        DestroyMsgData(menu->msgData);
+    }
+    SysTask_Destroy(menu->task);
+    Heap_Free(menu);
+}
+
+int MapNumToFloorNo(int mapId) {
+    switch (mapId) {
+    case MAP_GOLDENROD_RADIO_TOWER_5F:
+        return 0;
+    case MAP_GOLDENROD_RADIO_TOWER_OBSERVATION_DECK:
+        return 1;
+    case MAP_OLIVINE_LIGHTHOUSE_1F:
+        return 0;
+    case MAP_OLIVINE_LIGHTHOUSE_LIGHT_ROOM:
+        return 1;
+    case MAP_SAFFRON_SILPH_CO_HQ:
+        return 0;
+    case MAP_SAFFRON_SILPH_CO_ROTOM_ROOM:
+        return 1;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_1F:
+        return 1;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_2F:
+        return 2;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_3F:
+        return 3;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_4F:
+        return 4;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_5F:
+        return 5;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_6F:
+        return 6;
+    case MAP_GOLDENROD_DEPARTMENT_STORE_BASEMENT:
+        return 0;
+    case MAP_CELADON_DEPARTMENT_STORE_1F:
+        return 0;
+    case MAP_CELADON_DEPARTMENT_STORE_2F:
+        return 1;
+    case MAP_CELADON_DEPARTMENT_STORE_3F:
+        return 2;
+    case MAP_CELADON_DEPARTMENT_STORE_4F:
+        return 3;
+    case MAP_CELADON_DEPARTMENT_STORE_5F:
+        return 4;
+    case MAP_CELADON_DEPARTMENT_STORE_ROOF:
+        return 5;
+    case MAP_CELADON_CONDOMINIUMS_1F:
+        return 0;
+    case MAP_CELADON_CONDOMINIUMS_2F:
+        return 1;
+    case MAP_CELADON_CONDOMINIUMS_3F:
+        return 2;
+    case MAP_CELADON_CONDOMINIUMS_ROOF:
+        return 3;
+    default:
+        GF_ASSERT(FALSE);
+        return 0;
+    }
+}
+
+static int GetFloorNameMessage(u32 mapId, int floor, u8 *width_p) {
+    switch (mapId) {
+    case MAP_GOLDENROD_DEPARTMENT_STORE_ELEVATOR:
+        if (floor == 0) {
+            *width_p = 0x20;
+            return msg_0191_00122;
+        }
+        break;
+    case MAP_CELADON_CONDOMINIUMS_LEFT_ELEVATOR:
+    case MAP_CELADON_CONDOMINIUMS_RIGHT_ELEVATOR:
+        if (floor == 3) {
+            *width_p = 0x10;
+            return msg_0191_00125;
+        }
+        break;
+    }
+    *width_p = 0x20;
+    return msg_0191_00017;
+}
+
+void ScriptMenu_ShowMultichoiceGrid(ScriptMenu *menu, u8 numColumns) {
+    u32 width;
+    int itemWidth;
+    u8 numRows;
+
+    width = ScriptMenu_GetItemsWidth(menu);
+    if ((width & 7) == 0) {
+        itemWidth = width >> 3;
+    } else {
+        itemWidth = (width >> 3) + 1;
+    }
+    numRows = menu->count / numColumns;
+    if (menu->count % numColumns) {
+        numRows++;
+    }
+    AddWindowParameterized(menu->fieldSystem->bgConfig, &menu->window, GF_BG_LYR_MAIN_3, menu->x, menu->y, itemWidth * numColumns, numRows * 2, 13, 0x3D);
+    LoadUserFrameGfx1(menu->fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(&menu->window, TRUE, 0x3D9, 11);
+    ScriptMenu_SetupGridTemplate(menu, numColumns, numRows);
+    menu->menu2dPtr = Create2dMenu(&menu->menu2d, menu->initCursorPos, HEAP_ID_FIELD1);
+    menu->task = SysTask_CreateOnMainQueue(ScriptMenu_MultichoiceTask, menu, 0);
+}
+
+static void ScriptMenu_SetupGridTemplate(ScriptMenu *menu, u8 wide, u8 high) {
+    menu->menu2d.items = (ListMenuItem *)menu->entries;
+    menu->menu2d.window = &menu->window;
+    menu->menu2d.fontId = 0;
+    menu->menu2d.itemsWide = wide;
+    menu->menu2d.itemsHigh = high;
+    menu->menu2d.yTop = 0;
+    menu->menu2d.cursorType = 0;
+}
+
+Window *FieldSystem_ShowMoneyBox(FieldSystem *fieldSystem, u8 x, u8 y) {
+    Window *window;
+    MsgData *msgData;
+    String *string;
+
+    window = AllocWindows(HEAP_ID_FIELD1, 1);
+    AddWindowParameterized(fieldSystem->bgConfig, window, GF_BG_LYR_MAIN_3, x, y, 10, 4, 13, 1);
+    LoadUserFrameGfx1(fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(window, TRUE, 0x3D9, 11);
+    FillWindowPixelBuffer(window, 15);
+    msgData = NewMsgDataFromNarc((MsgDataLoadType)0, NARC_msgdata_msg, NARC_msg_msg_0435_bin, HEAP_ID_FIELD1);
+    string = NewString_ReadMsgData(msgData, msg_0435_00030);
+    AddTextPrinterParameterized(window, 0, string, 0, 0, 0xFF, NULL);
+    DestroyMsgData(msgData);
+    String_Delete(string);
+    MoneyBoxSys_Update(fieldSystem, window);
+    return window;
+}
+
+void MoneyBoxSys_Delete(Window *moneybox) {
+    EraseFrameAndWindow1(moneybox, FALSE);
+    WindowArray_Delete(moneybox, 1);
+}
+
+// Second line of the money box: the player's money, right-aligned.
+void MoneyBoxSys_Update(FieldSystem *fieldSystem, Window *moneybox) {
+    MsgData *msgData;
+    MessageFormat *msgFmt;
+    String *string;
+    String *template;
+    int x;
+
+    FillWindowPixelRect(moneybox, 15, 0, 16, 80, 16);
+    msgData = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0435_bin, HEAP_ID_FIELD1);
+    msgFmt = MessageFormat_New(HEAP_ID_FIELD1);
+    string = String_New(16, HEAP_ID_FIELD1);
+    template = NewString_ReadMsgData(msgData, msg_0435_00031);
+    BufferIntegerAsString(msgFmt, 0, PlayerProfile_GetMoney(Save_PlayerData_GetProfile(fieldSystem->saveData)), 6, PRINTING_MODE_RIGHT_ALIGN, TRUE);
+    StringExpandPlaceholders(msgFmt, string, template);
+    x = 80 - FontID_String_GetWidth(0, string, 0);
+    AddTextPrinterParameterized(moneybox, 0, string, x, 16, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(template);
+    String_Delete(string);
+    MessageFormat_Delete(msgFmt);
+    DestroyMsgData(msgData);
+    ScheduleWindowCopyToVram(moneybox);
+}
+
+Window *PointsBox_New(FieldSystem *fieldSystem, u8 type, u8 x, u8 y) {
+    Window *window = AllocWindows(HEAP_ID_FIELD1, 1);
+    AddWindowParameterized(fieldSystem->bgConfig, window, GF_BG_LYR_MAIN_3, x, y, 10, 2, 13, 41);
+    LoadUserFrameGfx1(fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(window, TRUE, 0x3D9, 11);
+    PointsBox_Update(fieldSystem, window, type);
+    return window;
+}
+
+void PointsBox_Delete(Window *window) {
+    EraseFrameAndWindow1(window, FALSE);
+    WindowArray_Delete(window, 1);
+}
+
+enum PointsBoxType {
+    POINTS_BOX_COINS,
+    POINTS_BOX_BATTLE_POINTS,
+    POINTS_BOX_ATHLETE_POINTS,
+};
+
+// Any other type shows the athlete points.
+void PointsBox_Update(FieldSystem *fieldSystem, Window *window, u8 type) {
+    MsgData *msgData;
+    MessageFormat *msgFmt;
+    String *string;
+    String *template;
+    int value;
+    int x;
+
+    FillWindowPixelBuffer(window, 15);
+    msgData = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0191_bin, HEAP_ID_FIELD1);
+    msgFmt = MessageFormat_New(HEAP_ID_FIELD1);
+    string = String_New(16, HEAP_ID_FIELD1);
+    switch (type) {
+    case POINTS_BOX_COINS:
+        template = NewString_ReadMsgData(msgData, msg_0191_00193);
+        value = Coins_GetValue(Save_PlayerData_GetCoinsAddr(fieldSystem->saveData));
+        break;
+    case POINTS_BOX_BATTLE_POINTS:
+        template = NewString_ReadMsgData(msgData, msg_0191_00220);
+        value = FrontierData_BattlePointAction(Save_FrontierData_Get(fieldSystem->saveData), 0, FRONTIER_DATA_GET);
+        break;
+    case POINTS_BOX_ATHLETE_POINTS:
+    default:
+        template = NewString_ReadMsgData(msgData, msg_0191_00223);
+        value = PokeathlonSave_GetAthletePoints(Save_Pokeathlon_Get(fieldSystem->saveData));
+        break;
+    }
+    BufferIntegerAsString(msgFmt, 0, value, 5, PRINTING_MODE_RIGHT_ALIGN, TRUE);
+    StringExpandPlaceholders(msgFmt, string, template);
+    x = 80 - FontID_String_GetWidth(0, string, 0);
+    AddTextPrinterParameterized(window, 0, string, x, 0, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(template);
+    String_Delete(string);
+    MessageFormat_Delete(msgFmt);
+    DestroyMsgData(msgData);
+    ScheduleWindowCopyToVram(window);
+}
+
+// The savings window: Mom's savings and the player's money.
+Window *SavingsBox_New(FieldSystem *fieldSystem, u8 x, u8 y) {
+    Window *window = AllocWindows(HEAP_ID_FIELD1, 1);
+    MsgData *msgData;
+    String *string;
+    AddWindowParameterized(fieldSystem->bgConfig, window, GF_BG_LYR_MAIN_3, x, y, 16, 8, 13, 1);
+    LoadUserFrameGfx1(fieldSystem->bgConfig, GF_BG_LYR_MAIN_3, 0x3D9, 11, 0, HEAP_ID_FIELD1);
+    DrawFrameAndWindow1(window, TRUE, 0x3D9, 11);
+    FillWindowPixelBuffer(window, 15);
+    msgData = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0191_bin, HEAP_ID_FIELD1);
+    string = NewString_ReadMsgData(msgData, msg_0191_00330);
+    AddTextPrinterParameterized(window, 0, string, 0, 0, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(string);
+    string = NewString_ReadMsgData(msgData, msg_0191_00331);
+    AddTextPrinterParameterized(window, 0, string, 0, 32, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(string);
+    DestroyMsgData(msgData);
+    SavingsBox_Update(fieldSystem, window);
+    return window;
+}
+
+void SavingsBox_Delete(Window *window) {
+    EraseFrameAndWindow1(window, FALSE);
+    WindowArray_Delete(window, 1);
+}
+
+void SavingsBox_Update(FieldSystem *fieldSystem, Window *window) {
+    FillWindowPixelRect(window, 15, 0, 128, 128, 16);
+    FillWindowPixelRect(window, 15, 0, 384, 128, 16);
+    MsgData *msgData = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0191_bin, HEAP_ID_FIELD1);
+    MessageFormat *msgFmt = MessageFormat_New(HEAP_ID_FIELD1);
+    String *string = String_New(16, HEAP_ID_FIELD1);
+    String *template = NewString_ReadMsgData(msgData, msg_0191_00332);
+    u32 money = PhoneCallPersistentState_MomSavings_BalanceAction(SaveData_GetPhoneCallPersistentState(fieldSystem->saveData), 0, 0);
+    BufferIntegerAsString(msgFmt, 0, money, 6, PRINTING_MODE_LEFT_ALIGN, TRUE);
+    StringExpandPlaceholders(msgFmt, string, template);
+    u32 x = 128 - FontID_String_GetWidth(0, string, 0);
+    AddTextPrinterParameterized(window, 0, string, x, 16, TEXT_SPEED_NOTRANSFER, NULL);
+    money = PlayerProfile_GetMoney(Save_PlayerData_GetProfile(fieldSystem->saveData));
+    BufferIntegerAsString(msgFmt, 0, money, 6, PRINTING_MODE_LEFT_ALIGN, TRUE);
+    StringExpandPlaceholders(msgFmt, string, template);
+    x = 128 - FontID_String_GetWidth(0, string, 0);
+    AddTextPrinterParameterized(window, 0, string, x, 48, TEXT_SPEED_NOTRANSFER, NULL);
+    String_Delete(template);
+    String_Delete(string);
+    MessageFormat_Delete(msgFmt);
+    DestroyMsgData(msgData);
+    ScheduleWindowCopyToVram(window);
+}
+
+ListMenuItem *ScriptMenu_GetListItems(ScriptMenu *menu) {
+    return menu->items;
+}
+
+u8 ScriptMenu_GetCount(ScriptMenu *menu) {
+    return menu->count;
+}
+
+Window *BattleRegulationWindow_New(FieldSystem *fieldSystem, u16 ruleset) {
+    Window *windows = AllocWindows(HEAP_ID_FIELD1, 1);
+    BattleRegulation_PrintRulesWindow(fieldSystem, windows, ruleset);
+    return windows;
+}
+
+void BattleRegulationWindow_Delete(Window *window) {
+    EraseFrameAndWindow1(window, FALSE);
+    WindowArray_Delete(window, 1);
+}
+
+void ScriptMenu_PrintItemHelpMessage(ScriptMenu *menu, int idx) {
+    String *template;
+    String *dest;
+
+    if (menu->msgIds[idx] == SCRIPT_MENU_NO_HELP_MSG) {
+        return;
+    }
+    template = String_New(90, HEAP_ID_FIELD1);
+    dest = String_New(90, HEAP_ID_FIELD1);
+    FillWindowPixelBuffer(menu->printWindow, 15);
+    ReadMsgDataIntoString(menu->msgData, menu->msgIds[idx], template);
+    StringExpandPlaceholders(menu->msgFmt, dest, template);
+    AddTextPrinterParameterized(menu->printWindow, 1, dest, 0, 0, 0, NULL);
+    String_Delete(template);
+    String_Delete(dest);
+}
+
+u8 ScriptMenu_IsCancellable(ScriptMenu *menu) {
+    return menu->cancellable;
+}
+
+void ScriptMenu_SetAnchorRight(ScriptMenu *menu, int set) {
+    menu->anchorRight = (u8)set;
+}
+
+void ScriptMenu_SetAnchorBottom(ScriptMenu *menu, int set) {
+    menu->anchorBottom = (u8)set;
+}

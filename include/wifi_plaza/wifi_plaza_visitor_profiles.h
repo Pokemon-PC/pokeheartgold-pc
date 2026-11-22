@@ -1,0 +1,27 @@
+#ifndef POKEHEARTGOLD_WIFI_PLAZA_VISITOR_PROFILES_H
+#define POKEHEARTGOLD_WIFI_PLAZA_VISITOR_PROFILES_H
+
+#include "overlay_manager.h"
+#include "save.h"
+
+struct WiFiPlazaPlace;
+
+// Copied around as one word; only its low byte, the current hour (0-23), is read.
+typedef union VisitorProfilesClock {
+    u32 raw;
+    u8 hour;
+} VisitorProfilesClock;
+
+// Arguments built by the lobby overlay.
+typedef struct VisitorProfilesArgs {
+    struct WiFiPlazaPlace *visitors; // lobby visitor table, read through WiFiPlazaPlaces_GetCountry and friends
+    SaveData *saveData;
+    VisitorProfilesClock clock;
+    struct WiFiPlazaWork *lobby;
+} VisitorProfilesArgs;
+
+BOOL VisitorProfiles_Init(OverlayManager *man, int *state);
+BOOL VisitorProfiles_Main(OverlayManager *man, int *state);
+BOOL VisitorProfiles_Exit(OverlayManager *man, int *state);
+
+#endif // POKEHEARTGOLD_WIFI_PLAZA_VISITOR_PROFILES_H

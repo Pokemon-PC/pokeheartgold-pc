@@ -1,0 +1,78 @@
+# Native PC port: builds the game on Windows, Linux and macOS (x86_64).
+# No game data is used or produced here: the PC executable needs the player's
+# own ROM at run time (see docs/pc_port/README_PC.md).
+name: PC port
+
+on:
+  push:
+    paths: ['src/**', 'lib/**', 'include/**', 'cmake/**', 'CMakeLists.txt', 'tools/pc_port/**', '.github/workflows/pc-port.yml']
+  pull_request:
+    paths: ['src/**', 'lib/**', 'include/**', 'cmake/**', 'CMakeLists.txt', 'tools/pc_port/**', '.github/workflows/pc-port.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-15-intel    # Intel runner: the port targets x86_64
+            name: macos
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.name == 'windows' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (Windows, MSYS2 CLANG64)
+        if: matrix.name == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-llvm-tools
+
+      - name: Toolchain (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build cmake python3 \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libgl1-mesa-dev libasound2-dev libpulse-dev libudev-dev
+
+      - name: Toolchain (macOS)
+        if: matrix.name == 'macos'
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build build --target pokeheartgold phg_m2_selftest
+
+      - name: Selftest (headless, no game data)
+        env:
+          PHG_MUTE: '1'
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: cd build && ./phg_m2_selftest --save m2_selftest_save.bin
+
+      - name: Package
+        run: python3 tools/pc_port/package.py --build build --out dist || python tools/pc_port/package.py --build build --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PokemonHeartGold-PC-${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/symbols

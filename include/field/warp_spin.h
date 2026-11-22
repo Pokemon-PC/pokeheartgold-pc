@@ -1,0 +1,18 @@
+#ifndef POKEHEARTGOLD_FIELD_WARP_SPIN_H
+#define POKEHEARTGOLD_FIELD_WARP_SPIN_H
+
+#include "field_system.h"
+
+// The player spinning up out of the map (departing: rise and fade out) or down into it (arriving: fade in and
+// descend), used by the warp tasks.
+typedef struct WarpSpinTask {
+    FieldSystem *fieldSystem;
+    int *done; // set to 1 when the spin has ended
+    int state;
+    int counter;
+    u32 facing;
+} WarpSpinTask;
+
+void FieldSystem_StartWarpSpin(FieldSystem *fieldSystem, BOOL departing, int *done);
+
+#endif // POKEHEARTGOLD_FIELD_WARP_SPIN_H

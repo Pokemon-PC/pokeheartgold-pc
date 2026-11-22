@@ -1,0 +1,314 @@
+#include "frontier/battle_arcade_setup.h"
+
+#include "global.h"
+
+#include "constants/battle.h"
+#include "constants/pokemon.h"
+
+#include "battle/battle_setup.h"
+#include "frontier/battle_arcade_data.h"
+#include "frontier/frontier.h"
+#include "frontier/frontier_trainer_record.h"
+#include "frontier/frontier_trainers.h"
+
+#include "assert.h"
+#include "communication_core.h"
+#include "communication_player_state.h"
+#include "heap.h"
+#include "math_util.h"
+#include "party.h"
+#include "player_data.h"
+#include "pokemon.h"
+#include "use_item_on_mon.h"
+
+static u32 BattleArcade_GetBattleType(int type);
+static u32 BattleArcade_GetTrainerAIFlags(ArcadeContext *ctx);
+
+// Battle Arcade trainers and battles: the trainers of a round, the battle setup of an arcade battle (with the weather
+// and party swap events of the game board), the opponents' party and the game board event colors.
+
+#define ARCADE_EVENT_SWAP_PARTIES 27
+#define ARCADE_EVENT_28           28
+
+static const FrontierTrainerRange sBattleArcadeTrainerRanges[] = {
+    { 0,   99,  100, 119 },
+    { 80,  119, 120, 139 },
+    { 100, 139, 140, 159 },
+    { 120, 159, 160, 179 },
+    { 140, 179, 180, 199 },
+    { 160, 199, 200, 219 },
+    { 180, 219, 220, 239 },
+    { 200, 299, 200, 299 },
+};
+
+static u32 BattleArcade_GetRandomTrainerId(u32 type, u32 round, u32 battleNo) {
+    u16 min;
+    s32 span;
+
+    if (type == FRONTIER_CHALLENGE_SINGLE) {
+        u32 battle = battleNo + 1;
+        battle += round * 7;
+        if (battle == FRONTIER_BRAIN_BATTLE_SILVER) {
+            return ARCADE_STAR_SILVER;
+        }
+        if (battle == FRONTIER_BRAIN_BATTLE_GOLD) {
+            return ARCADE_STAR_GOLD;
+        }
+    }
+    if (round >= 8) {
+        round = 7;
+    }
+    if (battleNo == 6 || battleNo == 13) {
+        min = sBattleArcadeTrainerRanges[round].lastBattleMin;
+        span = sBattleArcadeTrainerRanges[round].lastBattleMax - min;
+    } else {
+        min = sBattleArcadeTrainerRanges[round].min;
+        span = sBattleArcadeTrainerRanges[round].max - min;
+    }
+    return min + LCRandom() % span;
+}
+
+void BattleArcade_GetRoundTrainerIds(u32 type, u32 round, u16 *trainerIds, int count) {
+    int i = 0;
+    u16 *trainerId = trainerIds;
+
+    do {
+        int j;
+        *trainerId = BattleArcade_GetRandomTrainerId(type, round, i);
+        for (j = 0; j < i; j++) {
+            if (trainerIds[j] == trainerIds[i]) {
+                break;
+            }
+        }
+        if (j == i) {
+            trainerId++;
+            i++;
+        }
+    } while (i < count);
+}
+
+u8 BattleArcade_GetMonCount(u8 type, int both) {
+    switch (type) {
+    case 0:
+    case 1:
+        return 3;
+    case 2:
+    case 3:
+        if (both == FALSE) {
+            return 2;
+        }
+        return 4;
+    default:
+        GF_ASSERT(FALSE);
+        return 3;
+    }
+}
+
+u8 BattleArcade_GetOpponentMonCount(u8 type, int both) {
+    switch (type) {
+    case 0:
+    case 1:
+        return 3;
+    case 2:
+    case 3:
+        if (both == FALSE) {
+            return 2;
+        }
+        return 4;
+    default:
+        GF_ASSERT(FALSE);
+        return 3;
+    }
+}
+
+BattleSetup *BattleArcade_NewBattleSetup(ArcadeContext *ctx, FrontierLaunchArgs *args) {
+    FrontierTrainerRecord trainer;
+    int i;
+    Party *playerParty;
+    Party *opponentParty;
+    u8 playerCount;
+    u8 opponentCount;
+    BattleSetup *setup;
+    Pokemon *mon;
+    int slot;
+
+    playerCount = BattleArcade_GetMonCount(ctx->type, FALSE);
+    opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, FALSE);
+    setup = BattleSetup_New(HEAP_ID_FIELD2, BattleArcade_GetBattleType(ctx->type));
+    BattleSetup_InitFromSaveData(setup, NULL, args->saveData, args->mapId, args->bagCursor, args->keyPressedSave);
+    setup->battleBg = BATTLE_BG_BATTLE_ARCADE;
+    setup->terrain = TERRAIN_BATTLE_ARCADE;
+    setup->weatherType = ctx->weather;
+    opponentParty = ctx->opponentParty;
+    playerParty = ctx->playerParty;
+    if (ctx->eventId == ARCADE_EVENT_SWAP_PARTIES) {
+        playerParty = ctx->opponentParty;
+        opponentParty = ctx->playerParty;
+    }
+    Party_InitWithMaxSize(setup->party[BATTLER_PLAYER], playerCount);
+    // in link battles the second player's Pokemon follow the first player's in the party
+    if (!Comm_GetLocalNetId()) {
+        slot = 0;
+    } else {
+        slot = 2;
+    }
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < playerCount; i++) {
+        CopyPokemonToPokemon(Party_GetMonByIndex(playerParty, slot), mon);
+        BattleSetup_AddMonToParty(setup, mon, BATTLER_PLAYER);
+        slot++;
+    }
+    Heap_Free(mon);
+    BattleSetup_SetAllySideBattlersToPlayer(setup);
+    Heap_Free(FrontierTrainer_Load(&trainer, ctx->trainerIds[ctx->battleNo], HEAP_ID_FIELD2, NARC_a_2_0_2));
+    FrontierTrainer_SetBattleTrainer(setup, &trainer, opponentCount, BATTLER_ENEMY, HEAP_ID_FIELD2);
+    Party_InitWithMaxSize(setup->party[BATTLER_ENEMY], BattleArcade_GetOpponentMonCount(ctx->type, FALSE));
+    for (i = 0; i < BATTLER_MAX; i++) {
+        setup->trainer[i].data.aiFlags = BattleArcade_GetTrainerAIFlags(ctx);
+    }
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < opponentCount; i++) {
+        CopyPokemonToPokemon(Party_GetMonByIndex(opponentParty, i), mon);
+        BattleSetup_AddMonToParty(setup, mon, BATTLER_ENEMY);
+    }
+    Heap_Free(mon);
+    switch (ctx->type) {
+    case 2:
+    case 3:
+        BattleSetup_SetAllySideBattlersToPlayer(setup);
+        PlayerProfile_Copy(CommPlayerInfo_GetProfile(1 - Comm_GetLocalNetId()), setup->profile[BATTLER_PLAYER2]);
+        Heap_Free(FrontierTrainer_Load(&trainer, ctx->trainerIds[ctx->battleNo + 7], HEAP_ID_FIELD2, NARC_a_2_0_2));
+        FrontierTrainer_SetBattleTrainer(setup, &trainer, opponentCount, BATTLER_ENEMY2, HEAP_ID_FIELD2);
+        Party_InitWithMaxSize(setup->party[BATTLER_ENEMY2], BattleArcade_GetOpponentMonCount(ctx->type, FALSE));
+        mon = AllocMonZeroed(HEAP_ID_FIELD2);
+        for (i = 0; i < opponentCount; i++) {
+            CopyPokemonToPokemon(Party_GetMonByIndex(opponentParty, opponentCount + i), mon);
+            BattleSetup_AddMonToParty(setup, mon, BATTLER_ENEMY2);
+        }
+        Heap_Free(mon);
+        break;
+    }
+    HealParty(ctx->playerParty);
+    HealParty(ctx->opponentParty);
+    return setup;
+}
+
+static u32 BattleArcade_GetBattleType(int type) {
+    switch (type) {
+    case 0:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_TRAINER;
+    case 1:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    case 2:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_MULTI | BATTLE_TYPE_LINK | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    case 3:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_MULTI | BATTLE_TYPE_LINK | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    default:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_TRAINER;
+    }
+}
+
+int BattleArcade_GetMonLevel(ArcadeContext *ctx) {
+    return 50;
+}
+
+BOOL BattleArcade_MultiplayerCheck(int type) {
+    switch (type) {
+    case 2:
+    case 3:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static void BattleArcade_SetMonOriginalTrainer(ArcadeContext *ctx, Pokemon *mon) {
+    PlayerProfile *profile = Save_PlayerData_GetProfile(ctx->saveData);
+    MonSetCatchDataNoHealBall(mon, profile, 4, 0, 0, HEAP_ID_FIELD2);
+}
+
+void BattleArcade_AddMonToParty(ArcadeContext *ctx, Party *party, Pokemon *mon) {
+    BattleArcade_SetMonOriginalTrainer(ctx, mon);
+    Party_AddMon(party, mon);
+}
+
+void BattleArcade_SetOpponentParty(ArcadeContext *ctx) {
+    int count, i;
+    u32 item;
+    Pokemon *mon;
+
+    SaveArray_Party_Init(ctx->opponentParty);
+    count = BattleArcade_GetOpponentMonCount(ctx->type, TRUE);
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < count; i++) {
+        FrontierMon_ToPokemon(&ctx->opponentMons[i], mon, BattleArcade_GetMonLevel(ctx));
+        BattleArcade_AddMonToParty(ctx, ctx->opponentParty, mon);
+        {
+            Pokemon *partyMon = Party_GetMonByIndex(ctx->opponentParty, i);
+            item = ITEM_NONE;
+            SetMonData(partyMon, MON_DATA_HELD_ITEM, &item);
+        }
+    }
+    Heap_Free(mon);
+}
+
+u32 BattleArcade_GetValueForEvent(ArcadeContext *ctx, u8 eventId) {
+    BattleArcade_GetRound(ctx);
+    if (eventId == ARCADE_EVENT_28) {
+        return 1;
+    }
+    return 3;
+}
+
+static u32 BattleArcade_GetTrainerAIFlags(ArcadeContext *ctx) {
+    s32 round;
+    s32 aiFlags;
+
+    if (ctx->type == FRONTIER_CHALLENGE_SINGLE) {
+        u16 *trainerId = &ctx->trainerIds[ctx->battleNo];
+        u16 id = *trainerId;
+        if (id == ARCADE_STAR_SILVER || id == ARCADE_STAR_GOLD) {
+            return 7;
+        }
+    }
+    round = BattleArcade_GetRound(ctx);
+    aiFlags = 7;
+    switch (round) {
+    case -1:
+        break;
+    case 0:
+    case 1:
+        aiFlags = 0;
+        break;
+    case 2:
+    case 3:
+        aiFlags = 1;
+        break;
+    }
+    return aiFlags;
+}
+
+u32 BattleArcade_GetRound(ArcadeContext *ctx) {
+    u16 round = ctx->round;
+
+    if (BattleArcade_MultiplayerCheck(ctx->type) == TRUE) {
+        u16 partnerRound = ctx->partnerRound;
+        if (partnerRound > ctx->round) {
+            round = partnerRound;
+        }
+    }
+    return round;
+}
+
+u32 BattleArcade_GetEventColor(u8 eventId) {
+    if (eventId < 9) {
+        return 0;
+    }
+    if (eventId < 18) {
+        return 1;
+    }
+    if (eventId < 27) {
+        return 2;
+    }
+    return 3;
+}

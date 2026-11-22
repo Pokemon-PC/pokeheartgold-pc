@@ -1,0 +1,409 @@
+#include "field_transition_tasks.h"
+
+#include "global.h"
+
+#include "constants/global_fieldmap.h"
+#include "constants/movements.h"
+
+#include "field/door_transition.h"
+#include "field/fieldmap.h"
+#include "wifi_plaza/wifi_plaza_internal.h"
+
+#include "camera.h"
+#include "field_metatile_query_internal.h"
+#include "field_system.h"
+#include "field_terrain.h"
+#include "field_transition_effects.h"
+#include "follow_mon.h"
+#include "heap.h"
+#include "map_object.h"
+#include "map_object_movement_commands.h"
+#include "metatile_behavior.h"
+#include "overlay_01.h"
+#include "player_avatar.h"
+#include "player_avatar_actions.h"
+#include "screen_fade.h"
+#include "task.h"
+
+// Map enter routines (sMapEnterRoutines) and the player/camera placement run before them
+// (sMapEnterPlacementRoutines), indexed by FieldTransitionEnvironment.transitionNo, plus the Wi-Fi Plaza launch task.
+
+typedef struct WiFiPlazaTaskEnv {
+    u16 state;
+    u16 parameter;
+    void *fieldArg; // &fieldSystem->plazaLoginTime, passed to the app as its args
+    SaveData *saveData;
+    u32 value;
+} WiFiPlazaTaskEnv;
+
+FS_EXTERN_OVERLAY(OVY_45);
+
+enum SideDoorEnterState {
+    SIDE_DOOR_ENTER_START,
+    SIDE_DOOR_ENTER_WALK_OUT,
+    SIDE_DOOR_ENTER_DONE,
+};
+
+enum WarpStairsEnterState {
+    WARP_STAIRS_ENTER_START,
+    WARP_STAIRS_ENTER_WAIT_STEP,
+    WARP_STAIRS_ENTER_WAIT_FADE,
+    WARP_STAIRS_ENTER_DONE,
+};
+
+enum DoorExitEnterState {
+    DOOR_EXIT_ENTER_START,
+    DOOR_EXIT_ENTER_FREE,
+};
+
+enum VerticalEnterState {
+    VERTICAL_ENTER_FADE_IN,
+    VERTICAL_ENTER_MOVE,
+    VERTICAL_ENTER_SET_FLAGS,
+    VERTICAL_ENTER_STEP_OFF,
+    VERTICAL_ENTER_WAIT,
+    VERTICAL_ENTER_FREE,
+};
+
+enum WiFiPlazaTaskState {
+    WIFI_PLAZA_TASK_LAUNCH,
+    WIFI_PLAZA_TASK_FREE,
+};
+
+static BOOL Task_WiFiPlaza(TaskManager *taskMan);
+
+BOOL FieldTransition_EnterThroughSideDoor(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    FieldTransitionEnvironment *env = TaskManager_GetEnvironment(taskMan);
+    switch (env->transitionState) {
+    case SIDE_DOOR_ENTER_START: {
+        int x;
+        env->transitionWork = DoorTransition_New();
+        x = PlayerAvatar_GetXCoord(fieldSystem->playerAvatar);
+        DoorTransition_SetPosition(x, PlayerAvatar_GetZCoord(fieldSystem->playerAvatar), env->transitionWork);
+        env->transitionState++;
+        break;
+    }
+    case SIDE_DOOR_ENTER_WALK_OUT: {
+        FieldTransitionWork *work = env->transitionWork;
+        u32 direction = PlayerAvatar_GetFacingDirection(fieldSystem->playerAvatar);
+        if (DoorTransition_WalkOutOfSideDoor(fieldSystem, work, direction)) {
+            DoorTransition_Free(env->transitionWork);
+            env->transitionState++;
+        }
+        break;
+    }
+    case SIDE_DOOR_ENTER_DONE:
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL FieldTransition_EnterFromWarpStairs(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    FieldTransitionEnvironment *env = TaskManager_GetEnvironment(taskMan);
+    switch (env->transitionState) {
+    case WARP_STAIRS_ENTER_START: {
+        LocalMapObject *object;
+        u32 direction;
+        FieldMap_FadeScreen(1);
+        object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        direction = PlayerAvatar_GetFacingDirection(fieldSystem->playerAvatar);
+        if (direction == DIR_WEST) {
+            MapObject_SetHeldMovement(object, 10);
+        } else if (direction == DIR_EAST) {
+            MapObject_SetHeldMovement(object, 11);
+        } else {
+            GF_ASSERT(FALSE);
+        }
+        env->transitionState++;
+        break;
+    }
+    case WARP_STAIRS_ENTER_WAIT_STEP: {
+        LocalMapObject *object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        if (MapObject_IsMovementPaused(object) == TRUE) {
+            MapObject_ClearHeldMovementIfActive(object);
+            if (FollowMon_IsActive(fieldSystem)) {
+                FollowMon_MoveToPlayer(fieldSystem, PlayerAvatar_GetFacingDirection(fieldSystem->playerAvatar));
+            }
+            env->transitionState++;
+        }
+        break;
+    }
+    case WARP_STAIRS_ENTER_WAIT_FADE:
+        if (IsPaletteFadeFinished()) {
+            env->transitionState++;
+        }
+        break;
+    case WARP_STAIRS_ENTER_DONE:
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL FieldTransition_EnterWithDoorExit(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    FieldTransitionEnvironment *env = TaskManager_GetEnvironment(taskMan);
+    PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+    switch (env->transitionState) {
+    case DOOR_EXIT_ENTER_START: {
+        FieldTransitionWork *work;
+        int x;
+        env->transitionWork = DoorTransition_New();
+        work = env->transitionWork;
+        x = PlayerAvatar_GetXCoord(fieldSystem->playerAvatar);
+        DoorTransition_SetPosition(x, PlayerAvatar_GetZCoord(fieldSystem->playerAvatar), work);
+        TaskManager_Call(taskMan, Task_WalkOutOfDoorAfterWarp, work);
+        env->transitionState++;
+        break;
+    }
+    case DOOR_EXIT_ENTER_FREE:
+        DoorTransition_Free(env->transitionWork);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// The player rises 32 units over 16 frames (placed below the floor by FieldTransition_PlaceBelowFloor).
+BOOL FieldTransition_EnterRising(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    FieldTransitionEnvironment *env = TaskManager_GetEnvironment(taskMan);
+    switch (env->transitionState) {
+    case VERTICAL_ENTER_FADE_IN:
+        env->transitionWork = Heap_AllocAtEnd(HEAP_ID_FIELD2, 8);
+        *(u32 *)env->transitionWork = 0;
+        FieldMap_FadeScreen(1);
+        env->transitionState++;
+        break;
+    case VERTICAL_ENTER_MOVE: {
+        LocalMapObject *object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        int *counter = (int *)env->transitionWork;
+        VecFx32 position;
+        (*counter)++;
+        MapObject_CopyPositionVector(object, &position);
+        position.y += 2 << 12;
+        MapObject_SetPositionVector(object, &position);
+        if (*counter >= 16) {
+            PlayerAvatar_ToggleAutomaticHeightUpdatingImmediate(fieldSystem->playerAvatar, TRUE);
+            env->transitionState++;
+        }
+        break;
+    }
+    case VERTICAL_ENTER_SET_FLAGS:
+        Field_PlayerAvatar_OrrTransitionFlags(fieldSystem->playerAvatar, 1);
+        Field_PlayerAvatar_ApplyTransitionFlags(fieldSystem->playerAvatar);
+        env->transitionState++;
+        break;
+    case VERTICAL_ENTER_STEP_OFF: {
+        LocalMapObject *object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        if (MapObject_AreBitsSetForMovementScriptInit(object)) {
+            MapObject_SetHeldMovement(object, MOVEMENT_STEP_UP);
+            env->transitionState++;
+        }
+        break;
+    }
+    case VERTICAL_ENTER_WAIT:
+        if (MapObject_AreBitsSetForMovementScriptInit(PlayerAvatar_GetMapObject(fieldSystem->playerAvatar)) && IsPaletteFadeFinished()) {
+            if (FollowMon_IsActive(fieldSystem)) {
+                FollowMon_MoveToPlayer(fieldSystem, DIR_NORTH);
+                MapObject_ChangeMovement(FollowMon_GetMapObject(fieldSystem), 0x30);
+                FollowMon_HideUntilStep(FollowMon_GetMapObject(fieldSystem), TRUE);
+            }
+            env->transitionState++;
+        }
+        break;
+    case VERTICAL_ENTER_FREE:
+        Heap_Free(env->transitionWork);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// The player sinks 32 units over 16 frames (placed above the floor by FieldTransition_PlaceAboveFloor).
+BOOL FieldTransition_EnterSinking(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    FieldTransitionEnvironment *env = TaskManager_GetEnvironment(taskMan);
+    switch (env->transitionState) {
+    case VERTICAL_ENTER_FADE_IN:
+        env->transitionWork = Heap_AllocAtEnd(HEAP_ID_FIELD2, 8);
+        *(u32 *)env->transitionWork = 0;
+        FieldMap_FadeScreen(1);
+        env->transitionState++;
+        break;
+    case VERTICAL_ENTER_MOVE: {
+        LocalMapObject *object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        int *counter = (int *)env->transitionWork;
+        VecFx32 position;
+        (*counter)++;
+        MapObject_CopyPositionVector(object, &position);
+        position.y -= 2 << 12;
+        MapObject_SetPositionVector(object, &position);
+        if (*counter >= 16) {
+            PlayerAvatar_ToggleAutomaticHeightUpdatingImmediate(fieldSystem->playerAvatar, TRUE);
+            env->transitionState++;
+        }
+        break;
+    }
+    case VERTICAL_ENTER_SET_FLAGS:
+        Field_PlayerAvatar_OrrTransitionFlags(fieldSystem->playerAvatar, 1);
+        Field_PlayerAvatar_ApplyTransitionFlags(fieldSystem->playerAvatar);
+        env->transitionState++;
+        break;
+    case VERTICAL_ENTER_STEP_OFF: {
+        LocalMapObject *object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+        if (MapObject_AreBitsSetForMovementScriptInit(object)) {
+            MapObject_SetHeldMovement(object, MOVEMENT_STEP_DOWN);
+            env->transitionState++;
+        }
+        break;
+    }
+    case VERTICAL_ENTER_WAIT:
+        if (MapObject_AreBitsSetForMovementScriptInit(PlayerAvatar_GetMapObject(fieldSystem->playerAvatar)) && IsPaletteFadeFinished()) {
+            if (FollowMon_IsActive(fieldSystem)) {
+                FollowMon_MoveToPlayer(fieldSystem, DIR_SOUTH);
+                MapObject_ChangeMovement(FollowMon_GetMapObject(fieldSystem), 0x30);
+                FollowMon_HideUntilStep(FollowMon_GetMapObject(fieldSystem), TRUE);
+            }
+            env->transitionState++;
+        }
+        break;
+    case VERTICAL_ENTER_FREE:
+        Heap_Free(env->transitionWork);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// Moves the player one tile back against its facing direction (east or west), keeping the camera offset;
+// FieldTransition_EnterThroughSideDoor then plays the door animation.
+void FieldTransition_PlaceInsideSideDoor(FieldSystem *fieldSystem) {
+    const VecFx32 *cameraTarget;
+    VecFx32 playerPosition;
+    VecFx32 delta;
+    VecFx32 oldLookAt;
+    VecFx32 lookAt;
+    u32 direction;
+
+    cameraTarget = Camera_GetCurrentTarget(fieldSystem->camera);
+    lookAt = Camera_GetLookAtCamTarget(fieldSystem->camera);
+    oldLookAt = lookAt;
+    VEC_Subtract(&oldLookAt, cameraTarget, &delta);
+    direction = PlayerAvatar_GetFacingDirection(fieldSystem->playerAvatar);
+    PlayerAvatar_CopyPositionVector(fieldSystem->playerAvatar, &playerPosition);
+    if (direction == DIR_EAST) {
+        playerPosition.x -= FX32_ONE * 16;
+    } else {
+        playerPosition.x += FX32_ONE * 16;
+    }
+    playerPosition.y = FieldSystem_GetTerrainHeight(fieldSystem, playerPosition.y, playerPosition.x, playerPosition.z, NULL);
+    PlayerAvatar_SetPositionAndDirection(fieldSystem->playerAvatar, &playerPosition, direction);
+    Camera_SetLookAtTargetAndRecalcPos(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_SetFixedTarget(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_OffsetLookAtPosAndTarget(&delta, fieldSystem->camera);
+}
+
+// Moves the player off the warp stairs it arrived on (east stairs: one tile east, facing west; west stairs: the
+// opposite), keeping the camera offset; the following Pokemon faces the same way.
+void FieldTransition_PlaceOffWarpStairs(FieldSystem *fieldSystem) {
+    const VecFx32 *cameraTarget;
+    VecFx32 playerPosition;
+    VecFx32 delta;
+    VecFx32 oldLookAt;
+    VecFx32 lookAt;
+    u32 direction;
+    int x;
+    u8 behavior;
+
+    cameraTarget = Camera_GetCurrentTarget(fieldSystem->camera);
+    lookAt = Camera_GetLookAtCamTarget(fieldSystem->camera);
+    oldLookAt = lookAt;
+    VEC_Subtract(&oldLookAt, cameraTarget, &delta);
+    direction = PlayerAvatar_GetFacingDirection(fieldSystem->playerAvatar);
+    PlayerAvatar_CopyPositionVector(fieldSystem->playerAvatar, &playerPosition);
+    x = PlayerAvatar_GetXCoord(fieldSystem->playerAvatar);
+    behavior = GetMetatileBehavior(fieldSystem, x, PlayerAvatar_GetZCoord(fieldSystem->playerAvatar));
+    if (MetatileBehavior_IsWarpStairsEast(behavior)) {
+        playerPosition.x += FX32_ONE * 16;
+        direction = DIR_WEST;
+    } else if (MetatileBehavior_IsWarpStairsWest(behavior)) {
+        playerPosition.x -= FX32_ONE * 16;
+        direction = DIR_EAST;
+    }
+    playerPosition.y = FieldSystem_GetTerrainHeight(fieldSystem, playerPosition.y, playerPosition.x, playerPosition.z, NULL);
+    PlayerAvatar_SetPositionAndDirection(fieldSystem->playerAvatar, &playerPosition, direction);
+    Camera_SetLookAtTargetAndRecalcPos(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_SetFixedTarget(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_OffsetLookAtPosAndTarget(&delta, fieldSystem->camera);
+    if (FollowMon_IsActive(fieldSystem)) {
+        MapObject_SetFacingDirectionDirect(FollowMon_GetMapObject(fieldSystem), direction);
+    }
+}
+
+static const OverlayManagerTemplate sOverlayTemplate_WiFiPlaza = { WiFiPlaza_Init, WiFiPlaza_Main, WiFiPlaza_Exit, FS_OVERLAY_ID(OVY_45) };
+
+void FieldTransition_PlaceBelowFloor(FieldSystem *fieldSystem) {
+    VecFx32 position;
+    VecFx32 delta;
+    const VecFx32 *currentTarget = Camera_GetCurrentTarget(fieldSystem->camera);
+    VecFx32 lookAt = Camera_GetLookAtCamTarget(fieldSystem->camera);
+    LocalMapObject *object;
+    VEC_Subtract(&lookAt, currentTarget, &delta);
+    object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+    PlayerAvatar_CopyPositionVector(fieldSystem->playerAvatar, &position);
+    PlayerAvatar_ToggleAutomaticHeightUpdating(fieldSystem->playerAvatar, FALSE);
+    position.y -= 2 << 16;
+    PlayerAvatar_SetPositionAndDirection(fieldSystem->playerAvatar, &position, 0);
+    Camera_SetLookAtTargetAndRecalcPos(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_SetFixedTarget(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_OffsetLookAtPosAndTarget(&delta, fieldSystem->camera);
+    MapObject_ClearHeldMovementIfActive(object);
+    Field_PlayerAvatar_OrrTransitionFlags(fieldSystem->playerAvatar, 2 << 8);
+    Field_PlayerAvatar_ApplyTransitionFlags(fieldSystem->playerAvatar);
+    MapObject_SetAnimation(object, 0);
+}
+
+void FieldTransition_PlaceAboveFloor(FieldSystem *fieldSystem) {
+    VecFx32 position;
+    VecFx32 delta;
+    const VecFx32 *currentTarget = Camera_GetCurrentTarget(fieldSystem->camera);
+    VecFx32 lookAt = Camera_GetLookAtCamTarget(fieldSystem->camera);
+    LocalMapObject *object;
+    VEC_Subtract(&lookAt, currentTarget, &delta);
+    object = PlayerAvatar_GetMapObject(fieldSystem->playerAvatar);
+    PlayerAvatar_CopyPositionVector(fieldSystem->playerAvatar, &position);
+    PlayerAvatar_ToggleAutomaticHeightUpdating(fieldSystem->playerAvatar, FALSE);
+    position.y += 2 << 16;
+    PlayerAvatar_SetPositionAndDirection(fieldSystem->playerAvatar, &position, 0);
+    Camera_SetLookAtTargetAndRecalcPos(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_SetFixedTarget(PlayerAvatar_GetPositionVector(fieldSystem->playerAvatar), fieldSystem->camera);
+    Camera_OffsetLookAtPosAndTarget(&delta, fieldSystem->camera);
+    MapObject_ClearHeldMovementIfActive(object);
+    Field_PlayerAvatar_OrrTransitionFlags(fieldSystem->playerAvatar, 2 << 8);
+    Field_PlayerAvatar_ApplyTransitionFlags(fieldSystem->playerAvatar);
+    MapObject_SetAnimation(object, 0);
+}
+
+void CallTask_WiFiPlaza(TaskManager *taskMan, u16 parameter) {
+    WiFiPlazaTaskEnv *env = Heap_AllocAtEnd(HEAP_ID_FIELD2, sizeof(WiFiPlazaTaskEnv));
+    memset(env, 0, sizeof(WiFiPlazaTaskEnv));
+    env->parameter = parameter;
+    TaskManager_Call(taskMan, Task_WiFiPlaza, env);
+}
+
+static BOOL Task_WiFiPlaza(TaskManager *taskMan) {
+    FieldSystem *fieldSystem = TaskManager_GetFieldSystem(taskMan);
+    WiFiPlazaTaskEnv *env = TaskManager_GetEnvironment(taskMan);
+    switch (env->state) {
+    case WIFI_PLAZA_TASK_LAUNCH:
+        env->saveData = fieldSystem->saveData;
+        env->value = env->parameter;
+        env->fieldArg = &fieldSystem->plazaLoginTime;
+        CallApplicationAsTask(taskMan, &sOverlayTemplate_WiFiPlaza, &env->fieldArg);
+        env->state++;
+        break;
+    case WIFI_PLAZA_TASK_FREE:
+        Heap_Free(env);
+        return TRUE;
+    }
+    return FALSE;
+}

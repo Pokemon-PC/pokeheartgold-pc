@@ -1,0 +1,56 @@
+#include "global.h"
+
+#include "dwc/net_common_internal.h"
+
+#include <nitro/code32.h>
+#include <stdarg.h>
+
+#include "ppw_lobby_internal.h"
+#include "ppw_lobby_state.h"
+
+void PPWLobbyChannel_GetName(Str *out, PPWLobbyChannel *channel) {
+    LobbyString_InitCopy(out, &channel->name);
+}
+
+enum PPWLobbyResult PPW_LobbyGetTimeInfo(PPWLobbyTimeInfo *out) {
+    PPWLobbyWork *work = gPPWLobbyWork;
+    if (!work) {
+        return PPW_LOBBY_RESULT_ERROR_STATE;
+    }
+    if (work) {
+        if (work->state == PPW_LOBBY_STATE_ERROR) {
+            return PPW_LOBBY_RESULT_ERROR_CONDITION;
+        }
+    }
+    if (work) {
+        if (PPWLobby_GetState() != PPW_LOBBY_STATE_READY) {
+            return PPW_LOBBY_RESULT_ERROR_STATE;
+        }
+    }
+    RTCDate date;
+    RTCTime time;
+    DWC_GetDateTime(&date, &time);
+    out->currentTime = RTC_ConvertDateTimeToSecond(&date, &time);
+    volatile PPWLobbySchedule *schedule = &work->schedule;
+    out->channelTime.seconds = schedule->time.seconds;
+    out->startTime = schedule->startTime;
+    return PPW_LOBBY_RESULT_SUCCESS;
+}
+
+enum PPWLobbyResult PPW_LobbyGetSchedule(PPWLobbyScheduleRecord *records, u32 *size) {
+    PPWLobbyWork *work = gPPWLobbyWork;
+    if (!work) {
+        return PPW_LOBBY_RESULT_ERROR_STATE;
+    }
+    if (work) {
+        if (work->state == PPW_LOBBY_STATE_ERROR) {
+            return PPW_LOBBY_RESULT_ERROR_CONDITION;
+        }
+    }
+    if (work) {
+        if (PPWLobby_GetState() != PPW_LOBBY_STATE_READY) {
+            return PPW_LOBBY_RESULT_ERROR_STATE;
+        }
+    }
+    return PPWLobbySchedule_Copy(&work->schedule, records, size) ? PPW_LOBBY_RESULT_SUCCESS : PPW_LOBBY_RESULT_ERROR_PARAM;
+}

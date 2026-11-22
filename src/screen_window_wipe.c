@@ -1,0 +1,385 @@
+#include "screen_window_wipe.h"
+
+#include <nitro/fx/fx_trig.h>
+#include <nitro/gx/g2.h>
+
+#include "bg_window.h"
+
+static void ClockWipe_BuildScanlines(ClockWipe *wipe);
+static BOOL ClockWipe_Step(ClockWipe *wipe);
+static void ScreenWindow_SetInsideTask(SysTask *task, void *data);
+static void ScreenWindow_SetOutsideTask(SysTask *task, void *data);
+static void ScreenWindow_SetRectTask(SysTask *task, void *data);
+static void ScreenWindow_SetVisibleTask(SysTask *task, void *data);
+
+void ClockWipe_Begin(ScreenFade *fade, const ClockWipeConfig *config) {
+    fade->effect = Heap_Alloc(fade->heapId, sizeof(ClockWipe));
+    ClockWipe_Init(fade->effect, config, fade->steps, fade->framesPerStep, fade->screen, fade->regQueue, fade->blankPair, fade->heapId);
+    fade->state++;
+}
+
+BOOL ClockWipe_Update(ScreenFade *fade) {
+    BOOL done = FALSE;
+    ClockWipe *wipe = fade->effect;
+    switch (fade->state) {
+    case SCREEN_FADE_STATE_RUN:
+        if (ClockWipe_Step(wipe) == TRUE) {
+            ScreenFade_SetEndWindows(wipe->queued, wipe->regQueue, fade->screen);
+            fade->state++;
+        }
+        break;
+    case SCREEN_FADE_STATE_CLEANUP:
+        ScreenWipeScanlines_Free(&wipe->scanlines);
+        Heap_Free(fade->effect);
+        fade->effect = NULL;
+        fade->state++;
+        done = TRUE;
+        break;
+    case SCREEN_FADE_STATE_DONE:
+        done = TRUE;
+        break;
+    default:
+        GF_ASSERT(FALSE);
+        break;
+    }
+    return done;
+}
+
+void ClockWipe_Init(ClockWipe *wipe, const ClockWipeConfig *config, int steps, int framesPerStep, int screen, WindowRegisterQueue *regQueue, FadeBlankPair *blankPair, enum HeapID heapId) {
+    WipeScanlineBuffer *buffer;
+
+    ScreenWipeScanlines_Init(&wipe->scanlines, config->window, screen, heapId);
+    wipe->unused14 = 0x7FFF80;
+    wipe->centerX = config->centerX;
+    wipe->centerY = config->centerY;
+    wipe->startAngle = config->startAngle;
+    wipe->angle = config->startAngle;
+    wipe->angleStep = 0xFFFF / steps;
+    wipe->stepsLeft = steps;
+    wipe->framesPerStep = framesPerStep;
+    wipe->frameCounter = 0;
+    wipe->regQueue = regQueue;
+    wipe->blankPair = blankPair;
+    wipe->heapId = heapId;
+    wipe->queued = config->queued;
+    wipe->window = config->window;
+    wipe->screen = screen;
+    wipe->maskSwapPending = TRUE;
+    ClockWipe_BuildScanlines(wipe);
+    SysTask_CreateOnVWaitQueue(ScreenWipeScanlines_CommitTask, wipe, 0x3FF);
+    buffer = ScreenWipeScanlines_GetBuffer(&wipe->scanlines, 0);
+    // first scanline's span
+    ScreenFade_SetWindow(regQueue, config->insideMask, config->outsideMask, config->window, screen, buffer->nextLeft[0], 0, buffer->nextRight[0], GX_LCD_SIZE_Y, wipe->queued);
+    if (config->window == SCREEN_WINDOW_0) {
+        ScreenFade_SetWindowVisible(regQueue, GX_WNDMASK_W0, screen, wipe->queued);
+    } else {
+        ScreenFade_SetWindowVisible(regQueue, GX_WNDMASK_W1, screen, wipe->queued);
+    }
+    FadeBlankPair_StartOnVBlank(wipe->blankPair, wipe, ScreenWipeScanlines_HBlankCallback, screen, heapId);
+}
+
+static BOOL ClockWipe_Step(ClockWipe *wipe) {
+    wipe->frameCounter++;
+    if (wipe->frameCounter >= wipe->framesPerStep) {
+        wipe->frameCounter = 0;
+        if (wipe->stepsLeft - 1 > 0) {
+            wipe->angle += wipe->angleStep;
+            wipe->stepsLeft--;
+            while (wipe->angle >= 0xFFFF) {
+                wipe->angle -= 0xFFFF;
+            }
+            while (wipe->angle < 0) {
+                wipe->angle += 0xFFFF;
+            }
+            if (wipe->angle >= 0x7FFF && wipe->angle < wipe->startAngle && wipe->maskSwapPending == TRUE) {
+                ScreenFade_SwapWindowMasks(wipe->regQueue, wipe->window, wipe->screen, wipe->queued);
+                wipe->maskSwapPending = FALSE;
+            }
+            ClockWipe_BuildScanlines(wipe);
+            SysTask_CreateOnVWaitQueue(ScreenWipeScanlines_CommitTask, wipe, 0x3FF);
+        } else {
+            FadeBlankPair_StopOnVBlank(wipe->blankPair, wipe->scanlines.screen, wipe->heapId);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// Horizontal span [*left, *right] of the wedge between startAngle and endAngle (radius 0xFFFF around
+// (centerX, centerY)) on scanline y, clamped to 0-255.
+static void ClockWipe_GetScanlineSpan(int unused, int centerX, int centerY, int y, int startAngle, int endAngle, int *left, int *right) {
+    int *dest1 = left;
+    int *dest2 = right;
+    int sample = y;
+    int originX = centerX;
+
+    struct {
+        int y2;
+        int x2;
+        int x1;
+    } values;
+
+    int angle1Saved = startAngle;
+    int y1;
+    int low;
+    int high;
+#pragma unused(unused)
+    values.x1 = centerX + (0xFFFF * FX_SinCosTable_[((startAngle >> 4) << 1) + 1] >> 0xc);
+    y1 = centerY + (0xFFFF * FX_SinCosTable_[(startAngle >> 4) << 1] >> 0xc);
+    values.x2 = centerX + (0xFFFF * FX_SinCosTable_[((endAngle >> 4) << 1) + 1] >> 0xc);
+    values.y2 = centerY + (0xFFFF * FX_SinCosTable_[(endAngle >> 4) << 1] >> 0xc);
+    if (endAngle - angle1Saved == (0x0000FFFF >> 1)) {
+        if (sample >= 0 && sample < centerY) {
+            *dest1 = 0;
+            *dest2 = 0xff;
+            return;
+        }
+        return;
+    }
+    if (endAngle >= 0 && endAngle < (0x0000FFFF >> 1)) {
+        low = y1 < centerY ? y1 : centerY;
+        high = y1 > centerY ? y1 : centerY;
+        if (low <= sample && sample <= high) {
+            *dest1 = values.x1 + (values.x1 - originX) * (sample - y1) / (y1 - centerY);
+        } else {
+            *dest1 = values.x2 + (values.x2 - originX) * (sample - values.y2) / (values.y2 - centerY);
+        }
+        {
+            int value = *dest1;
+            if (value > 0xff) {
+                value = 0xff;
+            } else if (value < 0) {
+                value = 0;
+            }
+            *dest1 = value;
+        }
+        *dest2 = 0xff;
+        return;
+    }
+    low = y1 < centerY ? y1 : centerY;
+    high = y1 > centerY ? y1 : centerY;
+    if (low <= sample && sample <= high) {
+        *dest1 = values.x1 + (values.x1 - originX) * (sample - y1) / (y1 - centerY);
+        {
+            int value = *dest1;
+            if (value > 0xff) {
+                value = 0xff;
+            } else if (value < 0) {
+                value = 0;
+            }
+            *dest1 = value;
+        }
+    } else {
+        *dest1 = 0;
+    }
+    low = values.y2 < centerY ? values.y2 : centerY;
+    high = values.y2 > centerY ? values.y2 : centerY;
+    if (low <= sample && sample <= high) {
+        *dest2 = values.x2 + (values.x2 - originX) * (sample - values.y2) / (values.y2 - centerY);
+        {
+            int value = *dest2;
+            if (value > 0xff) {
+                value = 0xff;
+            } else if (value < 0) {
+                value = 0;
+            }
+            *dest2 = value;
+        }
+    } else {
+        *dest2 = *dest1;
+    }
+    if (*dest1 > *dest2) {
+        int temp = *dest1;
+        *dest1 = *dest2;
+        *dest2 = temp;
+    }
+}
+
+// Writes the spans of all the scanlines for the next frame
+static void ClockWipe_BuildScanlines(ClockWipe *wipe) {
+    WipeScanlineBuffer *buffer = ScreenWipeScanlines_GetBuffer(&wipe->scanlines, 0);
+    s32 i;
+    s32 left;
+    s32 right;
+
+    for (i = 0; i < GX_LCD_SIZE_Y; i++) {
+        ClockWipe_GetScanlineSpan(wipe->unused14, wipe->centerX, wipe->centerY, i, wipe->startAngle, wipe->angle, &left, &right);
+        buffer->nextLeft[i] = left;
+        buffer->nextRight[i] = right;
+    }
+}
+
+void ScreenWindow_SetVisible(u32 mask, int screen) {
+    if (screen == SCREEN_MAIN) {
+        GX_SetVisibleWnd(mask);
+    } else {
+        GXS_SetVisibleWnd(mask);
+    }
+}
+
+void ScreenWindow_SetInside(u32 planeMask, BOOL effect, int window, int screen) {
+    if (window == SCREEN_WINDOW_0) {
+        if (screen == SCREEN_MAIN) {
+            u32 value = (reg_G2_WININ & ~REG_G2_WININ_WIN0IN_MASK) | planeMask;
+            if (effect) {
+                value |= 0x20;
+            }
+            reg_G2_WININ = value;
+        } else {
+            u32 value = (reg_G2S_DB_WININ & ~REG_G2S_DB_WININ_WIN0IN_MASK) | planeMask;
+            if (effect) {
+                value |= 0x20;
+            }
+            reg_G2S_DB_WININ = value;
+        }
+    } else {
+        if (screen == SCREEN_MAIN) {
+            u32 value = (reg_G2_WININ & ~REG_G2_WININ_WIN1IN_MASK) | (planeMask << REG_G2_WININ_WIN1IN_SHIFT);
+            if (effect) {
+                value |= 0x20 << REG_G2_WININ_WIN1IN_SHIFT;
+            }
+            reg_G2_WININ = value;
+        } else {
+            u32 value = (reg_G2S_DB_WININ & ~REG_G2S_DB_WININ_WIN1IN_MASK) | (planeMask << REG_G2S_DB_WININ_WIN1IN_SHIFT);
+            if (effect) {
+                value |= 0x20 << REG_G2S_DB_WININ_WIN1IN_SHIFT;
+            }
+            reg_G2S_DB_WININ = value;
+        }
+    }
+}
+
+void ScreenWindow_SetOutside(u32 planeMask, BOOL effect, int screen) {
+    if (screen == SCREEN_MAIN) {
+        u32 value = (reg_G2_WINOUT & ~REG_G2_WINOUT_WINOUT_MASK) | planeMask;
+        if (effect) {
+            value |= 0x20;
+        }
+        reg_G2_WINOUT = value;
+    } else {
+        u32 value = (reg_G2S_DB_WINOUT & ~REG_G2S_DB_WINOUT_WINOUT_MASK) | planeMask;
+        if (effect) {
+            value |= 0x20;
+        }
+        reg_G2S_DB_WINOUT = value;
+    }
+}
+
+static inline GXWndPlane GetWindowPlane(volatile GXWndPlane *reg) {
+    return *reg;
+}
+
+s8 ScreenWindow_GetInside(int window, int screen) {
+    GXWndPlane plane;
+    if (window == SCREEN_WINDOW_0) {
+        if (screen == SCREEN_MAIN) {
+            plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2_WININ);
+        } else {
+            plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2S_DB_WININ);
+        }
+    } else {
+        if (screen == SCREEN_MAIN) {
+            plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2_WININ + 1);
+        } else {
+            plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2S_DB_WININ + 1);
+        }
+    }
+    return *(s8 *)&plane;
+}
+
+s8 ScreenWindow_GetOutside(int screen) {
+    GXWndPlane plane;
+    if (screen == SCREEN_MAIN) {
+        plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2_WINOUT);
+    } else {
+        plane = GetWindowPlane((volatile GXWndPlane *)&reg_G2S_DB_WINOUT);
+    }
+    return *(s8 *)&plane;
+}
+
+void ScreenWindow_SetRect(int left, int top, int right, int bottom, int window, int screen) {
+    if (window == SCREEN_WINDOW_0) {
+        if (screen == SCREEN_MAIN) {
+            u32 horizontal = (left << 8 & 0xFF00) | ((u32)right << 24 >> 24);
+            u32 vertical = (top << 8 & 0xFF00) | ((u32)bottom << 24 >> 24);
+            reg_G2_WIN0H = horizontal;
+            reg_G2_WIN0V = vertical;
+        } else {
+            u32 horizontal = (left << 8 & 0xFF00) | ((u32)right << 24 >> 24);
+            u32 vertical = (top << 8 & 0xFF00) | ((u32)bottom << 24 >> 24);
+            reg_G2S_DB_WIN0H = horizontal;
+            reg_G2S_DB_WIN0V = vertical;
+        }
+    } else {
+        if (screen == SCREEN_MAIN) {
+            u32 horizontal = (left << 8 & 0xFF00) | ((u32)right << 24 >> 24);
+            u32 vertical = (top << 8 & 0xFF00) | ((u32)bottom << 24 >> 24);
+            reg_G2_WIN1H = horizontal;
+            reg_G2_WIN1V = vertical;
+        } else {
+            u32 horizontal = (left << 8 & 0xFF00) | ((u32)right << 24 >> 24);
+            u32 vertical = (top << 8 & 0xFF00) | ((u32)bottom << 24 >> 24);
+            reg_G2S_DB_WIN1H = horizontal;
+            reg_G2S_DB_WIN1V = vertical;
+        }
+    }
+}
+
+void ScreenWindow_QueueSetVisible(WindowRegisterQueue *queue, u32 mask, int screen) {
+    WindowVisibleArgs *args = &queue->visible[screen];
+    args->mask = mask;
+    args->screen = screen;
+    SysTask_CreateOnVWaitQueue(ScreenWindow_SetVisibleTask, args, 1);
+}
+
+void ScreenWindow_QueueSetInside(WindowRegisterQueue *queue, u32 planeMask, BOOL effect, int window, int screen) {
+    WindowInsideArgs *args = &queue->inside[screen][window];
+    args->planeMask = planeMask;
+    args->effect = effect;
+    args->window = window;
+    args->screen = screen;
+    SysTask_CreateOnVWaitQueue(ScreenWindow_SetInsideTask, args, 1);
+}
+
+void ScreenWindow_QueueSetOutside(WindowRegisterQueue *queue, u32 planeMask, BOOL effect, int screen) {
+    WindowOutsideArgs *args = &queue->outside[screen];
+    args->planeMask = planeMask;
+    args->effect = effect;
+    args->screen = screen;
+    SysTask_CreateOnVWaitQueue(ScreenWindow_SetOutsideTask, args, 1);
+}
+
+void ScreenWindow_QueueSetRect(WindowRegisterQueue *queue, int left, int top, int right, int bottom, int window, int screen) {
+    WindowRectArgs *args = &queue->rect[screen][window];
+    args->left = left;
+    args->top = top;
+    args->right = right;
+    args->bottom = bottom;
+    args->window = window;
+    args->screen = screen;
+    SysTask_CreateOnVWaitQueue(ScreenWindow_SetRectTask, args, 1);
+}
+
+static void ScreenWindow_SetVisibleTask(SysTask *task, void *data) {
+    WindowVisibleArgs *args = data;
+    ScreenWindow_SetVisible(args->mask, args->screen);
+    SysTask_Destroy(task);
+}
+
+static void ScreenWindow_SetInsideTask(SysTask *task, void *data) {
+    WindowInsideArgs *args = data;
+    ScreenWindow_SetInside(args->planeMask, args->effect, args->window, args->screen);
+    SysTask_Destroy(task);
+}
+
+static void ScreenWindow_SetOutsideTask(SysTask *task, void *data) {
+    WindowOutsideArgs *args = data;
+    ScreenWindow_SetOutside(args->planeMask, args->effect, args->screen);
+    SysTask_Destroy(task);
+}
+
+static void ScreenWindow_SetRectTask(SysTask *task, void *data) {
+    WindowRectArgs *args = data;
+    ScreenWindow_SetRect(args->left, args->top, args->right, args->bottom, args->window, args->screen);
+    SysTask_Destroy(task);
+}

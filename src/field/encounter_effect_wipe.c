@@ -1,0 +1,293 @@
+#include "global.h"
+
+#include "field/encounter_effect.h"
+#include "field/hblank_system.h"
+
+#include "bg_window.h"
+#include "gf_gfx_loader.h"
+#include "heap.h"
+#include "sys_task.h"
+#include "sys_task_api.h"
+
+// Window wipes used by the trainer encounter effects, and BG graphics loaders shared by the effects.
+// Both wipes start their tasks from a VWait task so the per-scanline HBlank handler begins on a frame boundary.
+
+#define WND_PLANEMASK_ALL (GX_WND_PLANEMASK_BG0 | GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ)
+
+// The screen is cut into horizontal stripes of stripeHeight lines; every other stripe slides right, the
+// others slide left, until the window closes the screen.
+struct StripeWipe {
+    EncounterEffectQuadInterp offset; // fx32 pixels
+    u32 stripeHeight;
+    u32 state;
+    HBlankSystem *hBlankSystem;
+    HBlankTask *hBlankTask;
+    SysTask *task;
+    BOOL *done;
+};
+
+// The top half of the screen shrinks towards the top left corner, the bottom half towards the bottom right.
+struct SplitWipe {
+    EncounterEffectQuadInterp x; // fx32 pixels
+    EncounterEffectQuadInterp y; // fx32 pixels
+    u32 middleLine;
+    u32 state;
+    HBlankSystem *hBlankSystem;
+    HBlankTask *hBlankTask;
+    SysTask *task;
+    BOOL *done;
+};
+
+enum EncounterWipeState {
+    WIPE_STATE_RUN,
+    WIPE_STATE_END,
+};
+
+static void Task_StripeWipe_Begin(SysTask *task, void *data);
+static void Task_StripeWipe_Update(SysTask *task, void *data);
+static void StripeWipe_End(StripeWipe *wipe);
+static void HBlank_StripeWipe(HBlankTask *task, void *data);
+static void Task_SplitWipe_Begin(SysTask *task, void *data);
+static void Task_SplitWipe_Update(SysTask *task, void *data);
+static void HBlank_SplitWipe(HBlankTask *task, void *data);
+static void SplitWipe_End(SplitWipe *wipe);
+
+StripeWipe *StripeWipe_New(void) {
+    StripeWipe *wipe = Heap_Alloc(HEAP_ID_FIELD1, sizeof(StripeWipe));
+    memset(wipe, 0, sizeof(StripeWipe));
+    G2_SetWnd0InsidePlane(WND_PLANEMASK_ALL, TRUE);
+    G2_SetWnd1InsidePlane(GX_WND_PLANEMASK_NONE, FALSE);
+    return wipe;
+}
+
+void StripeWipe_Free(StripeWipe *wipe) {
+    if (wipe->hBlankTask) {
+        StripeWipe_End(wipe);
+    }
+    GX_SetVisibleWnd(GX_WNDMASK_NONE);
+    Heap_Free(wipe);
+}
+
+void StripeWipe_Start(EncounterEffectTask *effect, StripeWipe *wipe, u32 stripeHeight, s32 duration, s32 start, s32 end, s32 velocity) {
+    GF_ASSERT(wipe->hBlankTask == NULL);
+    effect->wipeDone = FALSE;
+    wipe->hBlankSystem = effect->fieldSystem->mapSystems->hBlankSystem;
+    wipe->stripeHeight = stripeHeight;
+    wipe->state = WIPE_STATE_RUN;
+    wipe->done = &effect->wipeDone;
+    EncounterEffectQuadInterp_Init(&wipe->offset, start, end, velocity, duration);
+    if (start >= 0) {
+        reg_G2_WIN0H = 0xFF - start;
+        reg_G2_WIN0V = 192;
+        reg_G2_WIN1H = (u8)(start + 1);
+        reg_G2_WIN1V = 192;
+    } else {
+        reg_G2_WIN0H = (u8)(start + 0xFF);
+        reg_G2_WIN0V = 192;
+        reg_G2_WIN1H = (u8)(1 - start);
+        reg_G2_WIN1V = 192;
+    }
+    SysTask_CreateOnVWaitQueue(Task_StripeWipe_Begin, wipe, 1024);
+}
+
+static void Task_StripeWipe_Begin(SysTask *task, void *data) {
+    StripeWipe *wipe = data;
+    wipe->task = SysTask_CreateOnVWaitQueue(Task_StripeWipe_Update, wipe, 1024);
+    wipe->hBlankTask = HBlankSystem_StartTask(wipe->hBlankSystem, HBlank_StripeWipe, wipe);
+    SysTask_Destroy(task);
+}
+
+static void Task_StripeWipe_Update(SysTask *task, void *data) {
+    StripeWipe *wipe = data;
+    s32 offset;
+
+    switch (wipe->state) {
+    case WIPE_STATE_RUN:
+        if (EncounterEffectQuadInterp_Update(&wipe->offset)) {
+            wipe->state++;
+        }
+        offset = wipe->offset.value >> FX32_SHIFT;
+        if (offset >= 0) {
+            reg_G2_WIN0H = 0xFF - offset;
+            reg_G2_WIN0V = 192;
+            reg_G2_WIN1H = (u8)(offset + 1);
+            reg_G2_WIN1V = 192;
+        } else {
+            reg_G2_WIN0H = (u8)(offset + 0xFF);
+            reg_G2_WIN0V = 192;
+            reg_G2_WIN1H = (u8)(1 - offset);
+            reg_G2_WIN1V = 192;
+        }
+        break;
+    case WIPE_STATE_END:
+        StripeWipe_End(wipe);
+        break;
+    }
+}
+
+static void StripeWipe_End(StripeWipe *wipe) {
+    G2_SetWnd0InsidePlane(WND_PLANEMASK_ALL, TRUE);
+    G2_SetWndOutsidePlane(GX_WND_PLANEMASK_NONE, FALSE);
+    G2_SetWnd0Position(0, 0, 0, 0);
+    GX_SetVisibleWnd(GX_WNDMASK_W0);
+    *wipe->done = TRUE;
+    HBlankTask_Delete(wipe->hBlankTask);
+    wipe->hBlankTask = NULL;
+    SysTask_Destroy(wipe->task);
+    wipe->task = NULL;
+}
+
+// Even stripes scroll every BG by +offset and show window 0, odd stripes by -offset and show window 1.
+static void HBlank_StripeWipe(HBlankTask *task, void *data) {
+    StripeWipe *wipe = data;
+    int offset;
+    u32 scroll;
+
+    if (!((reg_GX_VCOUNT / wipe->stripeHeight) & 1)) {
+        offset = wipe->offset.value;
+    } else {
+        offset = -wipe->offset.value;
+    }
+    offset >>= FX32_SHIFT;
+    scroll = offset & 0x1FF;
+    reg_G2_BG0OFS = scroll;
+    reg_G2_BG1OFS = scroll;
+    reg_G2_BG2OFS = scroll;
+    reg_G2_BG3OFS = scroll;
+    if (offset >= 0) {
+        GX_SetVisibleWnd(GX_WNDMASK_W0);
+        G2_SetWndOutsidePlane(GX_WND_PLANEMASK_NONE, FALSE);
+    } else {
+        GX_SetVisibleWnd(GX_WNDMASK_W1);
+        G2_SetWndOutsidePlane(WND_PLANEMASK_ALL, TRUE);
+    }
+}
+
+SplitWipe *SplitWipe_New(void) {
+    SplitWipe *wipe = Heap_Alloc(HEAP_ID_FIELD1, sizeof(SplitWipe));
+
+    memset(wipe, 0, sizeof(SplitWipe));
+    G2_SetWnd0InsidePlane(WND_PLANEMASK_ALL, TRUE);
+    G2_SetWnd1InsidePlane(WND_PLANEMASK_ALL, TRUE);
+    G2_SetWndOutsidePlane(GX_WND_PLANEMASK_NONE, FALSE);
+    return wipe;
+}
+
+void SplitWipe_Free(SplitWipe *wipe) {
+    if (wipe->hBlankTask) {
+        SplitWipe_End(wipe);
+    }
+    GX_SetVisibleWnd(GX_WNDMASK_NONE);
+    Heap_Free(wipe);
+}
+
+void SplitWipe_Start(EncounterEffectTask *effect, SplitWipe *wipe, s32 duration, s32 velocityX, s32 velocityY) {
+    GF_ASSERT(wipe->hBlankTask == NULL);
+    effect->wipeDone = FALSE;
+    wipe->hBlankSystem = effect->fieldSystem->mapSystems->hBlankSystem;
+    wipe->middleLine = 96;
+    wipe->state = WIPE_STATE_RUN;
+    wipe->done = &effect->wipeDone;
+    EncounterEffectQuadInterp_Init(&wipe->x, 0, FX32_CONST(255), velocityX, duration);
+    EncounterEffectQuadInterp_Init(&wipe->y, 0, FX32_CONST(96), velocityY, duration);
+    reg_G2_WIN0H = 0xFF;
+    reg_G2_WIN0V = 192;
+    reg_G2_WIN1H = 0xFF;
+    reg_G2_WIN1V = 192;
+    SysTask_CreateOnVWaitQueue(Task_SplitWipe_Begin, wipe, 1024);
+}
+
+static void Task_SplitWipe_Begin(SysTask *task, void *data) {
+    SplitWipe *wipe = data;
+    wipe->task = SysTask_CreateOnVWaitQueue(Task_SplitWipe_Update, wipe, 1024);
+    wipe->hBlankTask = HBlankSystem_StartTask(wipe->hBlankSystem, HBlank_SplitWipe, wipe);
+    SysTask_Destroy(task);
+}
+
+// Window 0 covers x 0..255-x and lines 0..96-y, window 1 covers x x..255 and lines 96+y..192.
+static void Task_SplitWipe_Update(SysTask *task, void *data) {
+    SplitWipe *wipe = data;
+    s32 x;
+    s32 y;
+
+    switch (wipe->state) {
+    case WIPE_STATE_RUN:
+        EncounterEffectQuadInterp_Update(&wipe->y);
+        if (EncounterEffectQuadInterp_Update(&wipe->x)) {
+            wipe->state++;
+        }
+        x = wipe->x.value >> FX32_SHIFT;
+        y = wipe->y.value >> FX32_SHIFT;
+        reg_G2_WIN0H = 0xFF - x;
+        reg_G2_WIN0V = (u8)(96 - y);
+        reg_G2_WIN1H = 0xFF | ((x << 8) & 0xFF00);
+        reg_G2_WIN1V = 192 | (((y + 96) << 8) & 0xFF00);
+        break;
+    case WIPE_STATE_END:
+        SplitWipe_End(wipe);
+        break;
+    }
+}
+
+// Window 0 above the middle line, window 1 below it.
+static void HBlank_SplitWipe(HBlankTask *task, void *data) {
+    SplitWipe *wipe = data;
+
+    if (reg_GX_VCOUNT <= wipe->middleLine) {
+        GX_SetVisibleWnd(GX_WNDMASK_W0);
+    } else {
+        GX_SetVisibleWnd(GX_WNDMASK_W1);
+    }
+}
+
+static void SplitWipe_End(SplitWipe *wipe) {
+    G2_SetWnd0InsidePlane(WND_PLANEMASK_ALL, TRUE);
+    G2_SetWndOutsidePlane(GX_WND_PLANEMASK_NONE, FALSE);
+    reg_G2_WIN0H = 0;
+    reg_G2_WIN0V = 0;
+    GX_SetVisibleWnd(GX_WNDMASK_W0);
+    *wipe->done = TRUE;
+    HBlankTask_Delete(wipe->hBlankTask);
+    wipe->hBlankTask = NULL;
+    SysTask_Destroy(wipe->task);
+    wipe->task = NULL;
+}
+
+// Loads a screen with its tiles and palette (palette slot palette, paletteCount palettes) into bgId.
+void EncounterEffect_LoadBgGraphics(NARC *narc, int screenMember, int charMember, int paletteMember, int palette, int paletteCount, BgConfig *bgConfig, int bgId) {
+    NNSG2dScreenData *screen;
+    void *screenFile;
+
+    GfGfxLoader_GXLoadPalFromOpenNarc(narc, paletteMember, GF_PAL_LOCATION_MAIN_BG, (enum GFPalSlotOffset)(palette * 32), paletteCount * 32, HEAP_ID_FIELD1);
+    GfGfxLoader_LoadCharDataFromOpenNarc(narc, charMember, bgConfig, (GFBgLayer)bgId, 0, 0, FALSE, HEAP_ID_FIELD1);
+    screenFile = GfGfxLoader_GetScrnDataFromOpenNarc(narc, screenMember, FALSE, &screen, HEAP_ID_FIELD1);
+    LoadRectToBgTilemapRect(bgConfig, bgId, screen->rawData, 0, 0, screen->screenWidth / 8, screen->screenHeight / 8);
+    BgTilemapRectChangePalette(bgConfig, bgId, 0, 0, screen->screenWidth / 8, screen->screenHeight / 8, palette);
+    Heap_Free(screenFile);
+    ScheduleBgTilemapBufferTransfer(bgConfig, bgId);
+}
+
+// Loads the same graphics into bgId and mirrorBgId, then flips mirrorBgId's tilemap horizontally in runs of
+// 16 tiles.
+void EncounterEffect_LoadBgGraphicsMirrored(NARC *narc, int screenMember, int charMember, int paletteMember, int palette, int paletteCount, BgConfig *bgConfig, int bgId, int mirrorBgId) {
+    u16 *tilemap;
+    int row, i, right, left;
+    u16 tile;
+
+    EncounterEffect_LoadBgGraphics(narc, screenMember, charMember, paletteMember, palette, paletteCount, bgConfig, bgId);
+    EncounterEffect_LoadBgGraphics(narc, screenMember, charMember, paletteMember, palette, paletteCount, bgConfig, mirrorBgId);
+    tilemap = GetBgTilemapBuffer(bgConfig, mirrorBgId);
+    for (row = 0, left = 0, right = 15; row < 24; left += 16, right += 16, row++) {
+        for (i = 0; i < 8; i++) {
+            u16 leftIndex = i + left;
+            u16 rightIndex = right - i;
+            tile = tilemap[leftIndex];
+            tilemap[leftIndex] = tilemap[rightIndex];
+            tilemap[rightIndex] = tile;
+            // toggle the horizontal flip bit
+            tilemap[leftIndex] = (tilemap[leftIndex] & 0xFBFF) | (((tilemap[leftIndex] >> 10) ^ 1) << 10);
+            tilemap[rightIndex] = (tilemap[rightIndex] & 0xFBFF) | (((tilemap[rightIndex] >> 10) ^ 1) << 10);
+        }
+    }
+    ScheduleBgTilemapBufferTransfer(bgConfig, mirrorBgId);
+}

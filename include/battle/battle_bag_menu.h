@@ -1,0 +1,68 @@
+#ifndef POKEHEARTGOLD_BATTLE_BATTLE_BAG_MENU_H
+#define POKEHEARTGOLD_BATTLE_BATTLE_BAG_MENU_H
+
+#include "battle/battle.h"
+
+#include "dpad_menu_box.h"
+#include "touchscreen.h"
+
+// Arguments of the in-battle bag screen, filled by the battle controller before
+// BattleBagMenu_Create and read back once `done` is set.
+typedef struct BattleBagContext {
+    BattleSystem *battleSystem;
+    PlayerProfile *profile;
+    Bag *bag;
+    enum HeapID heapID;
+    int battlerId;
+    BOOL isTutorial;           // the bag is played back by the tutorial finger
+    BOOL embargo;              // the battler is under Embargo (msg 46)
+    u16 selectedItem;          // item chosen to use, 0 if the screen was cancelled
+    u8 selectedPocket;         // battle pocket of selectedItem
+    u8 lastUsedPocket;         // pocket of lastUsedItem
+    u16 lastUsedItem;          // "Item used last" button, 0 if none
+    u8 twoTargets;             // a Poke Ball cannot be aimed: two targets (msg 44),
+    u8 targetSemiInvulnerable; // the target is out of sight (msg 47)
+    u8 targetSubstitute;       // or behind a substitute (msg 48)
+    u8 cursorActive;           // d-pad cursor state, kept between openings
+    u8 done;                   // set when the screen has closed
+    u8 pocketPositions[5];     // selected slot on the page, per battle pocket
+    u8 pocketPages[5];         // item list page, per battle pocket
+} BattleBagContext;
+
+// Messages of an item list entry: the item name and its quantity
+typedef struct BattleBagItemEntryMsgIds {
+    u32 name;
+    u32 quantity;
+} BattleBagItemEntryMsgIds;
+
+typedef struct BattleBagButtonRect {
+    u8 x;
+    u8 y;
+    u8 width;
+    u8 height;
+} BattleBagButtonRect;
+
+extern const GraphicsModes gBattleBagGraphicsModes;
+extern const BgTemplate gBattleBagBgTemplateSub0;
+extern const BgTemplate gBattleBagBgTemplateSub1;
+extern const BgTemplate gBattleBagBgTemplateSub2;
+extern const TouchscreenHitbox gBattleBagPocketMenuHitboxes[];
+extern const TouchscreenHitbox gBattleBagItemListHitboxes[];
+extern const TouchscreenHitbox gBattleBagUseItemHitboxes[];
+extern const WindowTemplate gBattleBagMessageWindowTemplate;
+extern const WindowTemplate gBattleBagPocketMenuWindows[];
+extern const WindowTemplate gBattleBagItemListWindows[];
+extern const WindowTemplate gBattleBagUseItemWindows[];
+extern const BattleBagItemEntryMsgIds gBattleBagItemEntryMsgIds[];
+extern const SpriteResourceCountsListUnion gBattleBagSpriteCapacities;
+extern const int gBattleBagSpriteTemplates[][5];
+extern const u8 gBattleBagPocketOrder[];
+extern const s32 gBattleBagItemListIconPos[][2];
+extern const DpadMenuBox *const gBattleBagPageCursorBoxes[];
+extern const s32 gBattleBagTutorialFingerPos[][2];
+extern const BattleBagButtonRect gBattleBagButtonRects[];
+extern const u8 *const gBattleBagButtonWindowLists[];
+
+void BattleBagMenu_Create(BattleBagContext *context);
+
+#endif // POKEHEARTGOLD_BATTLE_BATTLE_BAG_MENU_H

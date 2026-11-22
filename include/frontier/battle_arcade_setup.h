@@ -1,0 +1,22 @@
+#ifndef POKEHEARTGOLD_FRONTIER_BATTLE_ARCADE_SETUP_H
+#define POKEHEARTGOLD_FRONTIER_BATTLE_ARCADE_SETUP_H
+
+#include "frontier/frontier.h"
+#include "frontier/battle_arcade_data.h"
+
+#define ARCADE_STAR_SILVER 311 // trainer ids of the Arcade Star (FRONTIER_BRAIN_BATTLE_SILVER / _GOLD)
+#define ARCADE_STAR_GOLD   312
+
+u8 BattleArcade_GetMonCount(u8 type, int both);
+u8 BattleArcade_GetOpponentMonCount(u8 type, int both);
+BattleSetup *BattleArcade_NewBattleSetup(ArcadeContext *ctx, FrontierLaunchArgs *args);
+void BattleArcade_GetRoundTrainerIds(u32 type, u32 round, u16 *trainerIds, int count);
+int BattleArcade_GetMonLevel(ArcadeContext *ctx);
+BOOL BattleArcade_MultiplayerCheck(int type);
+void BattleArcade_AddMonToParty(ArcadeContext *ctx, Party *party, Pokemon *mon);
+void BattleArcade_SetOpponentParty(ArcadeContext *ctx);
+u32 BattleArcade_GetValueForEvent(ArcadeContext *ctx, u8 eventId);
+u32 BattleArcade_GetRound(ArcadeContext *ctx);
+u32 BattleArcade_GetEventColor(u8 eventId);
+
+#endif // POKEHEARTGOLD_FRONTIER_BATTLE_ARCADE_SETUP_H

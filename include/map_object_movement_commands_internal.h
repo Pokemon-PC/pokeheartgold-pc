@@ -1,0 +1,208 @@
+#ifndef POKEHEARTGOLD_MAP_OBJECT_MOVEMENT_COMMANDS_INTERNAL_H
+#define POKEHEARTGOLD_MAP_OBJECT_MOVEMENT_COMMANDS_INTERNAL_H
+
+#include "map_object.h"
+#include "map_object_movement_commands.h"
+
+// The map object animations (MapObject_SetAnimation) the movement commands start; the draw callbacks pick the
+// billboard motion by them.
+enum MapObjectAnim {
+    MAP_OBJECT_ANIM_STAND,
+    MAP_OBJECT_ANIM_WALK_SLOWER,
+    MAP_OBJECT_ANIM_WALK_SLOW,
+    MAP_OBJECT_ANIM_WALK_NORMAL,
+    MAP_OBJECT_ANIM_WALK_FAST,
+    MAP_OBJECT_ANIM_WALK_FASTER,
+    MAP_OBJECT_ANIM_WALK_SLIGHTLY_FAST,
+    MAP_OBJECT_ANIM_WALK_SLIGHTLY_FASTER,
+    MAP_OBJECT_ANIM_WALK_EVER_SO_SLIGHTLY_FAST,
+    MAP_OBJECT_ANIM_RUN,
+    MAP_OBJECT_ANIM_JUMP_NEAR_SLOW,
+    MAP_OBJECT_ANIM_JUMP_FARTHER,
+
+    MAP_OBJECT_ANIM_NURSE_BOW = MAP_OBJECT_ANIM_RUN, // the Pokemon Center nurse's draw shows it as her bow
+};
+
+typedef BOOL (*MovementCommandFunc)(LocalMapObject *object);
+
+typedef struct MovementList {
+    u32 movements[DIR_MAX];
+} MovementList;
+
+typedef struct EventObjectMovementWork EventObjectMovementWork;
+
+void MapObject_ForceSetHeldMovement(LocalMapObject *object, u32 movement);
+void MovementScriptMachine(SysTask *task, void *data);
+BOOL MovementScriptMachineSub_Init(EventObjectMovementWork *work);
+BOOL MovementScriptMachineSub_WaitReady(EventObjectMovementWork *work);
+BOOL MovementScriptMachineSub_SetMovementCommand(EventObjectMovementWork *work);
+BOOL MovementScriptMachineSub_WaitMovementCommand(EventObjectMovementWork *work);
+BOOL MovementScriptMachineSub_LoopCheck(EventObjectMovementWork *work);
+BOOL MovementScriptMachineSub_Done(EventObjectMovementWork *work);
+u32 GetMovementForDirection(s32 direction, u32 movement);
+s32 GetMovementDirection(u32 movement);
+BOOL IsMovement56To59(u32 movement);
+u32 GetMovement8ForDirection(s32 direction);
+void MapObject_ExecuteMovementCommand(LocalMapObject *object);
+BOOL MapObject_RunForcedMovement(LocalMapObject *object);
+BOOL MapObject_RunMovementCommand(LocalMapObject *object, u32 command, u32 step);
+BOOL MapObjectMovementCmd098_Step2(LocalMapObject *object);
+void MapObject_StartFaceMovement(LocalMapObject *object, u32 direction);
+BOOL MapObjectMovementCmd000_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd001_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd002_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd003_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd090_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd004_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd005_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd006_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd007_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd008_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd009_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd010_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd011_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd012_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd013_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd014_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd015_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd016_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd017_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd018_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd019_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd020_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd021_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd022_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd023_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd084_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd085_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd086_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd087_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd088_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd089_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd090_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd091_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd040_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd024_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd025_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd026_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd027_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd028_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd029_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd030_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd031_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd032_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd033_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd034_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd035_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd036_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd037_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd038_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd039_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd040_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd041_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd042_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd043_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd092_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd044_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd045_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd046_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd047_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd048_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd049_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd050_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd051_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd052_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd053_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd054_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd055_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd056_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd057_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd058_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd059_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd092_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd093_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd094_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd095_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd064_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd060_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd061_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd062_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd063_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd064_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd065_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd066_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd067_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd067_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd068_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd068_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd069_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd070_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd071_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd072_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd073_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd074_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd075_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd075_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd103_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd076_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd077_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd078_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd079_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd076_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd080_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd081_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd082_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd083_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd082_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd096_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd097_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd098_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd099_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd098_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd100_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd100_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd101_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd101_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd102_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd104_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd102_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd108_Step1(LocalMapObject *object);
+BOOL MapObjectMovementCmd105_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd105_Step2(LocalMapObject *object);
+BOOL MapObjectMovementCmd105_Step4(LocalMapObject *object);
+BOOL MapObjectMovementCmd105_Step6(LocalMapObject *object);
+BOOL MapObjectMovementCmd105_Step8(LocalMapObject *object);
+BOOL MapObjectMovementCmd106_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd106_Step2(LocalMapObject *object);
+BOOL MapObjectMovementCmd106_Step4(LocalMapObject *object);
+BOOL MapObjectMovementCmd106_Step6(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step2(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step4(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step6(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step8(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step10(LocalMapObject *object);
+BOOL MapObjectMovementCmd107_Step12(LocalMapObject *object);
+BOOL MapObjectMovementCmd109_Step12(LocalMapObject *object);
+BOOL MapObjectMovementCmd108_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd110_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd108_Step2(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step0(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step2(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step4(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step6(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step10(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step14(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step16(LocalMapObject *object);
+BOOL MapObjectMovementCmd111_Step18(LocalMapObject *object);
+BOOL MapObjectMovementCmd112_Step0(LocalMapObject *object);
+
+extern const MovementList _020FDA28;
+extern const u32 *const gMovementsByDirection[];
+extern const MovementCommandFunc *const gMovementCmdTable[];
+extern const fx32 *gJumpHeightTables[];
+extern const u32 gVariableSpeedWalk_Cmd082[];
+extern const u32 gVariableSpeedWalk_Cmd076[];
+extern const u32 gVariableSpeedWalk_Cmd098[];
+
+#endif // POKEHEARTGOLD_MAP_OBJECT_MOVEMENT_COMMANDS_INTERNAL_H

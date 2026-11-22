@@ -1,0 +1,25 @@
+[
+  {
+    "section": ".bss",
+    "owner": {"name": "gPokewalkerIrBuffers", "offset": "0x1c", "size": "0x48"},
+    "aliases": [
+      {"name": "gPokewalkerIrImageSizes", "offset": "0x4c"},
+      {"name": "gPokewalkerIrStrollSizes", "offset": "0x54"}
+    ]
+  },
+  {
+    "section": ".bss",
+    "owner": {"name": "gPokewalkerIrSync", "offset": "0x64", "size": "0x54"},
+    "aliases": [
+      {"name": "gPokewalkerIrMessageQueue", "offset": "0x7c"},
+      {"name": "gPokewalkerIrTransfer", "offset": "0x80"}
+    ]
+  },
+  {
+    "section": ".bss",
+    "owner": {"name": "gPokewalkerIrProgress", "offset": "0xb8", "size": "0x7c"},
+    "aliases": [
+      {"name": "gPokewalkerIrSendBuffer", "offset": "0xc0"}
+    ]
+  }
+]

@@ -1,0 +1,34 @@
+#ifndef POKEHEARTGOLD_APPLICATION_MAIN_MENU_MYSTERY_GIFT_WIRELESS_H
+#define POKEHEARTGOLD_APPLICATION_MAIN_MENU_MYSTERY_GIFT_WIRELESS_H
+
+#include "save.h"
+#include "sys_task.h"
+
+struct MysteryGiftAppData;
+
+typedef void (*MysteryGiftCommStateFunc)(void);
+
+void MysteryGiftComm_Start(void *owner);
+void MysteryGiftComm_SetState(MysteryGiftCommStateFunc func, u16 arg);
+void MysteryGiftComm_ParentWaitStartup(void);
+void MysteryGiftComm_ParentCollectProfiles(void);
+void MysteryGiftComm_ChildWaitStartup(void);
+void MysteryGiftComm_ChildStateIdle(void);
+void MysteryGiftComm_ChildConnect(void);
+void MysteryGiftComm_ChildWaitLinked(void);
+void MysteryGiftComm_ChildStateLinked(void);
+void MysteryGiftComm_Task(SysTask *task, void *data);
+void MysteryGiftComm_StartParent(void *owner, SaveData *saveData, s8 linkMode);
+int MysteryGiftWireless_SendCard(void *data, int size);
+void MysteryGiftComm_StartChild(void *owner, s8 linkMode);
+void MysteryGiftComm_ConnectToChannel(int channel);
+int MysteryGiftComm_GetFirstParentInfo(struct MysteryGiftAppData *data);
+void MysteryGiftComm_HandleReceived(int netId, int size, void *data, void *context);
+u8 MysteryGiftComm_IsReceived(void);
+u32 MysteryGiftComm_GetRecvBufferSize(void);
+void *MysteryGiftComm_GetRecvBuffer(int netId, void *arg, int size);
+void MysteryGiftComm_RecvSetFlag3C1(int netId, int size, void *data, void *context);
+void MysteryGiftComm_Free(void);
+void MysteryGiftComm_RegisterCommands(void *owner);
+
+#endif // POKEHEARTGOLD_APPLICATION_MAIN_MENU_MYSTERY_GIFT_WIRELESS_H

@@ -1,0 +1,63 @@
+#include "global.h"
+
+#include <nitro/code32.h>
+#include <stdarg.h>
+
+#include "ppw_lobby_internal.h"
+#include "ppw_lobby_state.h"
+
+
+void PPWLobby_GetChannelName(Str *out, PPWLobbyChannel *channels, int subChannel) {
+    volatile Str copy;
+    if (!subChannel) {
+        PPWLobbyChannel_GetName(out, &channels[0]);
+        copy = *out;
+        return;
+    }
+    PPWLobbyChannel_GetName(out, &channels[1]);
+    copy = *out;
+}
+
+enum PPWLobbyResult PPW_LobbySendChannelBinaryMessage(int channel, int type, const void *data, int size) {
+    PPWLobbyWork *work = gPPWLobbyWork;
+    if (!work) {
+        return PPW_LOBBY_RESULT_ERROR_STATE;
+    }
+    if (work) {
+        if (work->state == PPW_LOBBY_STATE_ERROR) {
+            return PPW_LOBBY_RESULT_ERROR_CONDITION;
+        }
+    }
+    if (work) {
+        if (PPWLobby_GetState() != PPW_LOBBY_STATE_READY) {
+            return PPW_LOBBY_RESULT_ERROR_STATE;
+        }
+    }
+    return PPWLobby_SendMessage(-1, channel, PPW_LOBBY_MESSAGE_FORMAT_BINARY, PPW_LOBBY_MESSAGE_KIND_USER, type, data, size);
+}
+
+enum PPWLobbyResult PPW_LobbySendPlayerBinaryMessage(int userId, int type, const void *data, int size) {
+    PPWLobbyWork *work = gPPWLobbyWork;
+    if (!work) {
+        return PPW_LOBBY_RESULT_ERROR_STATE;
+    }
+    if (work) {
+        if (work->state == PPW_LOBBY_STATE_ERROR) {
+            return PPW_LOBBY_RESULT_ERROR_CONDITION;
+        }
+    }
+    if (work) {
+        if (PPWLobby_GetState() != PPW_LOBBY_STATE_READY) {
+            return PPW_LOBBY_RESULT_ERROR_STATE;
+        }
+    }
+    return PPWLobby_SendMessage(userId, PPW_LOBBY_CHANNEL_KIND_INVALID, PPW_LOBBY_MESSAGE_FORMAT_BINARY, PPW_LOBBY_MESSAGE_KIND_USER, type, data, size);
+}
+
+int PPW_LobbyGetMyUserId(void) {
+    PPWLobbyWork *work = gPPWLobbyWork;
+    if (work) {
+        return work->userId;
+    }
+    return -1;
+}

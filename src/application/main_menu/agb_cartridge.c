@@ -1,0 +1,1510 @@
+#include "application/main_menu/agb_cartridge.h"
+
+#include "global.h"
+
+#include "constants/pokemon.h"
+#include "constants/species.h"
+
+#include "CTRDG_task.h"
+#include "config.h"
+#include "item.h"
+#include "pm_version.h"
+#include "pokemon.h"
+#include "system.h"
+
+// GBA cartridge access (NitroSDK CTRDG)
+BOOL CTRDG_IsAgbCartridge(void);
+u32 CTRDG_GetAgbGameCode(void);
+void CTRDG_Enable(BOOL enable);
+void CTRDG_CpuCopy32(const void *src, void *dest, u32 size);
+#ifdef PLATFORM_PC
+u16 CTRDG_IdentifyAgbBackup(int type);   // integer widths of the definition (x64 ABI)
+#else
+int CTRDG_IdentifyAgbBackup(int type);
+#endif
+void CTRDG_ReadAgbFlash(u16 sector, u32 offset, void *dest, u32 size);
+void CTRDG_WriteAndVerifyAgbFlashAsync(u8 sector, void *src, u32 verifySize, CTRDG_TASK_FUNC callback);
+
+// Save sizes of the game (read from the ROM by FireRed/LeafGreen/Emerald, fixed for Ruby/Sapphire)
+typedef struct PmAgbSaveSizes {
+    u8 unk_00[0x20];
+    u32 trainerInfoSize; // data size of save sector 0
+    u32 gameStateSize;   // total data size of save sectors 1-4
+    u8 unk_28[8];
+    u32 unk_30;
+    u8 unk_34[0x60];
+} PmAgbSaveSizes;
+
+// The part of the GBA ROM header that is copied
+typedef struct PmAgbRomHeader {
+    u8 unk_00[0x50];
+    u32 unk_50;
+    u8 unk_54[0x14];
+    PmAgbSaveSizes saveSizes;
+} PmAgbRomHeader;
+
+typedef struct AgbRomHeader {
+    u32 entry;
+    u8 logo[156];
+    u8 title[12];
+    u8 gameCode[4];
+    u8 makerCode[2];
+    u8 fixed;
+    u8 unitCode;
+    u8 deviceType;
+    u8 reserved[7];
+    u8 version;
+    u8 checksum;
+    u8 reserved2[2];
+} AgbRomHeader;
+
+// State of the cartridge save (gPmAgbSave)
+typedef struct PmAgbSave {
+    u32 slot;           // the save slot read (0/1)
+    u32 sectorsWritten; // sectors written by the current save
+    u8 *buffer;         // sector buffer followed by the save data copies (see PmAgbCartridge_GetSectorData)
+    u32 firstSector;    // flash sector of the trainer info sector (the sectors of a slot are rotated)
+    u32 counter;        // save counter
+    u32 writeStatus;    // 0 idle, 1 writing, 2 last sector, 3 next sector, 4 failed
+    PmAgbRomHeader header;
+} PmAgbSave;
+
+// The start of the trainer info sector (the trainer id is not word aligned)
+typedef struct AgbTrainerInfo {
+    u8 playerName[8];
+    u8 playerGender;
+    u8 unk_09;
+    u8 trainerId[4];
+} AgbTrainerInfo;
+
+// The four encrypted substructures of an AgbBoxMon
+typedef union AgbBoxMonSubstruct {
+    u32 words[3];
+
+    struct {
+        u32 first;
+        u32 hpIV : 5, atkIV : 5, defIV : 5, speedIV : 5, spAtkIV : 5, spDefIV : 5, isEgg : 1, abilityNum : 1;
+        u32 coolRibbons : 3, beautyRibbons : 3, cuteRibbons : 3, smartRibbons : 3, toughRibbons : 3, others : 17;
+    } misc;
+
+    struct {
+        u16 moves[4];
+        u8 pp[4];
+    } attacks;
+
+    struct {
+        u16 species;
+        u16 heldItem;
+        u32 experience;
+        u8 ppUps;
+        u8 friendship;
+        u8 unk_0A[2];
+    } growth;
+
+    struct {
+        u8 hpEV;
+        u8 atkEV;
+        u8 defEV;
+        u8 speedEV;
+        u8 spAtkEV;
+        u8 spDefEV;
+        u8 cool;
+        u8 beauty;
+        u8 cute;
+        u8 smart;
+        u8 tough;
+        u8 sheen;
+    } condition;
+} AgbBoxMonSubstruct;
+
+// PmAgbCartridge_CheckSaveSlot / PmAgbCartridge_FindLatestSaveSlot
+enum AgbSaveSlotStatus {
+    AGB_SAVE_SLOT_EMPTY,
+    AGB_SAVE_SLOT_VALID,
+    AGB_SAVE_SLOT_CORRUPT,        // neither slot can be used
+    AGB_SAVE_SLOT_DAMAGED = 0xFF, // only some of the sectors are valid
+};
+
+extern u32 gMigrateFromAgbIcons;
+extern u32 gPmAgbSaveCounter;
+extern PmAgbRomHeader gPmAgbRomHeader;
+
+static void *AGB_GetBoxMonSubstruct(AgbBoxMon *mon, u32 personality, u32 which);
+
+extern PmAgbSave gPmAgbSave;
+
+static BOOL PmAgbCartridgeHasFlash(void);
+static int IdentifyPmAgbCartridge(PmAgbCartridgeSpec *specs, int count);
+static u16 PmAgbCartridge_CalcSectorChecksum(u32 *data, u16 size);
+static void PmAgbCartridge_ReadSector(int sector, void *dest);
+static u16 PmAgbCartridge_GetSectorDataSize(int id);
+static void *PmAgbCartridge_GetSectorData(int id);
+static enum AgbSaveSlotStatus PmAgbCartridge_CheckSaveSlot(int slot, AgbSaveSector *sector, u32 *counter);
+static enum AgbSaveSlotStatus PmAgbCartridge_FindLatestSaveSlot(AgbSaveSector *sector, u32 *slot, u32 *counter);
+static void PmAgbCartridge_WriteSectorAsync(int id);
+static u32 PmAgbCartridge_WriteSectorCallback(CTRDGTaskInfo *task);
+static AgbTrainerInfo *PmAgbCartridge_GetTrainerInfo(void);
+static void AGB_DecryptBoxMon(AgbBoxMon *mon);
+static void AGB_EncryptBoxMon(AgbBoxMon *mon);
+static u16 AGB_CalcBoxMonChecksum(AgbBoxMon *mon);
+static int AGB_GetBoxMonAbility(AgbBoxMon *agbMon, BoxPokemon *boxMon);
+
+static BOOL PmAgbCartridgeHasFlash(void) {
+    if (CTRDG_IdentifyAgbBackup(1) != 0) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+int PmAgbCartridgeGetOffsets(void *buffer) {
+    int result;
+    gPmAgbSave.buffer = buffer;
+    if (gPmAgbCartridgeSpec.spec != NULL) {
+        return PM_AGB_RESULT_ALREADY_IDENTIFIED;
+    }
+    result = IdentifyPmAgbCartridge(gPmAgbRomCodeMappings, 30);
+    if (result != PM_AGB_RESULT_OK) {
+        return result;
+    }
+    if (gPmAgbCartridgeSpec.spec->gameType == 0) {
+        gPmAgbSave.header.saveSizes.trainerInfoSize = 0x890;
+        gPmAgbSave.header.saveSizes.gameStateSize = 0x3AC0;
+        gPmAgbSave.header.unk_50 = 0x1220;
+        gPmAgbSave.header.saveSizes.unk_30 = 9;
+    } else {
+        CTRDG_CpuCopy32((const void *)0x08000100, &gPmAgbSave.header, sizeof(PmAgbRomHeader));
+    }
+    if (!PmAgbCartridgeHasFlash()) {
+        return PM_AGB_RESULT_NO_FLASH;
+    }
+    return PM_AGB_RESULT_OK;
+}
+
+void PmAgbCartridgeUnlinkSpec(void) {
+    gPmAgbCartridgeSpec.spec = NULL;
+}
+
+u8 PmAgbCartridge_GetVersionInternal(void) {
+    return gPmAgbCartridgeSpec.spec->version;
+}
+
+u16 PmAgbCartridge_GetLanguage(void) {
+    return gPmAgbCartridgeSpec.spec->language;
+}
+
+static int IdentifyPmAgbCartridge(PmAgbCartridgeSpec *specs, int count) {
+    AgbRomHeader header;
+    AgbRomHeader *rom;
+    u8 *bytes;
+    u32 gameCode;
+    int i;
+    u32 j;
+    int k;
+    u8 sum;
+
+    gPmAgbCartridgeSpec.spec = NULL;
+    if (!CTRDG_IsAgbCartridge()) {
+        return PM_AGB_RESULT_NO_CARTRIDGE;
+    }
+    gameCode = CTRDG_GetAgbGameCode();
+    for (i = 0; i < count; i++) {
+        if (gameCode == specs[i].gameCode) {
+            gPmAgbCartridgeSpec.spec = &specs[i];
+            break;
+        }
+    }
+    if (gPmAgbCartridgeSpec.spec == NULL) {
+        return PM_AGB_RESULT_UNKNOWN_GAME;
+    }
+    CTRDG_Enable(TRUE);
+    rom = &header;
+    bytes = (u8 *)rom;
+    CTRDG_CpuCopy32((const void *)0x08000000, rom, sizeof(AgbRomHeader));
+    for (j = 0; j < 156; j++) {
+        if (gAgbCartNintendoLogo[j] != rom->logo[j]) {
+            return PM_AGB_RESULT_BAD_HEADER;
+        }
+    }
+    // header checksum
+    sum = 0;
+    for (k = 0xA0; k <= 0xBC; k++) {
+        sum += bytes[k];
+    }
+    sum = -(sum + 0x19);
+    if (rom->checksum != sum) {
+        return PM_AGB_RESULT_BAD_HEADER;
+    }
+    return PM_AGB_RESULT_OK;
+}
+
+static u16 PmAgbCartridge_CalcSectorChecksum(u32 *data, u16 size) {
+    u16 i;
+    u32 sum = 0;
+    for (i = 0; i < size / 4; i++) {
+        sum += *data++;
+    }
+    return (u16)(((sum >> 16) & 0xFFFF) + (sum & 0xFFFF));
+}
+
+static void PmAgbCartridge_ReadSector(int sector, void *dest) {
+    CTRDG_ReadAgbFlash(sector, 0, dest, AGB_SAVE_SECTOR_SIZE);
+}
+
+#pragma push
+#pragma opt_propagation off
+
+// Size of the data in the save sector with this id
+static u16 PmAgbCartridge_GetSectorDataSize(int id) {
+    if (id == 0) {
+        PmAgbSaveSizes *sizes = &gPmAgbRomHeader.saveSizes;
+        return sizes->trainerInfoSize;
+    }
+    if (id == 4) {
+        PmAgbSaveSizes *sizes = &gPmAgbRomHeader.saveSizes;
+        return sizes->gameStateSize - 3 * 0xF80;
+    }
+    if (id == 13) {
+        return 2000;
+    }
+    return 0xF80;
+}
+
+#pragma pop
+
+static void *PmAgbCartridge_GetSectorData(int id) {
+    if (id == 0) {
+        return gPmAgbSave.buffer + 0x1000;
+    }
+    if (id >= 1 && id <= 4) {
+        return gPmAgbSave.buffer + 0x2000 + (id - 1) * 0xF80;
+    }
+    if (id >= 5 && id < 14) {
+        return gPmAgbSave.buffer + 0x6000 + (id - 5) * 0xF80;
+    }
+    return NULL;
+}
+
+static enum AgbSaveSlotStatus PmAgbCartridge_CheckSaveSlot(int slot, AgbSaveSector *sector, u32 *counter) {
+    u32 validSectors = 0;
+    u8 found = FALSE;
+    int i;
+    *counter = 0;
+    gPmAgbSave.sectorsWritten = 0;
+    for (i = 0; i < AGB_SAVE_SECTORS_PER_SLOT; i++) {
+        PmAgbCartridge_ReadSector(i % AGB_SAVE_SECTORS_PER_SLOT + slot * AGB_SAVE_SECTORS_PER_SLOT, sector);
+        DC_FlushRange(sector, AGB_SAVE_SECTOR_SIZE);
+        if (sector->signature == AGB_SAVE_SECTOR_SIGNATURE) {
+            found = TRUE;
+            if (PmAgbCartridge_CalcSectorChecksum((u32 *)sector, PmAgbCartridge_GetSectorDataSize(sector->id)) == sector->checksum) {
+                *counter = sector->counter;
+                validSectors |= 1 << sector->id;
+            }
+        }
+    }
+    if (found) {
+        if (validSectors == (1 << AGB_SAVE_SECTORS_PER_SLOT) - 1) {
+            return AGB_SAVE_SLOT_VALID;
+        }
+        return AGB_SAVE_SLOT_DAMAGED;
+    }
+    return AGB_SAVE_SLOT_EMPTY;
+}
+
+// Picks the newer of the two save slots
+static enum AgbSaveSlotStatus PmAgbCartridge_FindLatestSaveSlot(AgbSaveSector *sector, u32 *slot, u32 *counter) {
+    u32 counter0, counter1;
+    enum AgbSaveSlotStatus status0 = PmAgbCartridge_CheckSaveSlot(0, sector, &counter0);
+    enum AgbSaveSlotStatus status1 = PmAgbCartridge_CheckSaveSlot(1, sector, &counter1);
+    if (status0 == AGB_SAVE_SLOT_VALID && status1 == AGB_SAVE_SLOT_VALID) {
+        if ((counter0 == 0xFFFFFFFF && counter1 == 0) || (counter0 == 0 && counter1 == 0xFFFFFFFF)) {
+            // the counter wrapped around
+            if (counter0 + 1 < counter1 + 1) {
+                *counter = counter1;
+                *slot = 1;
+            } else {
+                *counter = counter0;
+                *slot = 0;
+            }
+        } else if (counter0 < counter1) {
+            *counter = counter1;
+            *slot = 1;
+        } else {
+            *counter = counter0;
+            *slot = 0;
+        }
+        return AGB_SAVE_SLOT_VALID;
+    }
+    if (status0 == AGB_SAVE_SLOT_VALID && status1 != AGB_SAVE_SLOT_VALID) {
+        *counter = counter0;
+        if (status1 == AGB_SAVE_SLOT_DAMAGED) {
+            *slot = 0;
+            return AGB_SAVE_SLOT_DAMAGED;
+        }
+        *slot = 0;
+        return AGB_SAVE_SLOT_VALID;
+    }
+    if (status1 == AGB_SAVE_SLOT_VALID && status0 != AGB_SAVE_SLOT_VALID) {
+        *counter = counter1;
+        if (status0 == AGB_SAVE_SLOT_DAMAGED) {
+            *slot = 1;
+            return AGB_SAVE_SLOT_DAMAGED;
+        }
+        *slot = 1;
+        return AGB_SAVE_SLOT_VALID;
+    }
+    if (status0 == AGB_SAVE_SLOT_EMPTY && status1 == AGB_SAVE_SLOT_EMPTY) {
+        *counter = 0;
+        *slot = 0;
+        return AGB_SAVE_SLOT_EMPTY;
+    }
+    *counter = 0;
+    *slot = 0;
+    return AGB_SAVE_SLOT_CORRUPT;
+}
+
+// Reads the latest save into the buffer
+int PmAgbCartridge_LoadSave(void) {
+#ifdef PLATFORM_PC
+    // On the DS gPmAgbSave directly follows gMigrateFromAgbIcons.
+    enum AgbSaveSlotStatus result = PmAgbCartridge_FindLatestSaveSlot((AgbSaveSector *)gPmAgbSave.buffer, &gPmAgbSave.slot, &gPmAgbSaveCounter);
+#else
+    enum AgbSaveSlotStatus result = PmAgbCartridge_FindLatestSaveSlot((AgbSaveSector *)gPmAgbSave.buffer, (u32 *)(&gMigrateFromAgbIcons + 1), &gPmAgbSaveCounter);
+#endif
+    PmAgbSave *save;
+
+    if (result != AGB_SAVE_SLOT_VALID) {
+        switch (result) {
+        case AGB_SAVE_SLOT_DAMAGED:
+            return PM_AGB_RESULT_SAVE_DAMAGED;
+        case AGB_SAVE_SLOT_EMPTY:
+            return PM_AGB_RESULT_NO_SAVE;
+        case AGB_SAVE_SLOT_CORRUPT:
+            return PM_AGB_RESULT_SAVE_CORRUPT;
+        }
+    }
+    save = &gPmAgbSave;
+    if (save->slot <= 1) {
+        int i;
+        AgbSaveSector *sector = (AgbSaveSector *)save->buffer;
+        u32 validSectors = 0;
+        for (i = 0; i < AGB_SAVE_SECTORS_PER_SLOT; i++) {
+            PmAgbCartridge_ReadSector(i + save->slot * AGB_SAVE_SECTORS_PER_SLOT, sector);
+            if (sector->signature == AGB_SAVE_SECTOR_SIGNATURE && sector->checksum == PmAgbCartridge_CalcSectorChecksum((u32 *)sector, PmAgbCartridge_GetSectorDataSize(sector->id))) {
+                u32 size;
+                save->counter = sector->counter;
+                validSectors |= 1 << sector->id;
+                size = PmAgbCartridge_GetSectorDataSize(sector->id);
+                MI_CpuCopy32(sector, PmAgbCartridge_GetSectorData(sector->id), size);
+                if (sector->id == 0) {
+                    save->firstSector = i;
+                }
+            }
+        }
+        if (validSectors == 0x3FFF) {
+            return PM_AGB_RESULT_OK;
+        }
+        return PM_AGB_RESULT_BAD_HEADER;
+    }
+    return PM_AGB_RESULT_SAVE_CORRUPT;
+}
+
+// Writes the save sector with this id into the other slot (asynchronously; PmAgbCartridge_WriteSectorCallback continues)
+static void PmAgbCartridge_WriteSectorAsync(int id) {
+    AgbSaveSector *sector = (AgbSaveSector *)gPmAgbSave.buffer;
+    int size;
+    int flashSector;
+    gPmAgbSave.writeStatus = 1;
+    MI_CpuClear32(sector, AGB_SAVE_SECTOR_SIZE);
+    size = PmAgbCartridge_GetSectorDataSize(id);
+    MI_CpuCopy32(PmAgbCartridge_GetSectorData(id), sector, size);
+    sector->counter = gPmAgbSave.counter;
+    sector->id = id;
+    sector->signature = AGB_SAVE_SECTOR_SIGNATURE;
+    sector->checksum = PmAgbCartridge_CalcSectorChecksum((u32 *)sector, PmAgbCartridge_GetSectorDataSize(id));
+    flashSector = (id + (int)gPmAgbSave.firstSector + 1) % AGB_SAVE_SECTORS_PER_SLOT + AGB_SAVE_SECTORS_PER_SLOT * gPmAgbCartridgeSpec.saveSlot;
+    CTRDG_WriteAndVerifyAgbFlashAsync(flashSector, sector, 4, PmAgbCartridge_WriteSectorCallback);
+}
+
+static u32 PmAgbCartridge_WriteSectorCallback(CTRDGTaskInfo *task) {
+    if (task->result == 0) {
+        gPmAgbSave.sectorsWritten++;
+        if ((s32)gPmAgbSave.sectorsWritten >= AGB_SAVE_SECTORS_PER_SLOT) {
+            gPmAgbSave.sectorsWritten = 0;
+            gPmAgbSave.writeStatus = 0;
+            return 0;
+        }
+        if (gPmAgbSave.sectorsWritten == AGB_SAVE_SECTORS_PER_SLOT - 1) {
+            gPmAgbSave.writeStatus = 2;
+            return 0;
+        }
+        gPmAgbSave.writeStatus = 3;
+    } else {
+        gPmAgbSave.writeStatus = 4;
+    }
+    return 0;
+}
+
+// Starts saving into the slot the game did not load from
+BOOL PmAgbCartridge_StartSave(void) {
+    int sectorsWritten = gPmAgbSave.sectorsWritten;
+    if (sectorsWritten == 0) {
+        if (gPmAgbSave.slot == 1) {
+            gPmAgbCartridgeSpec.saveSlot = 0;
+        } else {
+            gPmAgbCartridgeSpec.saveSlot = 1;
+        }
+        gPmAgbSave.counter++;
+    } else {
+        return FALSE;
+    }
+    if (gPmAgbCartridgeSpec.saveSlot < 0) {
+        return FALSE;
+    }
+    PmAgbCartridge_WriteSectorAsync(sectorsWritten);
+    return TRUE;
+}
+
+// Writes the next sector when the previous one is done (the last one only on the second call after it)
+int PmAgbCartridge_ContinueSave(void) {
+    switch (gPmAgbSave.writeStatus) {
+    case 2:
+        PmAgbCartridge_WriteSectorAsync(gPmAgbSave.sectorsWritten);
+        return PM_AGB_RESULT_OK;
+    case 3:
+        PmAgbCartridge_WriteSectorAsync(gPmAgbSave.sectorsWritten);
+    case 1:
+        return PM_AGB_RESULT_WRITE_BUSY;
+    case 4:
+        return PM_AGB_RESULT_WRITE_FAILED;
+    case 0:
+    default:
+        return PM_AGB_RESULT_OK;
+    }
+}
+
+int PmAgbCartridge_GetSaveStatus(void) {
+    switch (gPmAgbSave.writeStatus) {
+    case 2:
+        return PM_AGB_RESULT_WRITE_LAST;
+    case 3:
+        return PM_AGB_RESULT_WRITE_BUSY;
+    case 1:
+        return PM_AGB_RESULT_WRITE_STARTING;
+    case 4:
+        return PM_AGB_RESULT_WRITE_FAILED;
+    case 0:
+    default:
+        return PM_AGB_RESULT_OK;
+    }
+}
+
+AgbPokemonStorage *PmAgbCartridge_GetPCStorage(void) {
+    return (AgbPokemonStorage *)(gPmAgbSave.buffer + 0x6000);
+}
+
+// The trainer info sector
+static AgbTrainerInfo *PmAgbCartridge_GetTrainerInfo(void) {
+    return PmAgbCartridge_GetSectorData(0);
+}
+
+// The player's trainer id
+u32 PmAgbCartridge_GetTrainerId(void) {
+    AgbTrainerInfo *trainerInfo = PmAgbCartridge_GetTrainerInfo();
+    return (trainerInfo->trainerId[3] << 24) | (trainerInfo->trainerId[2] << 16) | (trainerInfo->trainerId[1] << 8) | trainerInfo->trainerId[0];
+}
+
+u8 *PmAgbCartridge_GetPlayerName(void *unused) {
+    return PmAgbCartridge_GetTrainerInfo()->playerName;
+}
+
+// Substructure `which` (0 growth, 1 attacks, 2 EVs and condition, 3 misc) of the box Pokemon; the order of the four
+// depends on personality % 24
+static void *AGB_GetBoxMonSubstruct(AgbBoxMon *mon, u32 personality, u32 which) {
+    u8 *result = NULL;
+    switch (personality % 24) {
+    case 0: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 1: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 2: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 3: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 4: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 5: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 6: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 7: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 8: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 9: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 10: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 11: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 12: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 13: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 14: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 36;
+            break;
+        }
+        break;
+    }
+    case 15: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 24;
+            break;
+        }
+        break;
+    }
+    case 16: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 17: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data;
+            break;
+        case 3:
+            result = data + 12;
+            break;
+        }
+        break;
+    }
+    case 18: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    case 19: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 12;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    case 20: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data + 36;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    case 21: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data + 12;
+            break;
+        case 2:
+            result = data + 24;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    case 22: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 24;
+            break;
+        case 1:
+            result = data + 36;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    case 23: {
+        u8 *data = (u8 *)mon->secure;
+        switch (which) {
+        case 0:
+            result = data + 36;
+            break;
+        case 1:
+            result = data + 24;
+            break;
+        case 2:
+            result = data + 12;
+            break;
+        case 3:
+            result = data;
+            break;
+        }
+        break;
+    }
+    }
+    return result;
+}
+
+// The substructures are XORed with the OT id and the personality
+static void AGB_DecryptBoxMon(AgbBoxMon *mon) {
+    u32 *key = (u32 *)mon;
+    u32 *ptr;
+    u32 i = 0;
+    ptr = mon->secure;
+    for (; i < 12; i++) {
+        u32 x = *ptr ^ key[1];
+        *ptr = x;
+        *ptr++ = x ^ key[0];
+    }
+}
+
+static void AGB_EncryptBoxMon(AgbBoxMon *mon) {
+    u32 *key = (u32 *)mon;
+    u32 *ptr;
+    u32 i = 0;
+    ptr = mon->secure;
+    for (; i < 12; i++) {
+        u32 x = *ptr ^ key[0];
+        *ptr = x;
+        *ptr++ = x ^ key[1];
+    }
+}
+
+static u16 AGB_CalcBoxMonChecksum(AgbBoxMon *mon) {
+    u16 *substruct2;
+    u16 *substruct1;
+    u16 *substruct0;
+    u16 *substruct3;
+    u16 sum = 0;
+    int i;
+
+    substruct0 = AGB_GetBoxMonSubstruct(mon, mon->personality, 0);
+    substruct1 = AGB_GetBoxMonSubstruct(mon, mon->personality, 1);
+    substruct2 = AGB_GetBoxMonSubstruct(mon, mon->personality, 2);
+    substruct3 = AGB_GetBoxMonSubstruct(mon, mon->personality, 3);
+    for (i = 0; i < 6; i++) {
+        sum += substruct0[i];
+    }
+    for (i = 0; i < 6; i++) {
+        sum += substruct1[i];
+    }
+    for (i = 0; i < 6; i++) {
+        sum += *substruct2++;
+    }
+    for (i = 0; i < 6; i++) {
+        sum += *substruct3++;
+    }
+    return sum;
+}
+
+u32 AGB_GetBoxMonData(AgbBoxMon *mon, int field, u8 *dest) {
+    u32 result = 0;
+    AgbBoxMonSubstruct *misc = NULL, *growth = NULL, *attacks = NULL, *condition = NULL;
+
+    if (field > AGB_MON_DATA_UNKNOWN_10) {
+        growth = AGB_GetBoxMonSubstruct(mon, mon->personality, 0);
+        attacks = AGB_GetBoxMonSubstruct(mon, mon->personality, 1);
+        condition = AGB_GetBoxMonSubstruct(mon, mon->personality, 2);
+        misc = AGB_GetBoxMonSubstruct(mon, mon->personality, 3);
+        AGB_DecryptBoxMon(mon);
+        {
+            u32 checksum = AGB_CalcBoxMonChecksum(mon);
+            if (checksum != mon->checksum) {
+                mon->isBadEgg = TRUE;
+                mon->isEgg = TRUE;
+                misc->words[1] |= 1u << 30;
+            }
+        }
+    }
+    switch (field) {
+    case AGB_MON_DATA_PERSONALITY:
+        result = mon->personality;
+        break;
+    case AGB_MON_DATA_OT_ID:
+        result = mon->otId;
+        break;
+    case AGB_MON_DATA_NICKNAME:
+        if (mon->isBadEgg) {
+            result = 0;
+        } else {
+            for (result = 0; result < 10; result++) {
+                dest[result] = mon->nickname[result];
+            }
+        }
+        dest[result] = 0xFF;
+        break;
+    case AGB_MON_DATA_LANGUAGE:
+        result = mon->language;
+        break;
+    case AGB_MON_DATA_IS_BAD_EGG:
+        result = mon->isBadEgg;
+        break;
+    case AGB_MON_DATA_HAS_SPECIES:
+        result = mon->hasSpecies;
+        break;
+    case AGB_MON_DATA_SANITY_IS_EGG:
+        result = mon->isEgg;
+        break;
+    case AGB_MON_DATA_OT_NAME:
+        for (result = 0; result < 7; result++) {
+            dest[result] = mon->otName[result];
+        }
+        dest[result] = 0xFF;
+        break;
+    case AGB_MON_DATA_MARKINGS:
+        result = mon->markings;
+        break;
+    case AGB_MON_DATA_CHECKSUM:
+        result = mon->checksum;
+        break;
+    case AGB_MON_DATA_UNKNOWN_10:
+        result = mon->unknown;
+        break;
+    case AGB_MON_DATA_SPECIES:
+        if (mon->isBadEgg) {
+            result = 412; // the Egg species of the GBA games
+        } else {
+            result = growth->growth.species;
+        }
+        break;
+    case AGB_MON_DATA_HELD_ITEM:
+        result = growth->growth.heldItem;
+        break;
+    case AGB_MON_DATA_EXPERIENCE:
+        result = growth->growth.experience;
+        break;
+    case AGB_MON_DATA_PP_UPS:
+        result = growth->growth.ppUps;
+        break;
+    case AGB_MON_DATA_FRIENDSHIP:
+        result = growth->growth.friendship;
+        break;
+    case AGB_MON_DATA_MOVE1:
+    case AGB_MON_DATA_MOVE2:
+    case AGB_MON_DATA_MOVE3:
+    case AGB_MON_DATA_MOVE4:
+        result = attacks->attacks.moves[field - AGB_MON_DATA_MOVE1];
+        break;
+    case AGB_MON_DATA_MOVE1_PP:
+    case AGB_MON_DATA_MOVE2_PP:
+    case AGB_MON_DATA_MOVE3_PP:
+    case AGB_MON_DATA_MOVE4_PP:
+        result = attacks->attacks.pp[field - AGB_MON_DATA_MOVE1_PP];
+        break;
+    case AGB_MON_DATA_HP_EV:
+        result = condition->condition.hpEV;
+        break;
+    case AGB_MON_DATA_ATK_EV:
+        result = condition->condition.atkEV;
+        break;
+    case AGB_MON_DATA_DEF_EV:
+        result = condition->condition.defEV;
+        break;
+    case AGB_MON_DATA_SPEED_EV:
+        result = condition->condition.speedEV;
+        break;
+    case AGB_MON_DATA_SPATK_EV:
+        result = condition->condition.spAtkEV;
+        break;
+    case AGB_MON_DATA_SPDEF_EV:
+        result = condition->condition.spDefEV;
+        break;
+    case AGB_MON_DATA_COOL:
+        result = condition->condition.cool;
+        break;
+    case AGB_MON_DATA_BEAUTY:
+        result = condition->condition.beauty;
+        break;
+    case AGB_MON_DATA_CUTE:
+        result = condition->condition.cute;
+        break;
+    case AGB_MON_DATA_SMART:
+        result = condition->condition.smart;
+        break;
+    case AGB_MON_DATA_TOUGH:
+        result = condition->condition.tough;
+        break;
+    case AGB_MON_DATA_SHEEN:
+        result = condition->condition.sheen;
+        break;
+    // misc word 0: pokerus (8 bits), met location (8), met level (7), met game (4), ball (4), OT gender (1)
+    case AGB_MON_DATA_POKERUS:
+        result = (misc->words[0] << 24) >> 24;
+        break;
+    case AGB_MON_DATA_MET_LOCATION:
+        result = (misc->words[0] << 16) >> 24;
+        break;
+    case AGB_MON_DATA_MET_LEVEL:
+        result = (misc->words[0] << 9) >> 25;
+        break;
+    case AGB_MON_DATA_MET_GAME:
+        result = (misc->words[0] << 5) >> 28;
+        break;
+    case AGB_MON_DATA_POKEBALL:
+        result = (misc->words[0] << 1) >> 28;
+        break;
+    case AGB_MON_DATA_OT_GENDER:
+        result = misc->words[0] >> 31;
+        break;
+    // misc word 1: six 5-bit IVs, is egg (1), ability number (1)
+    case AGB_MON_DATA_HP_IV:
+        result = misc->misc.hpIV;
+        break;
+    case AGB_MON_DATA_ATK_IV:
+        result = (misc->words[1] << 22) >> 27;
+        break;
+    case AGB_MON_DATA_DEF_IV:
+        result = (misc->words[1] << 17) >> 27;
+        break;
+    case AGB_MON_DATA_SPEED_IV:
+        result = (misc->words[1] << 12) >> 27;
+        break;
+    case AGB_MON_DATA_SPATK_IV:
+        result = (misc->words[1] << 7) >> 27;
+        break;
+    case AGB_MON_DATA_SPDEF_IV:
+        result = (misc->words[1] << 2) >> 27;
+        break;
+    case AGB_MON_DATA_IS_EGG:
+        result = (misc->words[1] << 1) >> 31;
+        break;
+    case AGB_MON_DATA_ABILITY_NUM:
+        result = misc->words[1] >> 31;
+        break;
+    // misc word 2: ribbons
+    case AGB_MON_DATA_COOL_RIBBONS:
+        result = misc->misc.coolRibbons;
+        break;
+    case AGB_MON_DATA_BEAUTY_RIBBONS:
+        result = (misc->words[2] << 26) >> 29;
+        break;
+    case AGB_MON_DATA_CUTE_RIBBONS:
+        result = (misc->words[2] << 23) >> 29;
+        break;
+    case AGB_MON_DATA_SMART_RIBBONS:
+        result = (misc->words[2] << 20) >> 29;
+        break;
+    case AGB_MON_DATA_TOUGH_RIBBONS:
+        result = (misc->words[2] << 17) >> 29;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON:
+        result = (misc->words[2] << 16) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 1:
+        result = (misc->words[2] << 15) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 2:
+        result = (misc->words[2] << 14) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 3:
+        result = (misc->words[2] << 13) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 4:
+        result = (misc->words[2] << 12) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 5:
+        result = (misc->words[2] << 11) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 6:
+        result = (misc->words[2] << 10) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 7:
+        result = (misc->words[2] << 9) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 8:
+        result = (misc->words[2] << 8) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 9:
+        result = (misc->words[2] << 7) >> 31;
+        break;
+    case AGB_MON_DATA_CHAMPION_RIBBON + 10:
+        result = (misc->words[2] << 6) >> 31;
+        break;
+    case AGB_MON_DATA_WORLD_RIBBON:
+        result = (misc->words[2] << 5) >> 31;
+        break;
+    case 79:
+        result = (misc->words[2] << 1) >> 28;
+        break;
+    case AGB_MON_DATA_FATEFUL_ENCOUNTER:
+        result = misc->words[2] >> 31;
+        break;
+    case AGB_MON_DATA_SPECIES_OR_EGG:
+        result = growth->growth.species;
+        if (result && (((misc->words[1] << 1) >> 31) || mon->isBadEgg)) {
+            result = 412;
+        }
+        break;
+    case AGB_MON_DATA_COMBINED_IVS:
+        result = misc->misc.hpIV | (misc->misc.atkIV << 5) | (misc->misc.defIV << 10) | (misc->misc.speedIV << 15) | (misc->misc.spAtkIV << 20) | (misc->misc.spDefIV << 25);
+        break;
+    }
+    if (field > AGB_MON_DATA_UNKNOWN_10) {
+        AGB_EncryptBoxMon(mon);
+    }
+    return result;
+}
+
+// Only the nickname, language, flags, OT name and species can be set
+void AGB_SetBoxMonData(AgbBoxMon *mon, int field, const void *value) {
+    const u8 *in = value;
+    AgbBoxMonSubstruct *growth;
+    AgbBoxMonSubstruct *misc;
+    int i;
+    growth = NULL;
+    misc = NULL;
+    if (field > AGB_MON_DATA_UNKNOWN_10) {
+        growth = AGB_GetBoxMonSubstruct(mon, mon->personality, 0);
+        AGB_GetBoxMonSubstruct(mon, mon->personality, 1);
+        AGB_GetBoxMonSubstruct(mon, mon->personality, 2);
+        misc = AGB_GetBoxMonSubstruct(mon, mon->personality, 3);
+        AGB_DecryptBoxMon(mon);
+        u16 checksum = AGB_CalcBoxMonChecksum(mon);
+        u16 stored = mon->checksum;
+        if (checksum != stored) {
+            mon->isBadEgg = TRUE;
+            mon->isEgg = TRUE;
+            misc->words[1] |= 1u << 30;
+            AGB_EncryptBoxMon(mon);
+            return;
+        }
+    }
+    switch (field) {
+    case AGB_MON_DATA_NICKNAME:
+        for (i = 0; i < 10; i++) {
+            mon->nickname[i] = in[i];
+        }
+        break;
+    case AGB_MON_DATA_LANGUAGE:
+        mon->language = in[0];
+        break;
+    case AGB_MON_DATA_IS_BAD_EGG:
+        mon->isBadEgg = in[0];
+        break;
+    case AGB_MON_DATA_HAS_SPECIES:
+        mon->hasSpecies = in[0];
+        break;
+    case AGB_MON_DATA_SANITY_IS_EGG:
+        mon->isEgg = in[0];
+        break;
+    case AGB_MON_DATA_OT_NAME:
+        for (i = 0; i < 7; i++) {
+            mon->otName[i] = in[i];
+        }
+        break;
+    case AGB_MON_DATA_SPECIES:
+        growth->growth.species = in[0] + (in[1] << 8);
+        if (growth->growth.species != 0) {
+            mon->hasSpecies = TRUE;
+        } else {
+            mon->hasSpecies = FALSE;
+        }
+        break;
+    }
+    if (field > AGB_MON_DATA_UNKNOWN_10) {
+        mon->checksum = AGB_CalcBoxMonChecksum(mon);
+        AGB_EncryptBoxMon(mon);
+    }
+}
+
+// GBA species index -> national dex number (they differ from Treecko on, index 277)
+int TranslateAgbSpecies(int species) {
+    u32 i;
+    if (species >= 277) {
+        for (i = 0; i < 144; i++) {
+            if (species == gAgbSpeciesMap[i][0]) {
+                return gAgbSpeciesMap[i][1];
+            }
+        }
+    }
+    return species;
+}
+
+u32 AGB_GetBoxMonLevel(AgbBoxMon *mon) {
+    int species = TranslateAgbSpecies(AGB_GetBoxMonData(mon, AGB_MON_DATA_SPECIES, NULL));
+    u32 exp = AGB_GetBoxMonData(mon, AGB_MON_DATA_EXPERIENCE, NULL);
+    return CalcLevelBySpeciesAndExp(species, exp);
+}
+
+// Species that got a second ability in DP keep their first one (gAgbKeepFirstAbilitySpecies); the others keep their ability slot
+static int AGB_GetBoxMonAbility(AgbBoxMon *agbMon, BoxPokemon *boxMon) {
+    u16 species = GetBoxMonData(boxMon, MON_DATA_SPECIES, NULL);
+    u32 abilityNum = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_ABILITY_NUM, NULL);
+    int ability = GetMonBaseStat(species, BASE_ABILITY_2);
+    u32 i;
+
+    if (ability != 0) {
+        for (i = 0; i < 94; i++) {
+            if (gAgbKeepFirstAbilitySpecies[i] == species) {
+                ability = GetMonBaseStat(species, BASE_ABILITY_1);
+                break;
+            }
+        }
+        if (i == 94 && !(abilityNum & 1)) {
+            return GetMonBaseStat(species, BASE_ABILITY_1);
+        }
+    } else {
+        ability = GetMonBaseStat(species, BASE_ABILITY_1);
+    }
+    return ability;
+}
+
+#define COPY_FIELD(agbField, field)                         \
+    do {                                                    \
+        data = AGB_GetBoxMonData(agbMon, (agbField), NULL); \
+        SetBoxMonData(boxMon, (field), &data);              \
+    } while (0)
+
+// Sets one DP ribbon per contest ribbon level the GBA Pokemon has
+#define COPY_CONTEST_RIBBONS(agbField, firstRibbon)              \
+    do {                                                         \
+        j = AGB_GetBoxMonData(agbMon, (agbField), NULL);         \
+        if (j <= 4) {                                            \
+            for (i = 0; i < j; i++) {                            \
+                data = 1;                                        \
+                SetBoxMonData(boxMon, i + (firstRibbon), &data); \
+            }                                                    \
+        }                                                        \
+    } while (0)
+
+// Converts a GBA box Pokemon into a DP one (Pal Park migration)
+void MigrateBoxMon(AgbBoxMon *agbMon, BoxPokemon *boxMon) {
+    u32 lock;
+    u32 data;
+    u32 language;
+    u8 srcString[12];
+    u16 dstString[12];
+    int j;
+    int i;
+
+    ZeroBoxMonData(boxMon);
+    lock = AcquireBoxMonLock(boxMon);
+    COPY_FIELD(AGB_MON_DATA_PERSONALITY, MON_DATA_PERSONALITY);
+    data = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_SPECIES, NULL);
+    data = TranslateAgbSpecies(data);
+    SetBoxMonData(boxMon, MON_DATA_SPECIES, &data);
+    data = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_HELD_ITEM, NULL);
+    if (data != 0) {
+        data = UpConvertItemId_Gen3to4(data);
+    }
+    SetBoxMonData(boxMon, MON_DATA_HELD_ITEM, &data);
+    COPY_FIELD(AGB_MON_DATA_OT_ID, MON_DATA_OT_ID);
+    COPY_FIELD(AGB_MON_DATA_EXPERIENCE, MON_DATA_EXPERIENCE);
+    data = 70;
+    SetBoxMonData(boxMon, MON_DATA_FRIENDSHIP, &data);
+    data = AGB_GetBoxMonAbility(agbMon, boxMon);
+    SetBoxMonData(boxMon, MON_DATA_ABILITY, &data);
+    COPY_FIELD(AGB_MON_DATA_MARKINGS, MON_DATA_MARKINGS);
+    language = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_LANGUAGE, NULL);
+    SetBoxMonData(boxMon, MON_DATA_LANGUAGE, &language);
+    COPY_FIELD(AGB_MON_DATA_HP_EV, MON_DATA_HP_EV);
+    COPY_FIELD(AGB_MON_DATA_ATK_EV, MON_DATA_ATK_EV);
+    COPY_FIELD(AGB_MON_DATA_DEF_EV, MON_DATA_DEF_EV);
+    COPY_FIELD(AGB_MON_DATA_SPEED_EV, MON_DATA_SPEED_EV);
+    COPY_FIELD(AGB_MON_DATA_SPATK_EV, MON_DATA_SPATK_EV);
+    COPY_FIELD(AGB_MON_DATA_SPDEF_EV, MON_DATA_SPDEF_EV);
+    COPY_FIELD(AGB_MON_DATA_COOL, MON_DATA_COOL);
+    COPY_FIELD(AGB_MON_DATA_BEAUTY, MON_DATA_BEAUTY);
+    COPY_FIELD(AGB_MON_DATA_CUTE, MON_DATA_CUTE);
+    COPY_FIELD(AGB_MON_DATA_SMART, MON_DATA_SMART);
+    COPY_FIELD(AGB_MON_DATA_TOUGH, MON_DATA_TOUGH);
+    COPY_FIELD(AGB_MON_DATA_SHEEN, MON_DATA_SHEEN);
+    for (i = 0, j = 0; i < 4; i++, j += 2) {
+        COPY_FIELD(i + AGB_MON_DATA_MOVE1, i + MON_DATA_MOVE1);
+        data = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_PP_UPS, NULL);
+        data = (data & (3 << j)) >> j;
+        SetBoxMonData(boxMon, i + MON_DATA_MOVE1_PP_UPS, &data);
+        data = GetBoxMonData(boxMon, i + MON_DATA_MOVE1_MAX_PP, NULL);
+        SetBoxMonData(boxMon, i + MON_DATA_MOVE1_PP, &data);
+    }
+    COPY_FIELD(AGB_MON_DATA_HP_IV, MON_DATA_HP_IV);
+    COPY_FIELD(AGB_MON_DATA_ATK_IV, MON_DATA_ATK_IV);
+    COPY_FIELD(AGB_MON_DATA_DEF_IV, MON_DATA_DEF_IV);
+    COPY_FIELD(AGB_MON_DATA_SPEED_IV, MON_DATA_SPEED_IV);
+    COPY_FIELD(AGB_MON_DATA_SPATK_IV, MON_DATA_SPATK_IV);
+    COPY_FIELD(AGB_MON_DATA_SPDEF_IV, MON_DATA_SPDEF_IV);
+    COPY_FIELD(AGB_MON_DATA_IS_EGG, MON_DATA_IS_EGG);
+    COPY_CONTEST_RIBBONS(AGB_MON_DATA_COOL_RIBBONS, MON_DATA_COOL_RIBBON);
+    COPY_CONTEST_RIBBONS(AGB_MON_DATA_BEAUTY_RIBBONS, MON_DATA_BEAUTY_RIBBON);
+    COPY_CONTEST_RIBBONS(AGB_MON_DATA_CUTE_RIBBONS, MON_DATA_CUTE_RIBBON);
+    COPY_CONTEST_RIBBONS(AGB_MON_DATA_SMART_RIBBONS, MON_DATA_SMART_RIBBON);
+    COPY_CONTEST_RIBBONS(AGB_MON_DATA_TOUGH_RIBBONS, MON_DATA_TOUGH_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON, MON_DATA_CHAMPION_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 1, MON_DATA_WINNING_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 2, MON_DATA_VICTORY_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 3, MON_DATA_ARTIST_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 4, MON_DATA_EFFORT_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 5, MON_DATA_MARINE_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 6, MON_DATA_LAND_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 7, MON_DATA_SKY_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 8, MON_DATA_COUNTRY_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 9, MON_DATA_NATIONAL_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_CHAMPION_RIBBON + 10, MON_DATA_EARTH_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_WORLD_RIBBON, MON_DATA_WORLD_RIBBON);
+    COPY_FIELD(AGB_MON_DATA_FATEFUL_ENCOUNTER, MON_DATA_FATEFUL_ENCOUNTER);
+    data = GetBoxMonGender(boxMon);
+    SetBoxMonData(boxMon, MON_DATA_GENDER, &data);
+    if (GetBoxMonData(boxMon, MON_DATA_SPECIES, NULL) == SPECIES_UNOWN) {
+        // the Unown letter comes from the personality
+        u32 personality = AGB_GetBoxMonData(agbMon, AGB_MON_DATA_PERSONALITY, NULL);
+        data = personality;
+        u32 mask = 3;
+        u32 byte1Bits = ((mask << 8) & personality) >> 6;
+        u32 byte3Bits = ((mask << 24) & personality) >> 18;
+        u32 byte2Bits = ((mask << 16) & personality) >> 12;
+        u32 byte0Bits = personality & mask;
+        data = (byte3Bits | byte2Bits | byte1Bits | byte0Bits) % 28;
+        SetBoxMonData(boxMon, MON_DATA_FORM, &data);
+    }
+    if (GetBoxMonData(boxMon, MON_DATA_SPECIES, NULL) == SPECIES_DEOXYS) {
+        // the Deoxys form depends on the GBA game it comes from
+        switch (gSystem.agbCartridgeVersion) {
+        case 0:
+        case 1:
+        case 2:
+        default:
+            data = 0;
+            break;
+        case 4:
+            data = 1;
+            break;
+        case 5:
+            data = 2;
+            break;
+        case 3:
+            data = 3;
+            break;
+        }
+        SetBoxMonData(boxMon, MON_DATA_FORM, &data);
+    }
+    AGB_GetBoxMonData(agbMon, AGB_MON_DATA_NICKNAME, srcString);
+    ConvertRSStringToDPStringInternational(srcString, dstString, 12, language);
+    SetBoxMonData(boxMon, MON_DATA_NICKNAME_FLAT_COMPARE, dstString);
+    if (AGB_GetBoxMonData(agbMon, AGB_MON_DATA_LANGUAGE, NULL) != gGameLanguage) {
+        data = 1;
+        SetBoxMonData(boxMon, MON_DATA_HAS_NICKNAME, &data);
+    }
+    COPY_FIELD(AGB_MON_DATA_MET_GAME, MON_DATA_MET_GAME);
+    AGB_GetBoxMonData(agbMon, AGB_MON_DATA_OT_NAME, srcString);
+    ConvertRSStringToDPStringInternational(srcString, dstString, 8, language);
+    SetBoxMonData(boxMon, MON_DATA_OT_NAME, dstString);
+    COPY_FIELD(AGB_MON_DATA_MET_LOCATION, MON_DATA_MET_LOCATION);
+    COPY_FIELD(AGB_MON_DATA_POKERUS, MON_DATA_POKERUS);
+    COPY_FIELD(AGB_MON_DATA_POKEBALL, MON_DATA_POKEBALL);
+    COPY_FIELD(AGB_MON_DATA_MET_LEVEL, MON_DATA_MET_LEVEL);
+    COPY_FIELD(AGB_MON_DATA_OT_GENDER, MON_DATA_OT_GENDER);
+    ReleaseBoxMonLock(boxMon, lock);
+}

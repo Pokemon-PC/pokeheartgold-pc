@@ -1,0 +1,179 @@
+#ifndef POKEHEARTGOLD_LOBBY_CHAT_INTERNAL_H
+#define POKEHEARTGOLD_LOBBY_CHAT_INTERNAL_H
+
+// Lobby chat: the chat manager, its string, map and request types, and the functions shared
+// between the chat source files.
+
+#include "dwc/net_common_internal.h"
+
+#include "lobby_chat_manager.h"
+#include "lobby_vector.h"
+
+
+static inline void StrInit(Str *s) {
+    u32 i;
+    u32 *p;
+    for (i = 0, p = (u32 *)s; i < 3; i++) {
+        p[i] = 0;
+    }
+}
+
+static inline void PairInit(LobbyUserMapEntry *p, int *k, Str *v) {
+    p->userId = *k;
+    LobbyString_InitCopy(&p->nick, v);
+}
+
+void LobbyRequestMap_DeleteAll(LobbyRequestMap *map);
+
+typedef Iterator Iter;
+
+static inline BOOL StrLess(Str *a, Str *b) {
+    return LobbyString_Compare(a, b) < 0;
+}
+
+u32 current_time(void);
+extern char gLobbyFmt_N_UnderscoreIntUnderscoreUint[];
+extern char gLobbyStr___2[];
+void LobbyChat_SplitString(LobbyStringVector *out, const Str *s, Str *sep, int n);
+long atol(const char *s);
+int LobbyChat_GetUserIdFromNick(const Str *s);
+
+LobbyUserMapEntry *LobbyUserMap_GetOrInsert(LobbyUserMap *map, int *key);
+
+
+void *LobbyChatManager_Destroy(LobbyChatManager *manager);
+
+// Commands need a session that is logged in and has not failed (the commands return PPWLobbyResult codes).
+#define CTX_CHECK(c)                                           \
+    if ((c) == NULL) {                                         \
+        return PPW_LOBBY_RESULT_ERROR_STATE;                   \
+    }                                                          \
+    if ((c) != NULL && (c)->state == LOBBY_CHAT_STATE_ERROR) { \
+        return PPW_LOBBY_RESULT_ERROR_CONDITION;               \
+    }                                                          \
+    if ((c) != NULL && CtxState() != LOBBY_CHAT_STATE_READY) { \
+        return PPW_LOBBY_RESULT_ERROR_STATE;                   \
+    }
+
+static inline void OpDelete(void *p) {
+    if (p != NULL) {
+        DWC_Free(0, p, 0);
+    }
+}
+
+static inline void TagTemp(void) {
+    LobbyTag t;
+    t = (LobbyTag) { 0 };
+}
+
+void *LobbyU32Vector_Data(LobbyU32Vector *vector);
+
+static inline BOOL StrEqC(Str *a, const char *b) {
+    return LobbyString_CompareCStr(a, b) == 0;
+}
+
+// The session pointer, read from memory again at every call.
+static inline LobbyChatManager *CurrentManager(void) {
+    return *(LobbyChatManager *volatile *)&gLobbyChatManager;
+}
+
+static inline enum LobbyChatState CtxState(void) {
+    return CurrentManager()->state;
+}
+
+typedef void (*VoidFunc)(void);
+
+extern struct {
+    LobbyChatManager *manager;
+    void *buf;
+} gLobbyMemReserve;
+
+void LobbyChat_StripChannelPrefixes(LobbyU32Vector *out, LobbyChatManager *manager, int n, u32 *arr);
+void LobbyChat_FormatNick(Str *out, int userId);
+
+extern VoidFunc gLobbyMemOutOfMemoryHandler;
+extern u8 gLobbyRequestMapInsertFlags[];
+extern char gLobbyStr_Empty_17[];
+extern char gLobbyStr_normal[];
+extern char gLobbyStr_voice[];
+extern char gLobbyStr_ops[];
+extern char gLobbyStr_VoiceOps[];
+extern char gLobbyStr_invalid[];
+extern char gLobbyStr_Empty_18[];
+extern char gLobbyStr_SERVER[];
+extern char gLobbyStr_ExcessFlood[];
+extern char gLobbyStr_SpaceColon[];
+
+LobbyChannelMapNode *LobbyChannelMap_LowerBound(LobbyChannelMap *map, Str *key, LobbyChannelMapNode *n, LobbyChannelMapNode *res);
+void LobbyChannelMap_MakeEntry(LobbyChannelMapEntry *dst, Str *name, LobbyChannel *src);
+void LobbyChatManager_GetGameKey(Str *out, LobbyChatManager *manager);
+BOOL LobbyChat_AreChannelUsersEnumerated(LobbyChatManager *manager, Str *channel);
+BOOL LobbyChat_RemoveChannel(LobbyChatManager *manager, Str *channel);
+BOOL LobbyChat_RemoveChannelUser(LobbyChatManager *manager, Str *nick, Str *channel);
+LobbyRequest *LobbyEnterChannelRequest_Delete(LobbyRequest *request);
+void LobbyEnterChannelRequest_Destroy(void);
+LobbyRequest *LobbyEnumChannelsRequest_Delete(LobbyRequest *request);
+void LobbyEnumChannelsRequest_Destroy(void);
+LobbyRequest *LobbyEnumUsersRequest_Delete(LobbyRequest *request);
+void LobbyEnumUsersRequest_Destroy(void);
+LobbyRequest *LobbyGetChannelKeysRequest_Delete(LobbyRequest *request);
+void LobbyGetChannelKeysRequest_Destroy(void);
+LobbyRequest *LobbyGetChannelModeRequest_Delete(LobbyRequest *request);
+void LobbyGetChannelModeRequest_Destroy(void);
+BOOL LobbyMem_InstallOutOfMemoryHandler(LobbyChatManager *manager);
+void LobbyMem_OnOutOfMemory(void);
+void LobbyMem_OnOutOfMemoryDisconnect(void);
+BOOL LobbyRequestMap_DeleteKey(LobbyRequestMap *map, u32 id);
+void LobbyRequestMap_Erase(Iter *out, LobbyRequestMap *map, Iter pos);
+void LobbyRequestMap_Find(Iter *out, LobbyRequestMap *map, LobbyRequest **key);
+LobbyRequestMapNode *LobbyRequestMap_FindInsertPos(LobbyRequestMap *map, LobbyRequest **key, LobbyRequestMapNode **pos, u8 *insertLeft, u8 *isLeftmost);
+void LobbyRequestMap_Insert(LobbyRequestMapInsertResult *out, LobbyRequestMap *map, LobbyRequest **val);
+LobbyRequest *LobbyRequest_Delete(LobbyRequest *request);
+void LobbyRequest_Destroy(void);
+u32 LobbyRequest_GetParam(LobbyRequest *request);
+u32 LobbyRequest_GetId(LobbyRequest *request);
+void *LobbyTree_EraseRebalance(void *node, void *root);
+LobbyUserIdSetNode *LobbyUserIdSet_LowerBound(LobbyUserIdSet *set, const int *key, LobbyUserIdSetNode *node, LobbyUserIdSetNode *res);
+void LobbyUserMap_Find(Iter *out, LobbyUserMap *map, int *key);
+LobbyUserMapNode *LobbyUserMap_FindInsertPos2(LobbyUserMap *map, int *key, LobbyUserMapNode **pos, u8 *insertLeft, u8 *isLeftmost);
+LobbyUserMapNode *LobbyUserMap_LowerBound(LobbyUserMap *map, int *key, LobbyUserMapNode *node, LobbyUserMapNode *res);
+void LobbyUserMap_MakeEntry(LobbyUserMapEntry *out, int id, const Str *nick);
+
+// The chat client functions of dwc/chat_connection.h (that header comes with dwc/chat_internal.h, whose allocator
+// declarations differ from dwc/net_common_internal.h's).
+void chatDisconnect(struct ChatConnection *chat);
+int chatGetChannelNumUsersA(struct ChatConnection *chat, const char *channel);
+void chatRegisterUniqueNickA(struct ChatConnection *chat, int accountSpace, const char *nick, const char *cdKey);
+void chatRetryWithNickA(struct ChatConnection *chat, const char *nick);
+void chatLeaveChannelA(struct ChatConnection *chat, const char *channel, const char *reason);
+void chatSendChannelMessageA(struct ChatConnection *chat, const char *channel, const char *message, u32 type);
+void chatSendUserMessageA(struct ChatConnection *chat, const char *nick, const char *message, u32 type);
+void chatSetChannelKeysA(struct ChatConnection *chat, const char *channel, const char *nick, int count, const char **keys, const char **values);
+void chatSetChannelModeA(struct ChatConnection *chat, const char *channel, const struct ChatChannelMode *mode);
+BOOL chatInChannelA(struct ChatConnection *chat, const char *channel);
+
+void LobbyChatManager_GetGameName(Str *out, LobbyChatManager *manager);
+void LobbyChatManager_GetRealName(Str *out, LobbyChatManager *manager);
+void LobbyChatManager_GetUser(Str *out, LobbyChatManager *manager);
+void LobbyChat_OnEnumChannelsEach(struct ChatConnection *chat, int success);
+void LobbyChat_OnBroadcastKeyChanged(struct ChatConnection *chat, char *channel, char *nick, void *key, void *value);
+void LobbyChat_OnChannelMessage(struct ChatConnection *chat, char *channel, char *nick, void *message, int type);
+void LobbyChat_OnChannelModeChanged(struct ChatConnection *chat, const char *channel, u32 mode, u32 id);
+void LobbyChat_OnConnected(struct ChatConnection *chat, int success);
+void LobbyChat_OnDisconnected(void);
+void LobbyChat_OnFillInUser(struct ChatConnection *chat, void *param, char *user);
+void LobbyChat_OnInvited(void);
+void LobbyChat_OnNickError(struct ChatConnection *chat, int type);
+void LobbyChat_OnPrivateMessage(struct ChatConnection *chat, char *nick, char *message, int type, void *param);
+void LobbyChat_OnKicked(struct ChatConnection *chat, char *channel);
+void LobbyChat_OnRaw(void);
+void LobbyChat_OnTopicChanged(struct ChatConnection *chat, char *channel, void *topic);
+void LobbyChat_OnUserChangedNick(struct ChatConnection *chat, const char *channel, char *oldNick, char *newNick);
+void LobbyChat_OnUserListUpdated(void);
+void LobbyChat_OnUserJoined(struct ChatConnection *chat, const char *channel, const char *nick);
+void LobbyChat_OnUserModeChanged(struct ChatConnection *chat, const char *channel, const char *nick, int mode);
+void LobbyChat_OnUserParted(struct ChatConnection *chat, char *channel, char *nick);
+int LobbyChat_RenameUser(LobbyChatManager *manager, const Str *oldNick, const Str *newNick);
+BOOL LobbyChat_TimerConnectTimeout(void);
+
+#endif // POKEHEARTGOLD_LOBBY_CHAT_INTERNAL_H

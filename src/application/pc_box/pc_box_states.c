@@ -1,0 +1,4670 @@
+#include "global.h"
+
+#include "constants/items.h"
+#include "constants/pokemon.h"
+#include "constants/sndseq.h"
+#include "constants/species.h"
+
+#include "application/pc_box/pc_box_internal.h"
+
+#include "bag.h"
+#include "bg_cell_manager.h"
+#include "bg_window.h"
+#include "dpad_menu_box.h"
+#include "filesystem.h"
+#include "gf_gfx_planes.h"
+#include "grid_input_handler.h"
+#include "heap.h"
+#include "item.h"
+#include "msgdata.h"
+#include "overlay_manager.h"
+#include "palette.h"
+#include "party.h"
+#include "pokemon.h"
+#include "pokemon_storage_system.h"
+#include "render_window.h"
+#include "screen_fade.h"
+#include "sound_playback.h"
+#include "sprite_system.h"
+#include "sys_task_api.h"
+#include "system.h"
+#include "touchpad.h"
+#include "touchscreen.h"
+#include "yes_no_prompt.h"
+
+static enum PCBoxState PCBox_StartFadeIn(PCBoxWork *work, enum PCBoxState nextState);
+static enum PCBoxState PCBox_StartFadeOut(PCBoxWork *work, enum PCBoxState nextState);
+static enum PCBoxState PCBox_WaitForUpdateFunc(PCBoxWork *work, PCBoxUpdateFunc cb, enum PCBoxState next);
+static enum PCBoxState PCBox_WaitForPendingUpdateFunc(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_ShowYesNo(PCBoxWork *work, int state);
+static enum PCBoxState PCBox_StartSubApp(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_ScrollToPrevBox(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_ScrollToNextBox(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_StartMoveModeBoxDrag(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_StartWithdrawDrag(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_SelectWithdrawMon(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_SelectMoveModeBoxMon(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_StartMoveModePartyDrag(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_StartDepositDrag(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_SelectDepositMon(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_SelectMoveModePartyMon(PCBoxWork *work, u32 idx);
+static enum PCBoxState PCBox_StartBoxTrayDrag(PCBoxWork *work, u32 idx);
+static void PCBox_AllocMoveWork(PCBoxWork *work);
+static void PCBox_FreeMoveWork(PCBoxWork *work);
+static enum PCBoxState PCBox_HandleItemCommand(PCBoxWork *work);
+static enum PCBoxState PCBox_CloseMarkingMenu(PCBoxWork *work);
+static enum PCBoxState PCBox_StartMarking(PCBoxWork *work);
+static enum PCBoxState PCBox_StartRelease(PCBoxWork *work);
+static enum PCBoxState PCBox_OpenPartyPanel(PCBoxWork *work);
+static enum PCBoxState PCBox_ClosePartyPanel(PCBoxWork *work);
+static void PCBox_ShowPartyPanelLeft(PCBoxWork *work);
+static void PCBox_ShowPartyPanelRight(PCBoxWork *work);
+static void PCBox_ShowDepositPartyPanel(PCBoxWork *work);
+static enum PCBoxState PCBox_OpenTrayFromPartyPanel(PCBoxWork *work);
+static enum PCBoxState PCBox_CloseTrayToPartyPanel(PCBoxWork *work);
+static enum PCBoxState PCBox_OpenTrayFromBox(PCBoxWork *work);
+static enum PCBoxState PCBox_CloseTray(PCBoxWork *work);
+static enum PCBoxState PCBox_HideInfoPanelAndWait(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_SelectTrayBox(PCBoxWork *work, s32 delta);
+static enum PCBoxState PCBox_HideChangeBoxButtonAndWait(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_JumpToTrayBox(PCBoxWork *work, u32 which);
+static void PCBox_ChangeTrayPage(PCBoxWork *work, s32 delta);
+static enum PCBoxState PCBox_OpenBoxTray(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_CloseBoxTray(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_ShowExitButtonAndWait(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_SlideOutReturnButtonAndWait(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_CloseActionMenuAndWait(PCBoxWork *work, enum PCBoxState next);
+static enum PCBoxState PCBox_StartBoxMenu(PCBoxWork *work);
+static enum PCBoxState PCBox_SelectBoxMenuBox(PCBoxWork *work, s32 delta);
+static enum PCBoxState PCBox_ChangeBoxMenuPage(PCBoxWork *work, s32 delta);
+static void PCBox_ChangeWallpaperPage(PCBoxWork *work, s32 delta);
+static void PCBox_SelectWallpaperInPage(PCBoxWork *work, u32 delta);
+static enum PCBoxState PCBox_ConfirmWallpaperChoice(PCBoxWork *work);
+static enum PCBoxState PCBox_TryWithdraw(PCBoxWork *work);
+static enum PCBoxState PCBox_StartDeposit(PCBoxWork *work);
+static enum PCBoxState PCBox_SelectDepositBox(PCBoxWork *work, s32 delta);
+static enum PCBoxState PCBox_ChangeDepositBoxPage(PCBoxWork *work, s32 delta);
+static enum PCBoxState PCBox_CancelDepositBoxSelect(PCBoxWork *work, u32 unused);
+static enum PCBoxState PCBox_ConfirmDepositBox(PCBoxWork *work);
+static enum PCBoxState PCBox_PickUpTrayMon(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_DropTrayMon(PCBoxWork *work, u32 index);
+static enum PCBoxState PCBox_SelectItemModeBoxMon(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_StartItemModeBoxDrag(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_StartItemTrayDrag(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_PickUpTrayItem(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_ReturnTrayItem(PCBoxWork *work);
+static enum PCBoxState PCBox_DropTrayItem(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_SelectItemModePartyMon(PCBoxWork *work, u32 value);
+static enum PCBoxState PCBox_StartItemModePartyDrag(PCBoxWork *work, u32 value);
+static PCBOX_TAIL_STATE PCBox_HandleBagGiveCommand(PCBoxWork *work);
+static void PCBox_AllocHeldItemMove(PCBoxWork *work);
+static void PCBox_FreeHeldItemMove(PCBoxWork *work);
+static enum PCBoxState PCBox_StartCellPaletteFlash(PCBoxWork *work, u32 panelIndex, enum PCBoxState nextState);
+static enum PCBoxState PCBox_FlashMarkingMenuButton(PCBoxWork *work, u32 button, enum PCBoxState nextState);
+static enum PCBoxState PCBox_FlashPartyPanelButton(PCBoxWork *work, u32 button, enum PCBoxState nextState);
+static void PCBox_DimForExitPrompt(PCBoxWork *work);
+static void PCBox_InitSprites(PCBoxWork *work);
+static enum PCBoxState PCBox_FlashPanel(PCBoxWork *work, u32 panelIndex, enum PCBoxState nextState);
+
+enum PCBoxState PCBox_State_Init(PCBoxWork *work) {
+    Main_SetVBlankIntrCB(NULL, NULL);
+    HBlankInterruptDisable();
+    GfGfx_EngineASetPlanes(GX_PLANEMASK_NONE);
+    GfGfx_EngineBSetPlanes(GX_PLANEMASK_NONE);
+    G2_BlendNone();
+    G2S_BlendNone();
+    GF_TouchpadResetSampling();
+    GF_TouchpadStartSampling(4);
+    GX_SetDispSelect(GX_DISP_SELECT_SUB_MAIN);
+    Heap_Create(HEAP_ID_3, HEAP_ID_10, 0x80000);
+    work->view = Heap_Alloc(HEAP_ID_10, sizeof(PCBoxView));
+    MI_CpuFill8(work->view, 0, sizeof(PCBoxView));
+    work->view->personalNarc = NARC_New(NARC_poketool_personal_personal, HEAP_ID_10);
+    work->view->iconNarc = NARC_New(NARC_poketool_icongra_poke_icon, HEAP_ID_10);
+    PCBox_SetGfxBanks();
+    PCBox_InitBgLayers(work);
+    PCBox_CreatePaletteData(work);
+    PCBox_LoadBgGraphics(work);
+    PCBox_CreateMsgResources(work);
+    PCBox_LoadWindowGraphics(work);
+    PCBox_AddWindows(work);
+    PCBox_InitSprites(work);
+    PCBox_LoadBoxIcons(work);
+    PCBox_LoadPartyIcons(work);
+    PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 2);
+    PCBox_InitPanels(work);
+    if (work->args->mode != PC_BOX_MODE_WITHDRAW && work->args->mode != PC_BOX_MODE_DEPOSIT) {
+        PCBox_ShowPartyButton(work);
+        PCBox_ShowTrayTab(work);
+    }
+    PCBox_ShowReturnButton(work);
+    PCBox_CreateYesNoPrompt(work);
+    PCBox_PrintModeTitle(work);
+    PCBox_PrintInfoLabels(work);
+    PCBox_DrawAllBoxThumbnails(work);
+    PCBox_CreateModeGridInput(work);
+    work->view->vblankTask = SysTask_CreateOnVBlankQueue(PCBox_VBlankCallback, work, 0);
+    PCBox_SetBlendEnabled(1);
+    return work->nextState;
+}
+
+enum PCBoxState PCBox_State_Exit(PCBoxWork *work) {
+    PCBox_SaveMenuInputState(work);
+    SysTask_Destroy(work->view->vblankTask);
+    PCBox_FreeGridInput(work);
+    PCBox_DestroyYesNoPrompt(work);
+    PCBox_FreePanels(work->view);
+    PCBox_FreeSprites(work->view);
+    PCBox_RemoveWindows(work);
+    PCBox_DestroyMsgResources(work);
+    PCBox_FreePaletteData(work);
+    PCBox_FreeBgLayers(work);
+    NARC_Delete(work->view->iconNarc);
+    NARC_Delete(work->view->personalNarc);
+    GF_TouchpadStopSampling();
+    reg_G2_BLDCNT = 0;
+    reg_G2S_DB_BLDCNT = 0;
+    GfGfx_EngineASetPlanes(GX_PLANEMASK_NONE);
+    GfGfx_EngineBSetPlanes(GX_PLANEMASK_NONE);
+    Heap_Free(work->view);
+    Heap_Destroy(HEAP_ID_10);
+    return work->nextState;
+}
+
+enum PCBoxState PCBox_State_WaitFade(PCBoxWork *work) {
+    if (IsPaletteFadeFinished() == TRUE) {
+        return work->view->fadeNextState;
+    }
+    return PC_BOX_STATE_WAIT_FADE;
+}
+
+enum PCBoxState PCBox_State_WaitPaletteBuffers(PCBoxWork *work) {
+    if (PaletteData_GetSelectedBuffersBitmask(work->view->paletteData) == 0) {
+        return work->nextState;
+    }
+    return PC_BOX_STATE_WAIT_PALETTE_BUFFERS;
+}
+
+enum PCBoxState PCBox_State_Delay(PCBoxWork *work) {
+    u32 delay = work->view->delay;
+
+    if (delay == 0) {
+        return work->nextState;
+    }
+    work->view->delay = delay - 1;
+    return PC_BOX_STATE_DELAY;
+}
+
+enum PCBoxState PCBox_State_WaitUpdateFunc(PCBoxWork *work) {
+    if (work->view->updateFunc == NULL) {
+        return gPCBoxStateTable[work->nextState](work);
+    }
+    return PC_BOX_STATE_WAIT_UPDATE_FUNC;
+}
+
+enum PCBoxState PCBox_State_WaitButton(PCBoxWork *work) {
+    if (System_GetTouchNew() == TRUE) {
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return work->nextState;
+    }
+    if ((gSystem.newKeys & (PAD_BUTTON_A | PAD_BUTTON_B)) != 0) {
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return work->nextState;
+    }
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_HandleYesNo(PCBoxWork *work) {
+    int input = YesNoPrompt_HandleInput(work->view->yesNoPrompt);
+
+    switch (input) {
+    case YESNORESPONSE_YES:
+        YesNoPrompt_Reset(work->view->yesNoPrompt);
+        return gPCBoxYesNoHandlers[work->view->yesNoHandler][0](work);
+    case YESNORESPONSE_NO:
+        YesNoPrompt_Reset(work->view->yesNoPrompt);
+        return gPCBoxYesNoHandlers[work->view->yesNoHandler][1](work);
+    default:
+        return PC_BOX_STATE_HANDLE_YES_NO;
+    }
+}
+
+enum PCBoxState PCBox_State_WaitPaletteFlash(PCBoxWork *work) {
+    if (PCBox_AnimatePaletteFlash(work) == FALSE) {
+        return work->nextState;
+    }
+    return PC_BOX_STATE_WAIT_PALETTE_FLASH;
+}
+
+enum PCBoxState PCBox_State_StartSubApp(PCBoxWork *work) {
+    gPCBoxSubApps[work->subAppIndex].start(work);
+    return PC_BOX_STATE_RUN_SUB_APP;
+}
+
+enum PCBoxState PCBox_State_RunSubApp(PCBoxWork *work) {
+    if (!OverlayManager_Run(work->subApp)) {
+        return PC_BOX_STATE_RUN_SUB_APP;
+    }
+    OverlayManager_Delete(work->subApp);
+    gPCBoxSubApps[work->subAppIndex].end(work);
+    work->nextState = gPCBoxSubApps[work->subAppIndex].nextState;
+    return PC_BOX_STATE_INIT;
+}
+
+PCBOX_TAIL_STATE PCBox_State_Start(PCBoxWork *work) {
+    enum PCBoxState nextState;
+
+    PlaySE(SEQ_SE_DP_PC_LOGIN);
+    switch (work->args->mode) {
+    case PC_BOX_MODE_DEPOSIT:
+        PCBox_ShowDepositPartyPanel(work);
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        PCBox_SetBoxArrowsVisible(work->view, 0);
+        PCBox_SetIconsTranslucent(work, 1, 1);
+        PCBox_ShowSlotMonInfo(work, PC_BOX_SLOT_PARTY_START);
+        nextState = PC_BOX_STATE_DEPOSIT_INPUT;
+        break;
+    case PC_BOX_MODE_WITHDRAW:
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        PCBox_ShowSlotMonInfo(work, 0);
+        nextState = PC_BOX_STATE_WITHDRAW_INPUT;
+        break;
+    case PC_BOX_MODE_MOVE_POKEMON:
+        PCBox_ShowSlotMonInfo(work, 0);
+        nextState = PC_BOX_STATE_MOVE_MODE_INPUT;
+        break;
+    case PC_BOX_MODE_MOVE_ITEMS:
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+        PCBox_ShowSlotMonInfo(work, 0);
+        nextState = PC_BOX_STATE_ITEM_MODE_INPUT;
+        break;
+    }
+    PCBOX_TAIL_RETURN PCBox_StartFadeIn(work, nextState);
+}
+
+enum PCBoxState PCBox_State_MoveModeInput(PCBoxWork *work) {
+    u32 input = PCBox_FindTouchedBoxSlot();
+
+    if (input != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, input, MON_DATA_SPECIES_EXISTS, NULL) != 0) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX,
+                &work->view->touchY);
+            if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+                PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+            }
+            PCBox_ShowSlotMonInfo(work, input);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartMoveModeBoxDrag(work, input);
+        }
+        if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            u32 old = work->selectedSlot;
+            u32 next = GridInputHandler_GetNextInput(work->view->gridInput);
+            PCBox_StartCursorSlide(work->view, old, next);
+            GridInputHandler_SetNextInput(work->view->gridInput, old);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInPartyButton(work->view->panels);
+            PCBox_SlideInTrayTab(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_SlideOutMovesPanel(work->view);
+            PCBox_SetSelectedIconOutlineVisible(work, 0);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)input);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ClearMonInfo(work);
+        return PC_BOX_STATE_MOVE_MODE_INPUT;
+    }
+
+    input = PCBox_GetMoveModeMenuInput(work);
+    switch (input) {
+    case 30:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_StartBoxMenu(work);
+    case 31:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 0x1e);
+        return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_MOVE_MODE_INPUT);
+    case 32:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 0x1e);
+        return PCBox_ScrollToNextBox(work, PC_BOX_STATE_MOVE_MODE_INPUT);
+    case 33:
+        PlaySE(SEQ_SE_DP_OPEN7);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_PARTY_BUTTON, PC_BOX_STATE_CHOOSE_PARTY);
+    case 34:
+        PlaySE(SEQ_SE_DP_OPEN7);
+        work->moveWithButtons = 0;
+        work->moveFromSlot = 0;
+        return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_TRAY_TAB, PC_BOX_STATE_CHOOSE_TRAY_TAB);
+    case 36:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        if (!System_GetTouchNew()) {
+            work->moveWithButtons = 1;
+        }
+        work->moveFromSlot = work->selectedSlot;
+        return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_MENU_ROW_0, PC_BOX_STATE_CHOOSE_MOVE_FROM_BOX);
+    case 37:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        work->returnCursorPos = 0x25;
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_1, PC_BOX_STATE_CHOOSE_SUMMARY);
+    case 38:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_2, PC_BOX_STATE_CHOOSE_ITEM);
+    case 39:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_3, PC_BOX_STATE_CHOOSE_MARKING);
+    case 40:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_RELEASE);
+    case 41: {
+        u32 old;
+        PlaySE(SEQ_SE_DP_SELECT);
+        old = work->selectedSlot;
+        PCBox_StartCursorSlide(work->view, old, GridInputHandler_GetNextInput(work->view->gridInput));
+        GridInputHandler_SetNextInput(work->view->gridInput, old);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_MOVE_MODE_ACTION_MENU);
+    }
+    case GRID_MENU_NOTHING_CHOSEN: {
+        u32 next = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (next == 0x1e) {
+            if (gSystem.newKeys & PAD_KEY_LEFT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_MOVE_MODE_INPUT);
+            }
+            if (gSystem.newKeys & PAD_KEY_RIGHT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToNextBox(work, PC_BOX_STATE_MOVE_MODE_INPUT);
+            }
+        }
+        break;
+    }
+    case GRID_MENU_CURSOR_MOVE: {
+        u32 next = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (next < 0x1e) {
+            PCBox_ShowSlotMonInfo(work, next);
+        } else if (next != 0x24 && next != 0x25 && next != 0x26 && next != 0x27 && next != 0x28 && next != 0x29) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE);
+    }
+    case 35:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfo(work);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_EXIT);
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_CONTINUE);
+    case GRID_MENU_BUTTON_MODE: {
+        u32 next = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (next < 0x1e) {
+            PCBox_ShowSlotMonInfo(work, next);
+        } else if (next != 0x24 && next != 0x25 && next != 0x26 && next != 0x27 && next != 0x28 && next != 0x29) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    }
+    default:
+        if (PCBox_GetSlotMonData(work, input, MON_DATA_SPECIES_EXISTS, NULL) != 0) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+            PCBox_ShowSlotMonInfo(work, input);
+            PCBox_StartCursorSlide(work->view, 0x24, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, 0x24);
+            return PCBox_SelectMoveModeBoxMon(work, input);
+        }
+        break;
+    }
+    return PC_BOX_STATE_MOVE_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_ApplyMonMove(PCBoxWork *work) {
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    PCBox_FreeMoveWork(work);
+    GridInputHandler_SetNextInput(work->view->gridInput, 0x24);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_MOVE_MODE_INPUT;
+}
+
+PCBOX_TAIL_STATE PCBox_State_ReturnToActionMenu(PCBoxWork *work) {
+    enum PCBoxState nextState;
+
+    PCBox_ClearWindowFrame(work->view, 0x25);
+    switch (work->args->mode) {
+    case PC_BOX_MODE_WITHDRAW:
+        PCBox_DrawActionMenu(work, gPCBoxWithdrawMenu, 4);
+        PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+        nextState = PC_BOX_STATE_RESUME_WITHDRAW_INPUT;
+        break;
+    case PC_BOX_MODE_DEPOSIT:
+        PCBox_DrawActionMenu(work, gPCBoxDepositMenu, 4);
+        PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+        nextState = PC_BOX_STATE_RESUME_DEPOSIT_INPUT;
+        break;
+    case PC_BOX_MODE_MOVE_POKEMON:
+    default:
+        PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+        nextState = work->selectedSlot < PC_BOX_SLOT_PARTY_START ? PC_BOX_STATE_RESUME_BOX_INPUT : PC_BOX_STATE_RESUME_MOVE_MODE_PARTY_INPUT;
+        break;
+    }
+    if (work->view->restoreIconsOnMenu == 1) {
+        work->view->restoreIconsOnMenu = 0;
+        if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+            PCBox_SetIconsTranslucent(work, 2, 0);
+        } else {
+            PCBox_SetBoxArrowsVisible(work->view, 1);
+            PCBox_SetIconsTranslucent(work, 1, 0);
+        }
+    }
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuSlide, nextState);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ReturnFromSummary(PCBoxWork *work) {
+    enum PCBoxState nextState;
+
+    PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+    if (work->summaryFromTray == 0) {
+        if (work->args->mode == PC_BOX_MODE_WITHDRAW) {
+            PCBox_DrawActionMenu(work, gPCBoxWithdrawMenu, 4);
+        } else if (work->args->mode == PC_BOX_MODE_DEPOSIT) {
+            PCBox_SetBoxArrowsVisible(work->view, 0);
+            PCBox_SetIconsTranslucent(work, 1, 1);
+            PCBox_DrawActionMenu(work, gPCBoxDepositMenu, 4);
+        } else {
+            if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+                PCBox_SetIconsTranslucent(work, 1, 1);
+                if (work->trayOpen != 0) {
+                    PCBox_ShowBoxTray(work);
+                }
+            } else if (work->trayOpen != 0) {
+                PCBox_ShowBoxTray(work);
+            }
+            PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+            PCBox_HideBottomButtons(work);
+        }
+        PCBox_ShowActionMenu(work->view->panels);
+        if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+            if (work->args->mode == PC_BOX_MODE_WITHDRAW) {
+                PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+                nextState = PC_BOX_STATE_WITHDRAW_INPUT;
+            } else {
+                nextState = PC_BOX_STATE_MOVE_MODE_INPUT;
+            }
+        } else if (work->args->mode == PC_BOX_MODE_DEPOSIT) {
+            PCBox_ShowDepositPartyPanel(work);
+            PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+            nextState = PC_BOX_STATE_DEPOSIT_INPUT;
+        } else {
+            PCBox_ShowPartyPanelLeft(work);
+            PCBox_SetBoxArrowsVisible(work->view, 0);
+            PCBox_CreateGridInput(work, 5, 9);
+            nextState = PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+        }
+        PCBox_CreateSelectedIconOutline(work);
+        if (work->args->mode != PC_BOX_MODE_MOVE_ITEMS) {
+            PCBox_ShowMovesPanel(work->view);
+        }
+    } else {
+        PCBox_ShowPartyPanelRight(work);
+        PCBox_ShowSummaryButton(work->view->panels);
+        PCBox_SetupBoxTraySprites(work);
+        PCBox_UpdateCurrentBoxMarker(work);
+        PCBox_UpdateTrayCursor(work);
+        PCBox_DrawTrayBoxNameAndCount(work);
+        PCBox_SlideInBoxTray(work->view->panels);
+        while (PCBox_UpdateBoxTraySlideIn(work)) {
+        }
+        if (work->summaryFromHolding == 0) {
+            PCBox_CreateGridInput(work, 4, work->selectedSlot);
+        } else {
+            PCBox_CreateGridInput(work, 4, work->summaryCursorPos);
+            work->view->cursorHolding = 1;
+            PCBox_AttachIconToCursor(work);
+        }
+        work->view->rowCursorPos = work->trayBox % 6 + 0x25;
+        if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            PCBox_SetIconsTranslucent(work, 0x81, 1);
+            PCBox_SetIconsTranslucent(work, 0x82, 1);
+            nextState = PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+        } else if (work->summaryFromHolding == 0) {
+            nextState = PC_BOX_STATE_BOX_TRAY_INPUT;
+        } else {
+            nextState = PC_BOX_STATE_BOX_TRAY_HOLDING_INPUT;
+        }
+        if (work->args->mode != PC_BOX_MODE_MOVE_ITEMS && work->summaryFromHolding != 0) {
+            PCBox_ShowMovesPanel(work->view);
+        }
+        if (work->trayFromPartyPanel == 1) {
+            PCBox_SetBoxArrowsVisible(work->view, 0);
+        }
+        work->summaryFromTray = 0;
+        work->summaryCursorPos = 0;
+        work->summaryFromHolding = 0;
+    }
+    PCBOX_TAIL_RETURN PCBox_StartFadeIn(work, nextState);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ReturnFromNamingScreen(PCBoxWork *work) {
+    PCBox_CreateGridInput(work, 9, 10);
+    work->view->rowCursorPos = work->trayBox % 6;
+    PCBox_ShowBoxTrayAndMenu(work);
+    PCBox_PrintMenuPrompt(work, 0, 0x27);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+    }
+    PCBOX_TAIL_RETURN PCBox_StartFadeIn(work, PC_BOX_STATE_BOX_MENU_INPUT);
+}
+
+PCBOX_TAIL_STATE PCBox_State_GiveItemFromBag(PCBoxWork *work) {
+    enum PCBoxState nextState;
+    u32 special;
+    BoxPokemon *entry;
+    u8 pos[2];
+
+    if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+        PCBox_ShowPartyPanelLeft(work);
+        PCBox_SetBoxArrowsVisible(work->view, 0);
+        PCBox_SetIconsTranslucent(work, 1, 1);
+    }
+    if (work->args->mode != PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_CreateSelectedIconOutline(work);
+    }
+    if (work->args->mode == PC_BOX_MODE_MOVE_POKEMON || work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_HideBottomButtons(work);
+        PCBox_HideReturnButton(work->view->panels);
+    }
+    if (work->itemId == ITEM_NONE) {
+        if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            PCBox_DrawBagGiveButton(work, 0);
+            if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+                PCBox_SetIconsTranslucent(work, 0x81, 1);
+                nextState = PC_BOX_STATE_ITEM_MODE_INPUT;
+            } else {
+                PCBox_SetIconsTranslucent(work, 0x82, 1);
+                PCBox_CreateGridInput(work, 7, 8);
+                nextState = PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+            }
+        } else {
+            PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+            if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+                nextState = PC_BOX_STATE_MOVE_MODE_INPUT;
+            } else {
+                PCBox_CreateGridInput(work, 5, 10);
+                nextState = PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+            }
+        }
+        PCBox_ShowActionMenu(work->view->panels);
+    } else {
+        special = 0;
+        if (work->itemId == ITEM_GRISEOUS_ORB && PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_SPECIES, NULL) != SPECIES_GIRATINA) {
+            special = 1;
+        } else {
+            entry = PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot);
+            PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &work->itemId);
+            if (PCBox_UpdateArceusGiratinaForm(entry) == TRUE) {
+                PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+            }
+            Bag_TakeItem(work->bag, work->itemId, 1, HEAP_ID_10);
+        }
+        if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+            if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+                PCBox_CreateGridInput(work, 7, work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+            } else {
+                PCBox_CreateGridInput(work, 5, 10);
+            }
+        } else if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+            DpadMenuBox_GetPosition(
+                GridInputHandler_GetDpadBox(work->view->gridInput, work->selectedSlot),
+                &pos[1],
+                &pos[0]);
+            ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], pos[1], pos[0]);
+        }
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            if (special == 0) {
+                work->view->heldItem = work->itemId;
+                PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+                PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, TRUE);
+                if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+                    PCBox_SetIconsTranslucent(work, 0x82, 1);
+                    PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 1);
+                } else {
+                    PCBox_SetIconsTranslucent(work, 0x81, 1);
+                    PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 0);
+                }
+                PCBox_CreateHeldItemIconOutline(work->view);
+                PCBox_ShowHeldItemIconOutline(work->view);
+            } else {
+                work->itemId = ITEM_NONE;
+                if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+                    PCBox_SetIconsTranslucent(work, 0x82, 1);
+                } else {
+                    PCBox_SetIconsTranslucent(work, 0x81, 1);
+                }
+            }
+            nextState = PC_BOX_STATE_ITEM_MODE_PRINT_ITEM_HELD;
+        } else {
+            if (special == 1) {
+                work->itemId = ITEM_NONE;
+            }
+            nextState = PC_BOX_STATE_PRINT_ITEM_HELD;
+        }
+    }
+    PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+    if (work->args->mode != PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_ShowMovesPanel(work->view);
+    } else if (work->itemId != ITEM_NONE) {
+        PCBox_ShowItemInfoPanel(work->view->panels);
+    }
+    PCBOX_TAIL_RETURN PCBox_StartFadeIn(work, nextState);
+}
+
+enum PCBoxState PCBox_State_PrintItemHeld(PCBoxWork *work) {
+    PCBox_PrintItemHeld(work, work->itemId, 0x25);
+    work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+PCBOX_TAIL_STATE PCBox_State_MarkingChosen(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_State_OpenMarkingMenu(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_OpenMarkingMenu(PCBoxWork *work) {
+    work->view->markings = PCBox_GetSlotMonData(work, *(&work->selectedSlot), MON_DATA_MARKINGS, NULL);
+    PCBox_DrawMarkingMenu(work);
+    PCBox_DrawConfirmCancel(work->view);
+    PCBox_SlideInMarkingMenu(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_UpdateMarkingMenuSlide, PC_BOX_STATE_SETUP_MARKING_MENU_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupMarkingMenuInput(PCBoxWork *work) {
+    PCBox_CreateGridInput(work, 8, 0);
+    PCBox_SetIconsTranslucent(work, 1, 1);
+    PCBox_SetIconsTranslucent(work, 2, 1);
+    PCBox_SetSlotIconTranslucent(work->view, *(&work->selectedSlot), 0);
+    PCBox_PrintTouchTheMark(work, 0x26);
+    return PC_BOX_STATE_MARKING_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_MarkingMenuInput(PCBoxWork *work) {
+    u32 input = GridInputHandler_HandleInput_AllowHold(work->view->gridInput);
+    switch (input) {
+    case 0:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 0);
+        break;
+    case 1:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 1);
+        break;
+    case 2:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 2);
+        break;
+    case 3:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 3);
+        break;
+    case 4:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 4);
+        break;
+    case 5:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ToggleMarking(work, 5);
+        break;
+    case 6: {
+        u8 value = work->view->markings;
+        PCBox_SetSlotMonData(work, *(&work->selectedSlot), MON_DATA_MARKINGS, &value);
+        PCBox_DrawMarkings(work, value);
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashMarkingMenuButton(work, 0, PC_BOX_STATE_CHOOSE_MARKING_DONE);
+    }
+    case 7:
+    case (u32)-2:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashMarkingMenuButton(work, 1, PC_BOX_STATE_CHOOSE_MARKING_DONE);
+    case (u32)-3:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MARKING_MENU);
+    case (u32)-4:
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    }
+    return PC_BOX_STATE_MARKING_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_FinishCloseMarkingMenu(PCBoxWork *work) {
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_RETURN_TO_ACTION_MENU);
+}
+
+enum PCBoxState PCBox_State_TryRelease(PCBoxWork *work) {
+    u32 slot;
+    Pokemon *mon;
+    if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+        PCBox_SetIconsTranslucent(work, 2, 1);
+        PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+        slot = work->selectedSlot - PC_BOX_SLOT_PARTY_START;
+        if (!PCBox_PartyHasOtherUsableMon(work, slot)) {
+            PlaySE(SEQ_SE_DP_BOX03);
+            PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 0x25);
+            work->view->restoreIconsOnMenu = 1;
+            work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+            return PC_BOX_STATE_WAIT_BUTTON;
+        }
+        mon = Party_GetMonByIndex(work->party, slot);
+        if (ItemIdIsMail((u16)GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+            PlaySE(SEQ_SE_DP_BOX03);
+            PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_REMOVE_MAIL, 0x25);
+            work->view->restoreIconsOnMenu = 1;
+            work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+            return PC_BOX_STATE_WAIT_BUTTON;
+        }
+        if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+            PlaySE(SEQ_SE_DP_BOX03);
+            PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_DETACH_CAPSULE, 0x25);
+            work->view->restoreIconsOnMenu = 1;
+            work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+            return PC_BOX_STATE_WAIT_BUTTON;
+        }
+    } else {
+        PCBox_SetBoxArrowsVisible(work->view, 0);
+        PCBox_SetIconsTranslucent(work, 1, 1);
+        PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+    }
+    if (GetBoxMonData(PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot), MON_DATA_IS_EGG, NULL) != 0) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_EGG, 0x25);
+        work->view->restoreIconsOnMenu = 1;
+        work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_CONFIRM, 0x25);
+    return PCBox_ShowYesNo(work, 1);
+}
+
+enum PCBoxState PCBox_State_ReleaseMoveCheck(PCBoxWork *work) {
+    PCBoxReleaseWork *releaseWork;
+    PCBox_RunReleaseMoveCheck(work);
+    releaseWork = work->view->releaseWork;
+    if (!PCBox_UpdateReleaseShrink(releaseWork)) {
+        releaseWork = work->view->releaseWork;
+        if (releaseWork->moveFlags != 0) {
+            return PC_BOX_STATE_RELEASE_CAME_BACK;
+        }
+        PCBox_EndReleaseShrink(releaseWork);
+        PCBox_FreeReleaseMoveCheck(work);
+        return PC_BOX_STATE_PRINT_RELEASED;
+    }
+    return PC_BOX_STATE_RELEASE_MOVE_CHECK;
+}
+
+enum PCBoxState PCBox_State_PrintReleased(PCBoxWork *work) {
+    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_RELEASED, 0x25);
+    work->nextState = PC_BOX_STATE_PRINT_BYE_BYE;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_PrintByeBye(PCBoxWork *work) {
+    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_BYE_BYE, 0x25);
+    work->nextState = PC_BOX_STATE_REMOVE_RELEASED_MON;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_RemoveReleasedMon(PCBoxWork *work) {
+    PCBoxUpdateFunc next;
+    PCBox_DeleteSlotMon(work, work->activeBox, work->selectedSlot);
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    PCBox_ClearMonInfo(work);
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        PCBox_DrawBoxThumbnail(work, work->activeBox);
+        PCBox_RefreshTrayBoxThumbnail(work, work->activeBox);
+        if (work->args->mode == PC_BOX_MODE_WITHDRAW) {
+            PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+            work->nextState = PC_BOX_STATE_WITHDRAW_INPUT;
+        } else {
+            work->nextState = PC_BOX_STATE_MOVE_MODE_INPUT;
+            PCBox_SlideInPartyButton(work->view->panels);
+            PCBox_SlideInTrayTab(work->view->panels);
+        }
+        PCBox_SlideInReturnButton(work->view->panels);
+        GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_SetBoxArrowsVisible(work->view, 1);
+        PCBox_SetIconsTranslucent(work, 1, 0);
+        work->selectedSlot = PC_BOX_SLOT_NONE;
+        next = PCBox_WaitActionMenuAndButtonsSlide;
+    } else {
+        PCBox_AllocMoveWork(work);
+        work->partyLayout = 1;
+        work->nextState = PC_BOX_STATE_END_PARTY_RELEASE_SHIFT;
+        PCBox_SlideInReturnButton(work->view->panels);
+        PCBox_SetIconsTranslucent(work, 2, 0);
+        next = PCBox_AnimatePartyShiftAfterRelease;
+    }
+    return PCBox_WaitForUpdateFunc(work, next, work->nextState);
+}
+
+enum PCBoxState PCBox_State_EndPartyReleaseShift(PCBoxWork *work) {
+    PCBox_FreeMoveWork(work);
+    if (work->trayOpen != 0) {
+        PCBox_DrawTrayBoxNameAndCount(work);
+    }
+    PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START));
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    work->selectedSlot = PC_BOX_SLOT_NONE;
+    if (work->args->mode == PC_BOX_MODE_DEPOSIT) {
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        return PC_BOX_STATE_DEPOSIT_INPUT;
+    }
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_ReleaseCameBack(PCBoxWork *work) {
+    PCBoxReleaseWork *releaseWork = work->view->releaseWork;
+    if (!PCBox_UpdateReleaseGrow(releaseWork)) {
+        releaseWork = work->view->releaseWork;
+        PCBox_ResetSpriteAffine(releaseWork);
+        PCBox_FreeReleaseMoveCheck(work);
+        PCBox_CreateSelectedIconOutline(work);
+        PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_CAME_BACK, 0x25);
+        PCBox_SlideInMovesPanel(work->view);
+        work->nextState = PC_BOX_STATE_PRINT_WORRIED;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    return PC_BOX_STATE_RELEASE_CAME_BACK;
+}
+
+enum PCBoxState PCBox_State_PrintWorried(PCBoxWork *work) {
+    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_WORRIED, 0x25);
+    work->nextState = PC_BOX_STATE_CANCEL_RELEASE;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_CancelRelease(PCBoxWork *work) {
+    PCBox_SetSelectedIconOutlineVisible(work, 1);
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        PCBox_SetBoxArrowsVisible(work->view, 1);
+        PCBox_SetIconsTranslucent(work, 1, 0);
+    } else {
+        PCBox_SetIconsTranslucent(work, 2, 0);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_RETURN_TO_ACTION_MENU);
+}
+
+enum PCBoxState PCBox_State_ResumeDepositInput(PCBoxWork *work) {
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_OpenPartyPanel(PCBoxWork *work) {
+    PCBox_LoadPartyPanelTilemap(work->view->panels, 1);
+    PCBox_PlacePartyPanelLeftHidden(work->view->panels);
+    PCBox_SlideInPartyPanel(work->view->panels);
+    PCBox_AttachPartyPanelLabelWindow(work->view);
+    PCBox_PrintPartyPanelSwitchLabel(work->view);
+    PCBox_DrawExitButton(work, 0);
+    PCBox_PlacePartyIconsLeftHidden(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_SETUP_PARTY_PANEL_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupPartyPanelInput(PCBoxWork *work) {
+    PCBox_ShowSlotMonInfo(work, PC_BOX_SLOT_PARTY_START);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_CreateGridInput(work, 7, 0);
+        return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+    }
+    PCBox_CreateGridInput(work, 5, 0);
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_MoveModePartyInput(PCBoxWork *work) {
+    u32 touch;
+    touch = PCBox_FindTouchedPartySlot();
+    if (touch != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, touch + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+                PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+            }
+            PCBox_ShowSlotMonInfo(work, touch + PC_BOX_SLOT_PARTY_START);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartMoveModePartyDrag(work, touch += PC_BOX_SLOT_PARTY_START);
+        } else if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            touch = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+            PCBox_StartCursorSlide(work->view, touch, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, touch);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_SlideOutMovesPanel(work->view);
+            PCBox_SetSelectedIconOutlineVisible(work, 0);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE_PARTY);
+        } else {
+            GridInputHandler_SetNextInput(work->view->gridInput, (u8)touch);
+            GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+            PCBox_ClearMonInfo(work);
+            return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+        }
+    }
+    {
+        u32 input = PCBox_GetMoveModePartyMenuInput(work);
+        switch (input) {
+        case 6:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            work->moveWithButtons = 0;
+            work->moveFromSlot = 0;
+            return PCBox_FlashPartyPanelButton(work, 0, PC_BOX_STATE_PARTY_CHOOSE_TRAY);
+        case 8:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            if (!System_GetTouchNew()) {
+                work->moveWithButtons = 2;
+            }
+            work->moveFromSlot = work->selectedSlot;
+            return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_MENU_ROW_0, PC_BOX_STATE_PARTY_CHOOSE_TRAY);
+        case 9:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            work->returnCursorPos = 9;
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_1, PC_BOX_STATE_CHOOSE_SUMMARY);
+        case 10:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_2, PC_BOX_STATE_CHOOSE_ITEM);
+        case 11:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_3, PC_BOX_STATE_CHOOSE_MARKING);
+        case 12:
+            PlaySE(SEQ_SE_DP_DECIDE);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_RELEASE);
+        case (u32)-3: {
+            u32 i = GridInputHandler_GetNextInput(work->view->gridInput);
+            if (i <= 5) {
+                PCBox_ShowSlotMonInfo(work, i + PC_BOX_SLOT_PARTY_START);
+            } else if (i != 8 && i != 9 && i != 10 && i != 11 && i != 12 && i != 13) {
+                PCBox_ClearMonInfo(work);
+            }
+            PlaySE(SEQ_SE_DP_SELECT);
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE_PARTY);
+        }
+        case 7:
+        case (u32)-2:
+            PlaySE(SEQ_SE_DP_CLOSE7);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_CHOOSE_PARTY_PANEL_EXIT);
+        case 13:
+            PlaySE(SEQ_SE_DP_SELECT);
+            input = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+            PCBox_StartCursorSlide(work->view, input, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, input);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_MOVE_MODE_PARTY_ACTION_MENU);
+        case (u32)-4: {
+            u32 i = GridInputHandler_GetNextInput(work->view->gridInput);
+            if (i <= 5) {
+                PCBox_ShowSlotMonInfo(work, i + PC_BOX_SLOT_PARTY_START);
+            } else if (i != 8 && i != 9 && i != 10 && i != 11 && i != 12 && i != 13) {
+                PCBox_ClearMonInfo(work);
+            }
+            PlaySE(SEQ_SE_DP_SELECT);
+            break;
+        }
+        case (u32)-1:
+            break;
+        default:
+            if (PCBox_GetSlotMonData(work, input + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+                PlaySE(SEQ_SE_DP_DECIDE);
+                PCBox_DrawActionMenu(work, gPCBoxMoveMenu, 5);
+                PCBox_ShowSlotMonInfo(work, input + PC_BOX_SLOT_PARTY_START);
+                PCBox_StartCursorSlide(work->view, 8, GridInputHandler_GetNextInput(work->view->gridInput));
+                GridInputHandler_SetNextInput(work->view->gridInput, 8);
+                return PCBox_SelectMoveModePartyMon(work, input += PC_BOX_SLOT_PARTY_START);
+            }
+            break;
+        }
+        return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+    }
+}
+
+enum PCBoxState PCBox_State_SlideOutPartyPanel(PCBoxWork *work) {
+    PCBox_SlideOutPartyPanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_PARTY_PANEL_CLOSED);
+}
+
+enum PCBoxState PCBox_State_PartyPanelClosed(PCBoxWork *work) {
+    PCBox_ClearPartyPanelTiles(work);
+    PCBox_SetBoxArrowsVisible(work->view, 1);
+    PCBox_DrawPartyButton(work, 0);
+    PCBox_DrawTrayTab(work, 0);
+    if (work->trayOpen == 0) {
+        PCBox_DrawReturnButton(work, 0);
+    }
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+        PCBox_CreateGridInput(work, 6, 0x21);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_ITEM_MODE_INPUT);
+    }
+    PCBox_SetIconsTranslucent(work, 1, 0);
+    PCBox_CreateGridInput(work, 3, 0x21);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_MOVE_MODE_INPUT);
+}
+
+enum PCBoxState PCBox_State_EndMoveModePartyDrag(PCBoxWork *work) {
+    PCBoxView *view = work->view;
+    PCBoxMoveWork *moveWork = view->temp;
+    u32 selected = moveWork->from;
+    PCBox_CloseMessageWindow(view, 0x28);
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    PCBox_RevertShayminFormOnMove(work, moveWork->from, moveWork->to);
+    PCBox_FreeMoveWork(work);
+    if (work->selectedSlot == PC_BOX_SLOT_NONE) {
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(selected - 0x1e));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ShowSlotMonInfo(work, selected);
+    } else {
+        GridInputHandler_SetNextInput(work->view->gridInput, 8);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    }
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_SetupBoxTrayInput(PCBoxWork *work) {
+    s32 row = work->trayBox % 6;
+    work->view->rowCursorPos = row + 0x25;
+    if (work->moveWithButtons != 0) {
+        PCBox_CreateGridInput(work, 4, work->moveFromSlot);
+        work->selectedSlot = work->moveFromSlot;
+        PCBox_PickUpTrayMon(work, work->moveFromSlot);
+        row = 0;
+        work->moveWithButtons = row;
+    } else {
+        PCBox_CreateGridInput(work, 4, work->moveFromSlot);
+        PCBox_ShowSlotMonInfo(work, work->moveFromSlot);
+        return work->args->mode == PC_BOX_MODE_MOVE_ITEMS ? PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT : PC_BOX_STATE_BOX_TRAY_INPUT;
+    }
+}
+
+enum PCBoxState PCBox_State_BoxTrayInput(PCBoxWork *work) {
+    u32 slot = PCBox_FindTouchedTrayPartySlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            PCBox_ShowSlotMonInfo(work, slot + PC_BOX_SLOT_PARTY_START);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartBoxTrayDrag(work, slot + PC_BOX_SLOT_PARTY_START);
+        }
+        PCBox_ClearMonInfo(work);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(slot + 0x1e));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_BOX_TRAY_INPUT;
+    }
+    slot = PCBox_FindTouchedBoxSlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            PCBox_ShowSlotMonInfo(work, slot);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartBoxTrayDrag(work, slot);
+        }
+        PCBox_ClearMonInfo(work);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)slot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_BOX_TRAY_INPUT;
+    }
+    if (PCBox_IsSummaryShortcutPressed(work) == 1) {
+        slot = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            work->selectedSlot = (u8)slot;
+            work->summaryFromTray = 1;
+            return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_SUMMARY_BUTTON, PC_BOX_STATE_CHOOSE_SUMMARY);
+        }
+        return PC_BOX_STATE_BOX_TRAY_INPUT;
+    }
+    slot = PCBox_GetBoxTrayInput(work);
+    switch (slot) {
+    case 0x25:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 0);
+    case 0x26:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 1);
+    case 0x27:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 2);
+    case 0x28:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 3);
+    case 0x29:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 4);
+    case 0x2a:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 5);
+    case 0x2b:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_ChangeTrayPage(work, -1);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_BOX_TRAY_INPUT;
+    case 0x2c:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_ChangeTrayPage(work, 1);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_BOX_TRAY_INPUT;
+    case 0x2d:
+        PlaySE(SEQ_SE_DP_SELECT);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_CHANGE_BOX_BUTTON, PC_BOX_STATE_CHOOSE_TRAY_BOX);
+    case GRID_MENU_CURSOR_MOVE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input < 0x25) {
+            if (PCBox_ShowSlotMonInfo(work, input) == TRUE) {
+                if (PCBox_IsSummaryButtonShown(work->view->panels) == 0) {
+                    PCBox_DrawSummaryButton(work, 0);
+                    PCBox_SlideInSummaryButton(work->view->panels);
+                }
+            } else if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        } else {
+            PCBox_ClearMonInfo(work);
+            if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        if (work->view->pendingUpdateFunc != NULL) {
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_BOX_TRAY);
+        }
+        break;
+    }
+    case 0x24:
+        PlaySE(SEQ_SE_DP_CLOSE7);
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        return PCBox_FlashPartyPanelButton(work, 1, PC_BOX_STATE_CHOOSE_TRAY_EXIT);
+    case GRID_MENU_CANCEL:
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 0) {
+            PlaySE(SEQ_SE_DP_CLOSE7);
+            return PCBox_FlashPartyPanelButton(work, 1, PC_BOX_STATE_CHOOSE_TRAY_EXIT);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_BOX_TRAY_INPUT);
+    default:
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            PCBox_ShowSlotMonInfo(work, slot);
+            return PCBox_PickUpTrayMon(work, slot);
+        }
+        break;
+    case GRID_MENU_BUTTON_MODE:
+    case GRID_MENU_NOTHING_CHOSEN:
+        break;
+    }
+    return PC_BOX_STATE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndBoxTrayDrag(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork = work->view->temp;
+    s32 selected = moveWork->to;
+    u32 current = moveWork->sel;
+    u32 high;
+
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    high = selected & PC_BOX_TARGET_TRAY_BOX;
+    if (high == 0) {
+        PCBox_RevertShayminFormOnMove(work, moveWork->from, moveWork->to);
+    }
+    PCBox_FreeMoveWork(work);
+    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+    if (work->trayOpen != 0) {
+        PCBox_DrawTrayBoxNameAndCount(work);
+    }
+    if (PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_SPECIES_EXISTS, NULL) == 0) {
+        PCBox_ClearMonInfo(work);
+    } else if (selected != PC_BOX_SLOT_NONE) {
+        if (high != 0) {
+            PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+        }
+    } else {
+        selected = work->selectedSlot;
+        if ((u32)selected >= PC_BOX_SLOT_PARTY_START) {
+            if (current != selected) {
+                selected -= PC_BOX_SLOT_PARTY_START;
+                Pokemon *mon = Party_GetMonByIndex(work->party, (u32)selected);
+                if (ItemIdIsMail((u16)GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_REMOVE_MAIL, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+                if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_DETACH_CAPSULE, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+                if (!PCBox_PartyHasOtherUsableMon(work, selected)) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+            }
+        }
+        if (current != PC_BOX_SLOT_NONE && (current & PC_BOX_TARGET_TRAY_BOX) != 0) {
+            u32 next = (current ^ PC_BOX_TARGET_TRAY_BOX) + (work->trayBox / PC_BOX_TRAY_BOX_COUNT) * PC_BOX_TRAY_BOX_COUNT;
+            if (work->activeBox != next) {
+                s32 index = work->selectedSlot;
+                if ((u32)index < PC_BOX_SLOT_PARTY_START) {
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_BOX_FULL, 0x25);
+                } else if (PCBox_PartyHasOtherUsableMon(work, index - PC_BOX_SLOT_PARTY_START) == TRUE) {
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_BOX_FULL, 0x25);
+                } else {
+                    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 0x25);
+                }
+                PlaySE(SEQ_SE_DP_BOX03);
+                work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                return PC_BOX_STATE_WAIT_BUTTON;
+            }
+        }
+    }
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndTrayHoldingDrop(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork = work->view->temp;
+    s32 selected = moveWork->to;
+    u32 input;
+    s32 index;
+
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    if ((selected & PC_BOX_TARGET_TRAY_BOX) == 0) {
+        PCBox_RevertShayminFormOnMove(work, moveWork->from, moveWork->to);
+    }
+    PCBox_FreeMoveWork(work);
+    if (work->trayOpen != 0) {
+        PCBox_DrawTrayBoxNameAndCount(work);
+    }
+    input = GridInputHandler_GetNextInput(work->view->gridInput);
+    if (work->view->dropCancelled == 0 && selected == PC_BOX_SLOT_NONE) {
+        index = work->selectedSlot;
+        if (input != index) {
+            if ((u32)index >= PC_BOX_SLOT_PARTY_START) {
+                index -= PC_BOX_SLOT_PARTY_START;
+                Pokemon *mon = Party_GetMonByIndex(work->party, (u32)index);
+                if (ItemIdIsMail((u16)GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+                    GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+                    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_REMOVE_MAIL, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+                if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+                    GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+                    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+                    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_DETACH_CAPSULE, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+                if (!PCBox_PartyHasOtherUsableMon(work, index)) {
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+                    GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+                    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+                    PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 0x25);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+            }
+            if (input >= 0x25 && input <= 0x2a) {
+                u32 next = (input - 0x25) + (work->trayBox / 6) * 6;
+                if (work->activeBox != next) {
+                    index = work->selectedSlot;
+                    if ((u32)index < PC_BOX_SLOT_PARTY_START) {
+                        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_BOX_FULL, 0x25);
+                    } else if (PCBox_PartyHasOtherUsableMon(work, index - PC_BOX_SLOT_PARTY_START) == TRUE) {
+                        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_BOX_FULL, 0x25);
+                    } else {
+                        PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 0x25);
+                    }
+                    PlaySE(SEQ_SE_DP_BOX03);
+                    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+                    GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+                    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+                    work->nextState = PC_BOX_STATE_RESUME_BOX_TRAY_INPUT;
+                    return PC_BOX_STATE_WAIT_BUTTON;
+                }
+            }
+            if (work->moveWithButtons == 0) {
+                PCBox_ShowSlotMonInfo(work, GridInputHandler_GetNextInput(work->view->gridInput));
+            }
+        }
+    }
+    if (work->moveWithButtons != 0) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_CloseTray(work);
+    }
+    if (input >= 0x25 && input <= 0x2a) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+    } else {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    }
+    return PC_BOX_STATE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_ResumeBoxTrayInput(PCBoxWork *work) {
+    PCBox_ClearWindowFrame(work->view, 0x25);
+    if (work->moveWithButtons != 0) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_CloseTray(work);
+    }
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_OpenTrayBesideParty(PCBoxWork *work) {
+    PCBox_PrintPartyPanelExitLabel(work->view);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+    } else {
+        PCBox_SetIconsTranslucent(work, 1, 0);
+    }
+    if (PCBox_GetSlotMonData(work, work->moveFromSlot, MON_DATA_SPECIES_EXISTS, NULL) != 0) {
+        PCBox_DrawSummaryButton(work, 0);
+        PCBox_SlideInSummaryButton(work->view->panels);
+    }
+    work->trayOpen = 1;
+    work->trayFromPartyPanel = 1;
+    work->trayBox = work->activeBox;
+    return PCBox_OpenBoxTray(work, PC_BOX_STATE_SETUP_BOX_TRAY_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupPartyInputAfterTray(PCBoxWork *work) {
+    PCBox_PrintPartyPanelSwitchLabel(work->view);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_CreateGridInput(work, 7, 0);
+        PCBox_ShowSlotMonInfo(work, GridInputHandler_GetNextInput(work->view->gridInput) + PC_BOX_SLOT_PARTY_START);
+        return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+    }
+    if (work->moveWithButtons != 0) {
+        PCBox_CreateGridInput(work, 5, work->moveFromSlot - PC_BOX_SLOT_PARTY_START);
+    } else {
+        PCBox_CreateGridInput(work, 5, 0);
+    }
+    PCBox_ShowSlotMonInfo(work, GridInputHandler_GetNextInput(work->view->gridInput) + PC_BOX_SLOT_PARTY_START);
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_OpenTrayFromBox(PCBoxWork *work) {
+    work->trayBox = work->activeBox;
+    return PCBox_OpenBoxTray(work, PC_BOX_STATE_SLIDE_IN_TRAY_PARTY_PANEL);
+}
+
+PCBOX_TAIL_STATE PCBox_State_SlideInTrayPartyPanel(PCBoxWork *work) {
+    PCBox_LoadPartyPanelTilemap(work->view->panels, 1);
+    PCBox_PlacePartyPanelRightHidden(work->view->panels);
+    PCBox_SlideInPartyPanel(work->view->panels);
+    PCBox_AttachPartyPanelLabelWindow(work->view);
+    PCBox_PrintPartyPanelExitLabel(work->view);
+    PCBox_PlacePartyIconsRightHidden(work);
+    PCBox_DrawSummaryButton(work, 0);
+    if (PCBox_GetSlotMonData(work, work->moveFromSlot, MON_DATA_SPECIES_EXISTS, NULL)) {
+        PCBox_SlideInSummaryButton(work->view->panels);
+    }
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_SETUP_BOX_TRAY_INPUT);
+}
+
+enum PCBoxState PCBox_State_SlideOutTray(PCBoxWork *work) {
+    return PCBox_CloseBoxTray(work, PC_BOX_STATE_TRAY_CLOSED);
+}
+
+PCBOX_TAIL_STATE PCBox_State_TrayClosed(PCBoxWork *work) {
+    if (work->trayFromPartyPanel == 1) {
+        PCBOX_TAIL_RETURN PCBox_CloseTrayToPartyPanel(work);
+        PCBOX_TAIL_DONE;
+    }
+    PCBox_SlideOutPartyPanel(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_RETURN_TO_BOX_FROM_TRAY);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ReturnToBoxFromTray(PCBoxWork *work) {
+    u32 layout;
+    u32 initialPos;
+    enum PCBoxState next;
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        layout = 6;
+        initialPos = 0x22;
+        next = PC_BOX_STATE_ITEM_MODE_INPUT;
+    } else {
+        layout = 3;
+        initialPos = 0x22;
+        next = PC_BOX_STATE_MOVE_MODE_INPUT;
+        if (work->moveWithButtons != 0) {
+            initialPos = work->moveFromSlot;
+            PCBox_ShowSlotMonInfo(work, initialPos);
+        }
+    }
+    PCBox_CreateGridInput(work, layout, initialPos);
+    PCBox_DrawPartyButton(work, 0);
+    PCBox_DrawTrayTab(work, 0);
+    PCBox_DrawReturnButton(work, 0);
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, next);
+}
+
+enum PCBoxState PCBox_State_BoxMenuInput(PCBoxWork *work) {
+    u32 input = GridInputHandler_HandleInput_AllowHold(work->view->gridInput);
+    switch (input) {
+    case 0:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 0);
+    case 1:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 1);
+    case 2:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 2);
+    case 3:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 3);
+    case 4:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 4);
+    case 5:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_SelectBoxMenuBox(work, 5);
+    case 6:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_ChangeBoxMenuPage(work, -1);
+    case 7:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_ChangeBoxMenuPage(work, 1);
+    case 8:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        if (work->activeBox == work->trayBox) {
+            PlaySE(SEQ_SE_DP_BOX03);
+            return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_BOX_MENU_INPUT);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_BOX_MENU_SWITCH_BOX);
+    case 9:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_3, PC_BOX_STATE_CHOOSE_WALLPAPER);
+    case 10:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_RENAME);
+    case GRID_MENU_CURSOR_MOVE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        if (work->view->pendingUpdateFunc != NULL) {
+            PlaySE(SEQ_SE_DP_SELECT);
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_BOX_MENU);
+        }
+        break;
+    case GRID_MENU_BUTTON_MODE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    case 11:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_CLOSE_BOX_MENU);
+    }
+    return PC_BOX_STATE_BOX_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_HideButtonsForBoxMenu(PCBoxWork *work) {
+    PCBoxView *view = work->view;
+    if (work->args->mode == PC_BOX_MODE_WITHDRAW) {
+        if (PCBox_IsMenuExitButtonShown(view->panels) == 0) {
+            PCBox_SlideOutReturnButton(work->view->panels);
+        }
+    } else {
+        PCBox_SlideOutPartyButton(view->panels);
+        PCBox_SlideOutTrayTab(work->view->panels);
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_OPEN_BOX_MENU_TRAY);
+}
+
+enum PCBoxState PCBox_State_OpenBoxMenuTray(PCBoxWork *work) {
+    work->trayBox = work->activeBox;
+    return PCBox_OpenBoxTray(work, PC_BOX_STATE_SHOW_BOX_MENU_EXIT_BUTTON);
+}
+
+enum PCBoxState PCBox_State_ShowBoxMenuExitButton(PCBoxWork *work) {
+    return PCBox_ShowExitButtonAndWait(work, PC_BOX_STATE_OPEN_BOX_MENU);
+}
+
+PCBOX_TAIL_STATE PCBox_State_OpenBoxMenu(PCBoxWork *work) {
+    PCBox_DrawBoxMenu(work);
+    PCBox_SlideInBoxMenu(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_UpdateBoxMenuSlide, PC_BOX_STATE_SETUP_BOX_MENU_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupBoxMenuInput(PCBoxWork *work) {
+    PCBox_CreateGridInput(work, 9, work->returnCursorPos);
+    if (work->returnCursorPos <= 5) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+    } else {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    }
+    PCBox_PrintMenuPrompt(work, 0, 0x27);
+    return PC_BOX_STATE_BOX_MENU_INPUT;
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseBoxMenu(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_CloseMessageWindow(work->view, 0x27);
+    PCBOX_TAIL_RETURN PCBox_SlideOutReturnButtonAndWait(work, PC_BOX_STATE_SLIDE_OUT_BOX_MENU);
+}
+
+PCBOX_TAIL_STATE PCBox_State_SlideOutBoxMenu(PCBoxWork *work) {
+    PCBox_SlideOutBoxMenu(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_UpdateBoxMenuSlide, PC_BOX_STATE_CLOSE_BOX_MENU_TRAY);
+}
+
+enum PCBoxState PCBox_State_CloseBoxMenuTray(PCBoxWork *work) {
+    return PCBox_CloseBoxTray(work, PC_BOX_STATE_BOX_MENU_CLOSED);
+}
+
+enum PCBoxState PCBox_State_BoxMenuClosed(PCBoxWork *work) {
+    u32 mode;
+
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_DrawReturnButton(work, 0);
+    PCBox_SlideInReturnButton(work->view->panels);
+    mode = work->args->mode;
+    if (mode == PC_BOX_MODE_WITHDRAW) {
+        PCBox_CreateGridInput(work, 2, 0x1e);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitReturnButtonSlide, PC_BOX_STATE_RETURN_TO_WITHDRAW_INPUT);
+    }
+    if (mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_CreateGridInput(work, 6, 0x1e);
+    } else {
+        PCBox_CreateGridInput(work, 3, 0x1e);
+    }
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_RESUME_BOX_INPUT);
+}
+
+enum PCBoxState PCBox_State_OpenWallpaperMenu(PCBoxWork *work) {
+    work->view->wallpaperSelection = PCBox_GetWallpaperGfxIndex(work, work->trayBox);
+    PCBox_SetupWallpaperMenuSprites(work);
+    PCBox_UpdateCurrentWallpaperMarker(work);
+    PCBox_UpdateWallpaperCursor(work);
+    PCBox_DrawWallpaperName(work);
+    PCBox_SlideOutBoxMenu(work->view->panels);
+    PCBox_SlideInWallpaperList(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBoxMenuThenWallpaperList, PC_BOX_STATE_SHOW_WALLPAPER_MENU_TITLE);
+}
+
+enum PCBoxState PCBox_State_ShowWallpaperMenuTitle(PCBoxWork *work) {
+    PCBox_DrawChangeWallpaperTitle(work);
+    PCBox_SlideInTitlePanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuThenTitleSlide, PC_BOX_STATE_SETUP_WALLPAPER_MENU_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupWallpaperMenuInput(PCBoxWork *work) {
+    work->view->rowCursorPos = work->view->wallpaperSelection % 4;
+    PCBox_CreateGridInput(work, 0xa, work->view->rowCursorPos);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+    PCBox_PrintMenuPrompt(work, 1, 0x27);
+    return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_WallpaperMenuInput(PCBoxWork *work) {
+    u32 input = GridInputHandler_HandleInput_AllowHold(work->view->gridInput);
+
+    switch (input) {
+    case 0:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_SelectWallpaperInPage(work, 0);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 1:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_SelectWallpaperInPage(work, 1);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 2:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_SelectWallpaperInPage(work, 2);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 3:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_SelectWallpaperInPage(work, 3);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 4:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ChangeWallpaperPage(work, -1);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 5:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ChangeWallpaperPage(work, 1);
+        return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    case 6:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        return PCBox_ConfirmWallpaperChoice(work);
+    case GRID_MENU_CURSOR_MOVE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        if (work->view->pendingUpdateFunc != NULL) {
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_WALLPAPER_MENU);
+        }
+        break;
+    case 7:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_CHOOSE_WALLPAPER_MENU_EXIT);
+    default:
+        break;
+    }
+    return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_CloseWallpaperMenu(PCBoxWork *work) {
+    PCBox_SlideOutTitlePanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitTitlePanelSlide, PC_BOX_STATE_SLIDE_OUT_WALLPAPER_LIST);
+}
+
+enum PCBoxState PCBox_State_SlideOutWallpaperList(PCBoxWork *work) {
+    PCBox_SlideOutWallpaperList(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitWallpaperListSlideOut, PC_BOX_STATE_RETURN_TO_BOX_MENU);
+}
+
+enum PCBoxState PCBox_State_ReturnToBoxMenu(PCBoxWork *work) {
+    return PCBox_OpenBoxTray(work, PC_BOX_STATE_OPEN_BOX_MENU);
+}
+
+enum PCBoxState PCBox_State_ApplyWallpaper(PCBoxWork *work) {
+    u8 wallpaper;
+
+    wallpaper = work->view->wallpaperSelection;
+    PCBox_SwapWallpaper(work, wallpaper);
+    wallpaper = work->view->wallpaperSelection;
+    if (wallpaper < 16) {
+        PCStorage_SetBoxWallpaper(work->storage, work->activeBox, wallpaper);
+    } else {
+        ((void (*)(PCStorage *, u32, u32))PCStorage_SetBoxWallpaper)(work->storage, work->activeBox, wallpaper + 16);
+    }
+    PCBox_UpdateCurrentWallpaperMarker(work);
+    PCBox_DrawBoxThumbnail(work, work->activeBox);
+    return PC_BOX_STATE_WALLPAPER_FADE_IN;
+}
+
+enum PCBoxState PCBox_State_WallpaperFadeOut(PCBoxWork *work) {
+    PaletteData_LoadPaletteSlotFromHardware(work->view->paletteData, PLTTBUF_MAIN_BG, 0, 0x200);
+    PaletteData_BeginPaletteFade(work->view->paletteData, PLTTBUF_MAIN_BG_F, 0xC000, 0, 0, 16, RGB_WHITE);
+    work->nextState = PC_BOX_STATE_APPLY_WALLPAPER;
+    return PC_BOX_STATE_WAIT_PALETTE_BUFFERS;
+}
+
+enum PCBoxState PCBox_State_WallpaperFadeIn(PCBoxWork *work) {
+    PaletteData_BeginPaletteFade(work->view->paletteData, PLTTBUF_MAIN_BG_F, 0xC000, 0, 16, 0, RGB_WHITE);
+    work->nextState = PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+    return PC_BOX_STATE_WAIT_PALETTE_BUFFERS;
+}
+
+enum PCBoxState PCBox_State_ResumeBoxInput(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        return PC_BOX_STATE_ITEM_MODE_INPUT;
+    }
+    return PC_BOX_STATE_MOVE_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_ResumeMoveModePartyInput(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_WithdrawInput(PCBoxWork *work) {
+    u32 input = PCBox_FindTouchedBoxSlot();
+    if (input != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, input, MON_DATA_SPECIES_EXISTS, NULL)) {
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+                PCBox_DrawActionMenu(work, gPCBoxWithdrawMenu, 4);
+            }
+            PlaySE(SEQ_SE_DP_BOX02);
+            PCBox_ShowSlotMonInfo(work, input);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartWithdrawDrag(work, input);
+        } else if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            input = work->selectedSlot;
+            PCBox_StartCursorSlide(work->view, input, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, input);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_SlideOutMovesPanel(work->view);
+            PCBox_SetSelectedIconOutlineVisible(work, 0);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenReturnButton, PC_BOX_STATE_END_CURSOR_SLIDE_TO_WITHDRAW_PROMPT);
+        } else {
+            GridInputHandler_SetNextInput(work->view->gridInput, (u8)input);
+            GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+            PCBox_ClearMonInfo(work);
+            return PC_BOX_STATE_WITHDRAW_INPUT;
+        }
+    }
+    input = PCBox_GetWithdrawMenuInput(work);
+    switch (input) {
+    case 34:
+        if (Party_GetCount(work->party) != 6) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+        } else {
+            PlaySE(SEQ_SE_DP_BOX03);
+        }
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_1, PC_BOX_STATE_CHOOSE_WITHDRAW);
+    case 35:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        work->returnCursorPos = 35;
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_2, PC_BOX_STATE_CHOOSE_SUMMARY);
+    case 36:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_CloseMessageWindow(work->view, 39);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_3, PC_BOX_STATE_CHOOSE_MARKING);
+    case 37:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_RELEASE);
+    case 38:
+        input = work->selectedSlot;
+        PCBox_StartCursorSlide(work->view, input, GridInputHandler_GetNextInput(work->view->gridInput));
+        GridInputHandler_SetNextInput(work->view->gridInput, input);
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_WITHDRAW_ACTION_MENU);
+    case 30:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_CloseMessageWindow(work->view, 39);
+        return PCBox_StartBoxMenu(work);
+    case 31:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 30);
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 39);
+        return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_WITHDRAW_INPUT);
+    case 32:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 30);
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 39);
+        return PCBox_ScrollToNextBox(work, PC_BOX_STATE_WITHDRAW_INPUT);
+    case (u32)-3: {
+        u32 i = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (i < 30) {
+            PCBox_ShowSlotMonInfo(work, i);
+        } else if (i != 34 && i != 35 && i != 36 && i != 37 && i != 38) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_WITHDRAW);
+    }
+    case 33:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfo(work);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_EXIT);
+    case (u32)-2:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_CONTINUE);
+    case (u32)-1:
+        if (GridInputHandler_GetNextInput(work->view->gridInput) == 30) {
+            if (gSystem.newKeys & PAD_KEY_LEFT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_WITHDRAW_INPUT);
+            } else if (gSystem.newKeys & PAD_KEY_RIGHT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToNextBox(work, PC_BOX_STATE_WITHDRAW_INPUT);
+            }
+        }
+        break;
+    case (u32)-4: {
+        u32 i = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (i < 30) {
+            PCBox_ShowSlotMonInfo(work, i);
+        } else if (i != 34 && i != 35 && i != 36 && i != 37 && i != 38) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    }
+    default:
+        if (PCBox_GetSlotMonData(work, input, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PCBox_DrawActionMenu(work, gPCBoxWithdrawMenu, 4);
+            PCBox_ShowSlotMonInfo(work, input);
+            PCBox_StartCursorSlide(work->view, 34, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, 34);
+            return PCBox_SelectWithdrawMon(work, input);
+        }
+        break;
+    }
+    return PC_BOX_STATE_WITHDRAW_INPUT;
+}
+
+PCBOX_TAIL_STATE PCBox_State_ReturnToWithdrawInput(PCBoxWork *work) {
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+    PCBOX_TAIL_RETURN PCBox_State_ResumeWithdrawInput(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_SlideInWithdrawParty(PCBoxWork *work) {
+    PCBox_PlacePartyIconsRightHidden(work);
+    PCBox_PlacePartyPanelRightHidden(work->view->panels);
+    PCBox_SlideInPartyPanel(work->view->panels);
+    work->partyLayout = 2;
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_START_WITHDRAW_MOVE);
+}
+
+PCBOX_TAIL_STATE PCBox_State_StartWithdrawMove(PCBoxWork *work) {
+    PCBox_AllocMoveWork(work);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_AnimateMoveToPartyEnd, PC_BOX_STATE_END_WITHDRAW_MOVE);
+}
+
+PCBOX_TAIL_STATE PCBox_State_EndWithdrawMove(PCBoxWork *work) {
+    struct {
+        u8 y;
+        u8 x;
+    } pos;
+
+    PlaySE(SEQ_SE_DP_BOX01);
+    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, work->selectedSlot), &pos.x, &pos.y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], pos.x, pos.y);
+    work->selectedSlot = PC_BOX_SLOT_NONE;
+    PCBox_ApplyMonMove(work);
+    PCBox_FreeMoveWork(work);
+    PCBox_ClearMonInfo(work);
+    PCBox_SlideOutPartyPanel(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_WITHDRAW_PARTY_CLOSED);
+}
+
+PCBOX_TAIL_STATE PCBox_State_WithdrawPartyClosed(PCBoxWork *work) {
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitReturnButtonSlide, PC_BOX_STATE_RETURN_TO_WITHDRAW_INPUT);
+}
+
+enum PCBoxState PCBox_State_EndWithdrawDrag(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork = work->view->temp;
+    u32 input = moveWork->from;
+
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    PCBox_FreeMoveWork(work);
+    PCBox_ClearWindowFrameNoTransfer(work->view, 0x28);
+    if (work->selectedSlot == PC_BOX_SLOT_NONE) {
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+    } else {
+        PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+        input = 0x22;
+    }
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)input);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_WITHDRAW_INPUT;
+}
+
+enum PCBoxState PCBox_State_ResumeWithdrawInput(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    return PC_BOX_STATE_WITHDRAW_INPUT;
+}
+
+enum PCBoxState PCBox_State_DepositInput(PCBoxWork *work) {
+    u32 choice = PCBox_FindTouchedPartySlot();
+    if (choice != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, (s32)choice + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+                PCBox_DrawActionMenu(work, gPCBoxDepositMenu, 4);
+            }
+            PlaySE(SEQ_SE_DP_BOX02);
+            PCBox_ShowSlotMonInfo(work, (u32)(choice + PC_BOX_SLOT_PARTY_START));
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            choice += PC_BOX_SLOT_PARTY_START;
+            return PCBox_StartDepositDrag(work, choice);
+        }
+        if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            choice = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+            PCBox_StartCursorSlide(work->view, choice, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, choice);
+            PCBox_DrawReturnButton(work, 0);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_SlideOutMovesPanel(work->view);
+            PCBox_SetSelectedIconOutlineVisible(work, 0);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenReturnButton, PC_BOX_STATE_END_CURSOR_SLIDE_TO_DEPOSIT_PROMPT);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)choice);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ClearMonInfo(work);
+        return PC_BOX_STATE_DEPOSIT_INPUT;
+    }
+    choice = PCBox_GetDepositMenuInput(work);
+    switch (choice) {
+    case 7:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_1, PC_BOX_STATE_CHOOSE_DEPOSIT);
+    case 8:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        work->returnCursorPos = 8;
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_2, PC_BOX_STATE_CHOOSE_SUMMARY);
+    case 9:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_CloseMessageWindow(work->view, 39);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_3, PC_BOX_STATE_CHOOSE_MARKING);
+    case 10:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_RELEASE);
+    case 11:
+        choice = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+        PCBox_StartCursorSlide(work->view, choice, GridInputHandler_GetNextInput(work->view->gridInput));
+        GridInputHandler_SetNextInput(work->view->gridInput, choice);
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_DEPOSIT_ACTION_MENU);
+    case (u32)-4: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input <= 6) {
+            PCBox_ShowSlotMonInfo(work, input + PC_BOX_SLOT_PARTY_START);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PC_BOX_STATE_DEPOSIT_INPUT;
+    }
+    case (u32)-3: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input <= 6) {
+            PCBox_ShowSlotMonInfo(work, input + PC_BOX_SLOT_PARTY_START);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_DEPOSIT);
+    }
+    case 6:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfo(work);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_EXIT);
+    case (u32)-2:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_CONTINUE);
+    case (u32)-1:
+        break;
+    default:
+        if (PCBox_GetSlotMonData(work, (s32)choice + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PCBox_DrawActionMenu(work, gPCBoxDepositMenu, 4);
+            PCBox_ShowSlotMonInfo(work, (u32)(choice + PC_BOX_SLOT_PARTY_START));
+            PCBox_StartCursorSlide(work->view, 7, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, 7);
+            choice += PC_BOX_SLOT_PARTY_START;
+            return PCBox_SelectDepositMon(work, choice);
+        }
+        break;
+    }
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_TryDeposit(PCBoxWork *work) {
+    int slot = work->selectedSlot - PC_BOX_SLOT_PARTY_START;
+    Pokemon *mon;
+    if (!PCBox_PartyHasOtherUsableMon(work, slot)) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintReleaseMessage(work, PC_BOX_RELEASE_MSG_LAST_MON, 37);
+        work->nextState = PC_BOX_STATE_RETURN_FROM_DEPOSIT_ERROR;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    mon = Party_GetMonByIndex(work->party, slot);
+    if (ItemIdIsMail((u16)GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_REMOVE_MAIL, 37);
+        work->nextState = PC_BOX_STATE_RETURN_FROM_DEPOSIT_ERROR;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_DETACH_CAPSULE, 37);
+        work->nextState = PC_BOX_STATE_RETURN_FROM_DEPOSIT_ERROR;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    work->trayBox = work->activeBox;
+    PCBox_SetIconsTranslucent(work, 2, 1);
+    PCBox_HideSelectedIconOutline(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateDepositBoxSelectOpen, PC_BOX_STATE_SHOW_DEPOSIT_BOX_SELECT);
+}
+
+enum PCBoxState PCBox_State_ReturnFromDepositError(PCBoxWork *work) {
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_RETURN_TO_ACTION_MENU);
+}
+
+enum PCBoxState PCBox_State_ShowDepositBoxSelect(PCBoxWork *work) {
+    PCBox_SetupDepositBoxSprites(work);
+    PCBox_UpdateCurrentBoxMarker(work);
+    PCBox_UpdateTrayCursor(work);
+    PCBox_DrawTrayBoxNameAndCount(work);
+    return PCBox_ShowExitButtonAndWait(work, PC_BOX_STATE_SHOW_DEPOSIT_TITLE);
+}
+
+enum PCBoxState PCBox_State_ShowDepositTitle(PCBoxWork *work) {
+    PCBox_DrawDepositTitle(work);
+    PCBox_SlideInTitlePanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuThenTitleSlide, PC_BOX_STATE_SETUP_DEPOSIT_BOX_INPUT);
+}
+
+enum PCBoxState PCBox_State_SetupDepositBoxInput(PCBoxWork *work) {
+    work->view->rowCursorPos = work->trayBox % 6;
+    PCBox_CreateGridInput(work, 1, work->view->rowCursorPos);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_DEPOSIT_WHERE, 0x27);
+    return PC_BOX_STATE_DEPOSIT_BOX_INPUT;
+}
+
+enum PCBoxState PCBox_State_DepositBoxInput(PCBoxWork *work) {
+    u32 input = GridInputHandler_HandleInput_AllowHold(work->view->gridInput);
+
+    switch (input) {
+    case 0:
+        return PCBox_SelectDepositBox(work, 0);
+    case 1:
+        return PCBox_SelectDepositBox(work, 1);
+    case 2:
+        return PCBox_SelectDepositBox(work, 2);
+    case 3:
+        return PCBox_SelectDepositBox(work, 3);
+    case 4:
+        return PCBox_SelectDepositBox(work, 4);
+    case 5:
+        return PCBox_SelectDepositBox(work, 5);
+    case 6:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_ChangeDepositBoxPage(work, -1);
+    case 7:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_ChangeDepositBoxPage(work, 1);
+    case 8:
+        return PCBox_ConfirmDepositBox(work);
+    case GRID_MENU_CURSOR_MOVE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        if (work->view->pendingUpdateFunc != NULL) {
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_DEPOSIT_BOX);
+        }
+        break;
+    case 9:
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_CancelDepositBoxSelect(work, 0);
+    default:
+        break;
+    }
+    return PC_BOX_STATE_DEPOSIT_BOX_INPUT;
+}
+
+enum PCBoxState PCBox_State_CancelDepositBoxSelect(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutTitlePanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitTitlePanelSlide, PC_BOX_STATE_HIDE_DEPOSIT_EXIT_BUTTON);
+}
+
+enum PCBoxState PCBox_State_HideDepositExitButton(PCBoxWork *work) {
+    return PCBox_SlideOutReturnButtonAndWait(work, PC_BOX_STATE_HIDE_DEPOSIT_BOX_SELECT);
+}
+
+enum PCBoxState PCBox_State_HideDepositBoxSelect(PCBoxWork *work) {
+    PCBox_HideBoxTraySprites(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateDepositBoxSelectClose, PC_BOX_STATE_DEPOSIT_BOX_SELECT_CLOSED);
+}
+
+enum PCBoxState PCBox_State_DepositBoxSelectClosed(PCBoxWork *work) {
+    PCBox_CreateGridInput(work, 0, 7);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_SetSelectedIconOutlineVisible(work, 1);
+    PCBox_SetIconsTranslucent(work, 2, 0);
+    return PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+}
+
+enum PCBoxState PCBox_State_ConfirmDepositBox(PCBoxWork *work) {
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutTitlePanel(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitTitleAndReturnButtonSlide, PC_BOX_STATE_CHECK_DEPOSIT_BOX);
+}
+
+enum PCBoxState PCBox_State_CheckDepositBox(PCBoxWork *work) {
+    if (PCStorage_CountMonsAndEggsInBox(work->storage, work->trayBox) == MONS_PER_BOX) {
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_BOX_FULL, 0x25);
+        work->nextState = PC_BOX_STATE_SHOW_DEPOSIT_BOX_SELECT;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    PCBox_SetIconsTranslucent(work, 2, 0);
+    PCBox_CloseMessageWindow(work->view, 0x27);
+    PCBox_HideBoxTraySprites(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateDepositBoxSelectClose, PC_BOX_STATE_SHIFT_PARTY_FOR_DEPOSIT);
+}
+
+enum PCBoxState PCBox_State_ShiftPartyForDeposit(PCBoxWork *work) {
+    PCBox_ShiftPartyPanelRight(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelAndActionMenuSlide, PC_BOX_STATE_SWITCH_BOX);
+}
+
+enum PCBoxState PCBox_State_SwitchBox(PCBoxWork *work) {
+    PCBoxUpdateFunc cb;
+    u8 old = work->activeBox;
+    work->activeBox = work->trayBox;
+    if (old == work->trayBox) {
+        return PC_BOX_STATE_START_DEPOSIT_MOVE;
+    }
+    if (old > work->trayBox) {
+        PCBox_LoadBoxIconImages(work, work->activeBox);
+        PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 0);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+        cb = PCBox_UpdateScrollToPrevBox;
+    } else {
+        PCBox_LoadBoxIconImages(work, work->activeBox);
+        PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 1);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+        cb = PCBox_UpdateScrollToNextBox;
+    }
+    return PCBox_WaitForUpdateFunc(work, cb, PC_BOX_STATE_START_DEPOSIT_MOVE);
+}
+
+enum PCBoxState PCBox_State_StartDepositMove(PCBoxWork *work) {
+    work->partyLayout = 2;
+    PCBox_AllocMoveWork(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateMoveToFirstEmptySlot, PC_BOX_STATE_END_DEPOSIT_MOVE);
+}
+
+enum PCBoxState PCBox_State_EndDepositMove(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork = work->view->temp;
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    PCBox_RevertShayminFormOnMove(work, moveWork->from, moveWork->to);
+    PCBox_FreeMoveWork(work);
+    PCBox_ShiftPartyPanelLeft(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlideFunc, PC_BOX_STATE_SHOW_DEPOSIT_RETURN_BUTTON);
+}
+
+enum PCBoxState PCBox_State_ShowDepositReturnButton(PCBoxWork *work) {
+    PCBox_DrawReturnButton(work, 0);
+    PCBox_SlideInReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitReturnButtonSlide, PC_BOX_STATE_RESET_DEPOSIT_INPUT);
+}
+
+enum PCBoxState PCBox_State_ResetDepositInput(PCBoxWork *work) {
+    PCBox_CreateGridInput(work, 0, 0);
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+    PCBox_ShowSlotMonInfo(work, PC_BOX_SLOT_PARTY_START);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndDepositDrag(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork = work->view->temp;
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_ApplyMonMove(work);
+    PCBox_RevertShayminFormOnMove(work, moveWork->from, moveWork->to);
+    PCBox_FreeMoveWork(work);
+    PCBox_ClearWindowFrameNoTransfer(work->view, 0x28);
+    if (work->selectedSlot == PC_BOX_SLOT_NONE) {
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        GridInputHandler_SetNextInput(work->view->gridInput, 0);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ShowSlotMonInfo(work, PC_BOX_SLOT_PARTY_START);
+    } else {
+        PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+        GridInputHandler_SetNextInput(work->view->gridInput, 7);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    }
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToMoveMode(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_MOVE_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToBoxTray(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToMoveModeParty(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToDeposit(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToDepositPrompt(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+    return PC_BOX_STATE_DEPOSIT_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToDepositBox(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_DEPOSIT_BOX_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToMarkingMenu(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_MARKING_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToBoxMenu(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_BOX_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToWallpaperMenu(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_WALLPAPER_MENU_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToWithdraw(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_WITHDRAW_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToWithdrawPrompt(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+    return PC_BOX_STATE_WITHDRAW_INPUT;
+}
+
+enum PCBoxState PCBox_State_ItemModeInput(PCBoxWork *work) {
+    u32 slot = PCBox_FindTouchedBoxSlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            PCBox_ShowSlotMonInfo(work, slot);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartItemModeBoxDrag(work, slot);
+        }
+        if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            slot = work->selectedSlot;
+            PCBox_StartCursorSlide(work->view, slot, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, slot);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInPartyButton(work->view->panels);
+            PCBox_SlideInTrayTab(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_HideSelectedIconOutline(work);
+            if (work->view->heldItem != ITEM_NONE) {
+                PCBox_SlideOutItemInfoPanel(work->view->panels);
+            }
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeDeselect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)slot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ClearMonInfo(work);
+        return PC_BOX_STATE_ITEM_MODE_INPUT;
+    }
+    slot = PCBox_GetItemModeMenuInput(work);
+    switch (slot) {
+    case 0x1e:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        return PCBox_StartBoxMenu(work);
+    case 0x1f:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 0x1e);
+        return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_ITEM_MODE_INPUT);
+    case 0x20:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        GridInputHandler_SetNextInput(work->view->gridInput, 0x1e);
+        return PCBox_ScrollToNextBox(work, PC_BOX_STATE_ITEM_MODE_INPUT);
+    case 0x21:
+        PlaySE(SEQ_SE_DP_OPEN7);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_PARTY_BUTTON, PC_BOX_STATE_ITEM_MODE_CHOOSE_PARTY);
+    case 0x22:
+        PlaySE(SEQ_SE_DP_OPEN7);
+        return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_TRAY_TAB, PC_BOX_STATE_ITEM_MODE_CHOOSE_TRAY_TAB);
+    case 0x24:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_BAG_GIVE);
+    case 0x25:
+        PlaySE(SEQ_SE_DP_SELECT);
+        slot = work->selectedSlot;
+        PCBox_StartCursorSlide(work->view, slot, GridInputHandler_GetNextInput(work->view->gridInput));
+        GridInputHandler_SetNextInput(work->view->gridInput, slot);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_ITEM_MODE_ACTION_MENU);
+    case GRID_MENU_NOTHING_CHOSEN:
+        if (GridInputHandler_GetNextInput(work->view->gridInput) == 0x1e) {
+            if (gSystem.newKeys & PAD_KEY_LEFT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToPrevBox(work, PC_BOX_STATE_ITEM_MODE_INPUT);
+            }
+            if (gSystem.newKeys & PAD_KEY_RIGHT) {
+                PlaySE(SEQ_SE_DP_SELECT);
+                PCBox_ClearMonInfoAndSelection(work);
+                return PCBox_ScrollToNextBox(work, PC_BOX_STATE_ITEM_MODE_INPUT);
+            }
+        }
+        break;
+    case GRID_MENU_CURSOR_MOVE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input < 0x1e) {
+            PCBox_ShowSlotMonInfo(work, input);
+        } else if (input != 0x24 && input != 0x25) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE);
+    }
+    case 0x23:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfo(work);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_EXIT);
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_ASK_CONTINUE);
+    case GRID_MENU_BUTTON_MODE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input < 0x1e) {
+            PCBox_ShowSlotMonInfo(work, input);
+        } else if (input != 0x24 && input != 0x25) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    }
+    default:
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PCBox_ShowSlotMonInfo(work, slot);
+            PCBox_StartCursorSlide(work->view, 0x24, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, 0x24);
+            return PCBox_SelectItemModeBoxMon(work, slot);
+        }
+        break;
+    }
+    return PC_BOX_STATE_ITEM_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_CloseItemMessage(PCBoxWork *work) {
+    if (PCBox_IsSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        PCBox_HideSelectedIconOutline(work);
+        PCBox_SetHeldItemIconAffine(work->view, 1);
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+        PCBox_SlideOutItemInfoPanel(work->view->panels);
+    }
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    PCBox_SlideInReturnButton(work->view->panels);
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        PCBox_SlideInPartyButton(work->view->panels);
+        PCBox_SlideInTrayTab(work->view->panels);
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+    } else {
+        PCBox_SetIconsTranslucent(work, 0x82, 1);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_END_ITEM_COMMAND);
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToItemMode(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_ITEM_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_AskPutAwayItem(PCBoxWork *work) {
+    u8 x;
+    u8 y;
+    u16 idx;
+    if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START && ItemIdIsMail(work->view->heldItem) == TRUE) {
+        idx = (u16)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)idx);
+        DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, idx), &x, &y);
+        ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_MAIL_CANT_BE_TAKEN, 0x25);
+        work->nextState = PC_BOX_STATE_CLOSE_ITEM_MESSAGE;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_PUT_AWAY, 0x25);
+    return PCBox_ShowYesNo(work, 2);
+}
+
+enum PCBoxState PCBox_State_WaitPutAwayItem(PCBoxWork *work) {
+    u8 x;
+    u8 y;
+    u16 idx;
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 0) {
+        idx = work->selectedSlot;
+        if (idx >= PC_BOX_SLOT_PARTY_START) {
+            idx = (u16)(idx - PC_BOX_SLOT_PARTY_START);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)idx);
+        DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, idx), &x, &y);
+        ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+        PCBox_SetHeldItemIconAffine(work->view, 0);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_PLACED_IN_BAG, 0x25);
+        PCBox_DrawBagGiveButton(work, 0);
+        work->view->heldItem = ITEM_NONE;
+        work->nextState = PC_BOX_STATE_CLOSE_ITEM_MESSAGE;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    return PC_BOX_STATE_WAIT_PUT_AWAY_ITEM;
+}
+
+enum PCBoxState PCBox_State_CancelPutAwayItem(PCBoxWork *work) {
+    u8 x;
+    u8 y;
+    u16 idx = work->selectedSlot;
+    if (idx < PC_BOX_SLOT_PARTY_START) {
+        PCBox_SlideInPartyButton(work->view->panels);
+        PCBox_SlideInTrayTab(work->view->panels);
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+    } else {
+        idx = (u16)(idx - PC_BOX_SLOT_PARTY_START);
+        PCBox_SetIconsTranslucent(work, 0x82, 1);
+    }
+    PCBox_SlideInReturnButton(work->view->panels);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)idx);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, idx), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    PCBox_SlideOutItemInfoPanel(work->view->panels);
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        PCBox_SetIconsTranslucent(work, 0x81, 1);
+    } else {
+        PCBox_SetIconsTranslucent(work, 0x82, 1);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_END_ITEM_COMMAND);
+}
+
+enum PCBoxState PCBox_State_EndItemCommand(PCBoxWork *work) {
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        return PC_BOX_STATE_END_ITEM_COMMAND;
+    }
+    PCBox_SetHeldItemIconAffine(work->view, 0);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    if (work->selectedSlot >= PC_BOX_SLOT_PARTY_START) {
+        return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+    }
+    return PC_BOX_STATE_ITEM_MODE_INPUT;
+}
+
+enum PCBoxState PCBox_State_ItemModePrintEggCantHoldItem(PCBoxWork *work) {
+    u8 x;
+    u8 y;
+    u16 idx = work->selectedSlot;
+    if (idx >= PC_BOX_SLOT_PARTY_START) {
+        idx -= PC_BOX_SLOT_PARTY_START;
+    }
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)idx);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, idx), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PlaySE(SEQ_SE_DP_BOX03);
+    PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_EGG_CANT_HOLD, 0x25);
+    work->nextState = PC_BOX_STATE_CLOSE_ITEM_MESSAGE;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_ItemModePrintItemHeld(PCBoxWork *work) {
+    u8 x;
+    u8 y;
+    u16 idx = work->selectedSlot;
+    if (idx >= PC_BOX_SLOT_PARTY_START) {
+        idx -= PC_BOX_SLOT_PARTY_START;
+    }
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)idx);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, idx), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PCBox_PrintItemHeld(work, work->itemId, 0x25);
+    work->nextState = PC_BOX_STATE_CLOSE_ITEM_MESSAGE;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_EndItemModeBoxDrag(PCBoxWork *work) {
+    PCBoxHeldItemMove *blk = work->view->temp;
+    if (blk->toSlot == work->selectedSlot || work->view->heldItem == ITEM_NONE) {
+        PCBox_FreeHeldItemMove(work);
+        if (work->view->heldItem != ITEM_NONE) {
+            PlaySE(SEQ_SE_DP_BOX01);
+            PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, 0x24);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PC_BOX_STATE_ITEM_MODE_INPUT;
+    }
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_SetSlotIconTranslucent(work->view, blk->toSlot, 0);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    return PC_BOX_STATE_SWAP_HELD_ITEMS;
+}
+
+enum PCBoxState PCBox_State_SwapHeldItems(PCBoxWork *work) {
+    PCBoxHeldItemMove *blk;
+    u16 held;
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        return PC_BOX_STATE_SWAP_HELD_ITEMS;
+    }
+    PCBox_SetHeldItemIconAffine(work->view, 0);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    blk = work->view->temp;
+    held = (u16)PCBox_GetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_SetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, blk->toSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, blk->toSlot, work->view->slotIcons[blk->toSlot]);
+    }
+    PCBox_ShowSlotMonInfo(work, blk->toSlot);
+    work->view->heldItem = held;
+    PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+    }
+    if (work->view->heldItem == ITEM_NONE) {
+        work->selectedSlot = (u8)blk->toSlot;
+        PCBox_FreeHeldItemMove(work);
+        PCBox_SlideInPartyButton(work->view->panels);
+        PCBox_SlideInTrayTab(work->view->panels);
+        PCBox_SlideInReturnButton(work->view->panels);
+        GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_ITEM_MODE_INPUT);
+    }
+    PlaySE(SEQ_SE_DP_BOX02);
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 1);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, TRUE);
+    PCBox_CreateHeldItemIconOutline(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateSwappedItemMove, PC_BOX_STATE_DROP_SWAPPED_ITEM);
+}
+
+enum PCBoxState PCBox_State_DropSwappedItem(PCBoxWork *work) {
+    PCBoxHeldItemMove *heldItemMove = work->view->temp;
+    PCBox_SetSlotIconTranslucent(work->view, heldItemMove->toSlot, 0);
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    work->selectedSlot = heldItemMove->toSlot;
+    PCBox_FreeHeldItemMove(work);
+    return PC_BOX_STATE_FINISH_ITEM_SWAP;
+}
+
+enum PCBoxState PCBox_State_FinishItemSwap(PCBoxWork *work) {
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        return PC_BOX_STATE_FINISH_ITEM_SWAP;
+    }
+    PCBox_SetHeldItemIconAffine(work->view, 0);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_ITEM_MODE_INPUT);
+}
+
+enum PCBoxState PCBox_State_ItemModeBoxTrayInput(PCBoxWork *work) {
+    u32 slot = PCBox_FindTouchedTrayPartySlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PCBox_ShowSlotMonInfo(work, slot + PC_BOX_SLOT_PARTY_START);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartItemTrayDrag(work, slot + PC_BOX_SLOT_PARTY_START);
+        }
+        PCBox_ClearMonInfo(work);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(slot + 0x1e));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    slot = PCBox_FindTouchedBoxSlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PCBox_ShowSlotMonInfo(work, slot);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartItemTrayDrag(work, slot);
+        }
+        PCBox_ClearMonInfo(work);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)slot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    if (PCBox_IsSummaryShortcutPressed(work) == 1) {
+        slot = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            work->selectedSlot = (u8)slot;
+            work->summaryFromTray = 1;
+            return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_SUMMARY_BUTTON, PC_BOX_STATE_CHOOSE_SUMMARY);
+        }
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    slot = PCBox_GetBoxTrayInput(work);
+    switch (slot) {
+    case 0x25:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 0);
+    case 0x26:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 1);
+    case 0x27:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 2);
+    case 0x28:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 3);
+    case 0x29:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 4);
+    case 0x2a:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        PCBox_ClearMonInfoAndSelection(work);
+        return PCBox_SelectTrayBox(work, 5);
+    case 0x2b:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_ChangeTrayPage(work, -1);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    case 0x2c:
+        PlaySE(SEQ_SE_DP_SELECT);
+        PCBox_ClearMonInfoAndSelection(work);
+        PCBox_ChangeTrayPage(work, 1);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+        }
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    case 0x2d:
+        PlaySE(SEQ_SE_DP_SELECT);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_CHANGE_BOX_BUTTON, PC_BOX_STATE_ITEM_MODE_CHOOSE_TRAY_BOX);
+    case GRID_MENU_CURSOR_MOVE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input < 0x24) {
+            if (PCBox_ShowSlotMonInfo(work, input) == TRUE) {
+                if (PCBox_IsSummaryButtonShown(work->view->panels) == 0) {
+                    PCBox_DrawSummaryButton(work, 0);
+                    PCBox_SlideInSummaryButton(work->view->panels);
+                }
+            } else if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        } else {
+            PCBox_ClearMonInfo(work);
+            if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        if (work->view->pendingUpdateFunc != NULL) {
+            return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE_TRAY);
+        }
+        break;
+    }
+    case 0x24:
+        PlaySE(SEQ_SE_DP_CLOSE7);
+        return PCBox_FlashPartyPanelButton(work, 1, PC_BOX_STATE_CHOOSE_TRAY_EXIT);
+    case GRID_MENU_CANCEL:
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 0) {
+            PlaySE(SEQ_SE_DP_CLOSE7);
+            return PCBox_FlashPartyPanelButton(work, 1, PC_BOX_STATE_CHOOSE_TRAY_EXIT);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+    default:
+        if (PCBox_GetSlotMonData(work, slot, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PCBox_ShowSlotMonInfo(work, slot);
+            return PCBox_PickUpTrayItem(work, slot);
+        }
+        break;
+    case GRID_MENU_BUTTON_MODE:
+    case GRID_MENU_NOTHING_CHOSEN:
+        break;
+    }
+    return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToItemModeTray(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndItemTrayDrag(PCBoxWork *work) {
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SlideOutItemInfoPanel(work->view->panels);
+    return PC_BOX_STATE_APPLY_ITEM_TRAY_DROP;
+}
+
+enum PCBoxState PCBox_State_ApplyItemTrayDrop(PCBoxWork *work) {
+    PCBoxHeldItemMove *blk = work->view->temp;
+    u16 prev;
+    u16 held;
+    if (BgCellManager_IsCellMoving(work->view->panels, PC_BOX_PANEL_INFO)) {
+        return PC_BOX_STATE_APPLY_ITEM_TRAY_DROP;
+    }
+    if (blk->toSlot == work->selectedSlot) {
+        prev = blk->fromSlot;
+        PCBox_FreeHeldItemMove(work);
+        PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+        GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+        if (ItemIdIsMail(work->view->heldItem) == TRUE && prev != work->selectedSlot) {
+            PlaySE(SEQ_SE_DP_BOX03);
+            PCBox_PrintMailCantBeMoved(work, 0x25);
+            work->nextState = PC_BOX_STATE_RESUME_ITEM_MODE_TRAY_INPUT;
+            return PC_BOX_STATE_WAIT_BUTTON;
+        }
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    PCBox_SetSlotIconTranslucent(work->view, blk->toSlot, 0);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+    held = (u16)PCBox_GetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_SetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, blk->toSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, blk->toSlot, work->view->slotIcons[blk->toSlot]);
+    }
+    PCBox_ShowSlotMonInfo(work, blk->toSlot);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)blk->toSlot);
+    work->view->heldItem = held;
+    PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+    }
+    if (work->view->heldItem == ITEM_NONE) {
+        work->selectedSlot = (u8)blk->toSlot;
+        PCBox_FreeHeldItemMove(work);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 1);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, TRUE);
+    PCBox_CreateHeldItemIconOutline(work->view);
+    PlaySE(SEQ_SE_DP_BOX02);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTraySwappedItemMove, PC_BOX_STATE_FINISH_ITEM_TRAY_DROP);
+}
+
+enum PCBoxState PCBox_State_FinishItemTrayDrop(PCBoxWork *work) {
+    PCBoxHeldItemMove *heldItemMove = work->view->temp;
+    u16 item;
+    u8 old;
+    u16 prev;
+    PCBox_SetSlotIconTranslucent(work->view, heldItemMove->toSlot, 0);
+    old = work->selectedSlot;
+    prev = heldItemMove->fromSlot;
+    work->selectedSlot = heldItemMove->toSlot;
+    PCBox_FreeHeldItemMove(work);
+    item = work->view->heldItem;
+    work->view->heldItem = ITEM_NONE;
+    if (ItemIdIsMail(item) == TRUE && prev != old) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, FALSE);
+        PCBox_PrintMailCantBeMoved(work, 0x25);
+        work->nextState = PC_BOX_STATE_RESUME_ITEM_MODE_TRAY_INPUT;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_ResumeItemModeTrayInput(PCBoxWork *work) {
+    PCBox_ClearWindowFrame(work->view, 0x25);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+}
+
+enum PCBoxState PCBox_State_ItemTrayHoldingInput(PCBoxWork *work) {
+    u32 input = PCBox_GetItemTrayHoldingInput(work);
+    if (!GridInputHandler_IsButtonInputMode(work->view->gridInput)) {
+        input = -2;
+    }
+    switch (input) {
+    case GRID_MENU_CURSOR_MOVE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_TRAY_HOLDING);
+    case GRID_MENU_BUTTON_MODE:
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    case GRID_MENU_CANCEL:
+    case 0x24:
+        PlaySE(SEQ_SE_DP_BOX01);
+        return PCBox_DropTrayItem(work, PC_BOX_SLOT_NONE);
+    default:
+        PlaySE(SEQ_SE_DP_BOX01);
+        return PCBox_DropTrayItem(work, input);
+    case GRID_MENU_NOTHING_CHOSEN:
+        break;
+    }
+    return PC_BOX_STATE_ITEM_TRAY_HOLDING_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToItemTrayHolding(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_ITEM_TRAY_HOLDING_INPUT;
+}
+
+enum PCBoxState PCBox_State_ApplyItemTrayHoldingDrop(PCBoxWork *work) {
+    u16 held;
+    u32 window;
+    PCBox_SetSlotIconTranslucent(work->view, work->view->dropTarget, 0);
+    if (work->view->dropTarget == work->view->itemFromSlot) {
+        work->view->heldItem = ITEM_NONE;
+        PCBox_ShowSlotMonInfo(work, work->view->dropTarget);
+        PCBox_SlideInSummaryButton(work->view->panels);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitTrayButtonsSlide, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+    }
+    held = (u16)PCBox_GetSlotMonData(work, work->view->dropTarget, MON_DATA_HELD_ITEM, NULL);
+    PCBox_SetSlotMonData(work, work->view->dropTarget, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->view->dropTarget)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->view->dropTarget, work->view->slotIcons[work->view->dropTarget]);
+    }
+    PCBox_ShowSlotMonInfo(work, work->view->dropTarget);
+    work->view->heldItem = held;
+    PCBox_SetSlotMonData(work, work->view->itemFromSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->view->itemFromSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->view->itemFromSlot, work->view->slotIcons[work->view->itemFromSlot]);
+    }
+    if (work->view->heldItem == ITEM_NONE) {
+        PCBox_SlideInSummaryButton(work->view->panels);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitTrayButtonsSlide, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+    }
+    work->view->cursorHolding = 1;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_PlaceHeldItemIconAtSlot(work->view, work->view->dropTarget, 2);
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    window = PCBox_PrintItemNameAndDesc(work, work->view->heldItem);
+    BgCellManager_PutWindowTiles(work->view->panels, PC_BOX_PANEL_INFO, &work->view->windows[window]);
+    BgCellManager_PutWindowTiles(work->view->panels, PC_BOX_PANEL_INFO, &work->view->windows[window + 1]);
+    PCBox_LoadInfoItemIcon(work->view, work->view->heldItem);
+    PCBox_SlideInItemInfoPanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayItemPickUp, PC_BOX_STATE_ITEM_TRAY_HOLDING_INPUT);
+}
+
+enum PCBoxState PCBox_State_ItemModePartyInput(PCBoxWork *work) {
+    u32 slot = PCBox_FindTouchedPartySlot();
+    if (slot != TOUCH_MENU_NO_INPUT) {
+        if (PCBox_GetSlotMonData(work, slot + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_BOX02);
+            System_GetTouchNewCoords(&work->view->touchX, &work->view->touchY);
+            PCBox_ShowSlotMonInfo(work, slot + PC_BOX_SLOT_PARTY_START);
+            PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+            return PCBox_StartItemModePartyDrag(work, slot + PC_BOX_SLOT_PARTY_START);
+        }
+        if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+            slot = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+            PCBox_StartCursorSlide(work->view, slot, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, slot);
+            PCBox_SlideOutActionMenu(work->view->panels);
+            PCBox_SlideInReturnButton(work->view->panels);
+            PCBox_HideSelectedIconOutline(work);
+            if (work->view->heldItem != ITEM_NONE) {
+                PCBox_SlideOutItemInfoPanel(work->view->panels);
+            }
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeDeselect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE_PARTY);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)slot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        PCBox_ClearMonInfo(work);
+        return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+    }
+    slot = PCBox_GetItemModePartyMenuInput(work);
+    switch (slot) {
+    case 6:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPartyPanelButton(work, 0, PC_BOX_STATE_ITEM_MODE_PARTY_CHOOSE_TRAY);
+    case 8:
+        PlaySE(SEQ_SE_DP_DECIDE);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_ROW_4, PC_BOX_STATE_CHOOSE_BAG_GIVE);
+    case GRID_MENU_CURSOR_MOVE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input <= 5) {
+            PCBox_ShowSlotMonInfo(work, input + PC_BOX_SLOT_PARTY_START);
+        } else if (input != 8 && input != 9) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE_PARTY);
+    }
+    case 7:
+    case GRID_MENU_CANCEL:
+        PlaySE(SEQ_SE_DP_CLOSE7);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_CHOOSE_PARTY_PANEL_EXIT);
+    case 9:
+        PlaySE(SEQ_SE_DP_SELECT);
+        slot = (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START);
+        PCBox_StartCursorSlide(work->view, slot, GridInputHandler_GetNextInput(work->view->gridInput));
+        GridInputHandler_SetNextInput(work->view->gridInput, slot);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_MENU_EXIT_BUTTON, PC_BOX_STATE_CLOSE_ITEM_MODE_PARTY_ACTION_MENU);
+    case GRID_MENU_BUTTON_MODE: {
+        u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (input <= 5) {
+            PCBox_ShowSlotMonInfo(work, input + PC_BOX_SLOT_PARTY_START);
+        } else if (input != 8 && input != 9) {
+            PCBox_ClearMonInfo(work);
+        }
+        PlaySE(SEQ_SE_DP_SELECT);
+        break;
+    }
+    default:
+        if (PCBox_GetSlotMonData(work, slot + PC_BOX_SLOT_PARTY_START, MON_DATA_SPECIES_EXISTS, NULL)) {
+            PlaySE(SEQ_SE_DP_DECIDE);
+            PCBox_ShowSlotMonInfo(work, slot + PC_BOX_SLOT_PARTY_START);
+            PCBox_StartCursorSlide(work->view, 8, GridInputHandler_GetNextInput(work->view->gridInput));
+            GridInputHandler_SetNextInput(work->view->gridInput, 8);
+            return PCBox_SelectItemModePartyMon(work, slot + PC_BOX_SLOT_PARTY_START);
+        }
+        break;
+    case GRID_MENU_NOTHING_CHOSEN:
+        break;
+    }
+    return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToItemModeParty(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_EndItemModePartyDrag(PCBoxWork *work) {
+    PCBoxHeldItemMove *blk = work->view->temp;
+    u16 prev;
+    if (blk->toSlot == work->selectedSlot || work->view->heldItem == ITEM_NONE) {
+        prev = blk->fromSlot;
+        PCBox_FreeHeldItemMove(work);
+        if (work->view->partyPanelLowered == 0) {
+            if (ItemIdIsMail(work->view->heldItem) == TRUE && prev != work->selectedSlot) {
+                PlaySE(SEQ_SE_DP_BOX03);
+                BgCellManager_EraseCell(work->view->panels, PC_BOX_PANEL_MENU_ROW_4);
+                PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+                PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_MAIL_CANT_BE_MOVED, 0x28);
+                work->nextState = PC_BOX_STATE_RESUME_ITEM_MODE_PARTY_AFTER_MAIL;
+                return PC_BOX_STATE_WAIT_BUTTON;
+            }
+        } else {
+            PCBox_CloseMessageWindow(work->view, 0x28);
+            work->view->partyPanelLowered = 0;
+        }
+        if (work->view->heldItem != ITEM_NONE) {
+            PlaySE(SEQ_SE_DP_BOX01);
+            PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+        }
+        GridInputHandler_SetNextInput(work->view->gridInput, 8);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+    }
+    PCBox_CloseMessageWindow(work->view, 0x28);
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_SetSlotIconTranslucent(work->view, blk->toSlot, 0);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    return PC_BOX_STATE_SWAP_PARTY_HELD_ITEMS;
+}
+
+enum PCBoxState PCBox_State_SwapPartyHeldItems(PCBoxWork *work) {
+    PCBoxHeldItemMove *blk;
+    u16 held;
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        return PC_BOX_STATE_SWAP_PARTY_HELD_ITEMS;
+    }
+    PCBox_SetHeldItemIconAffine(work->view, 0);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    blk = work->view->temp;
+    held = (u16)PCBox_GetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_SetSlotMonData(work, blk->toSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, blk->toSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, blk->toSlot, work->view->slotIcons[blk->toSlot]);
+    }
+    PCBox_ShowSlotMonInfo(work, blk->toSlot);
+    work->view->heldItem = held;
+    PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &work->view->heldItem);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+    }
+    if (work->view->heldItem == ITEM_NONE) {
+        if (work->view->partyPanelLowered == 0) {
+            work->selectedSlot = (u8)blk->toSlot;
+            PCBox_FreeHeldItemMove(work);
+            GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START));
+            PCBox_SlideInReturnButton(work->view->panels);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_RESUME_ITEM_MODE_PARTY_INPUT);
+        }
+        work->view->partyPanelLowered = 0;
+        PCBox_FreeHeldItemMove(work);
+        GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START));
+        PCBox_SlideInPartyPanel(work->view->panels);
+        PCBox_SetIconsTranslucent(work, 1, 1);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlide, PC_BOX_STATE_RESUME_ITEM_MODE_PARTY_INPUT);
+    }
+    PlaySE(SEQ_SE_DP_BOX02);
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 1);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, TRUE);
+    PCBox_CreateHeldItemIconOutline(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimatePartySwappedItemMove, PC_BOX_STATE_DROP_SWAPPED_PARTY_ITEM);
+}
+
+enum PCBoxState PCBox_State_ResumeItemModePartyInput(PCBoxWork *work) {
+    PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_DropSwappedPartyItem(PCBoxWork *work) {
+    PCBoxHeldItemMove *heldItemMove = work->view->temp;
+    PCBox_SetSlotIconTranslucent(work->view, heldItemMove->toSlot, 0);
+    PlaySE(SEQ_SE_DP_BOX01);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        work->selectedSlot = heldItemMove->toSlot;
+    }
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->selectedSlot - PC_BOX_SLOT_PARTY_START));
+    PCBox_FreeHeldItemMove(work);
+    return PC_BOX_STATE_FINISH_PARTY_ITEM_SWAP;
+}
+
+enum PCBoxState PCBox_State_FinishPartyItemSwap(PCBoxWork *work) {
+    if (PCBox_IsSpriteAnimated(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        return PC_BOX_STATE_FINISH_PARTY_ITEM_SWAP;
+    }
+    PCBox_SetHeldItemIconAffine(work->view, 0);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_SlideInReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_RESUME_ITEM_MODE_PARTY_INPUT);
+}
+
+enum PCBoxState PCBox_State_ResumeItemModePartyAfterMail(PCBoxWork *work) {
+    PCBox_CloseMessageWindow(work->view, 0x28);
+    BgCellManager_DrawCell(work->view->panels, PC_BOX_PANEL_MENU_ROW_4);
+    GridInputHandler_SetNextInput(work->view->gridInput, 8);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_ITEM_MODE_PARTY_INPUT;
+}
+
+enum PCBoxState PCBox_State_PrintEggCantHoldItem(PCBoxWork *work) {
+    PlaySE(SEQ_SE_DP_BOX03);
+    PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_EGG_CANT_HOLD, 0x25);
+    work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_State_PrintMailCantBeTaken(PCBoxWork *work) {
+    PlaySE(SEQ_SE_DP_BOX03);
+    PCBox_PrintMailCantBeTaken(work, 0x25);
+    work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+static enum PCBoxState PCBox_StartFadeIn(PCBoxWork *work, enum PCBoxState nextState) {
+    BeginNormalPaletteFade(FADE_BOTH_SCREENS, FADE_TYPE_BRIGHTNESS_IN, FADE_TYPE_BRIGHTNESS_IN, 0, 6, 1, HEAP_ID_10);
+    work->view->fadeNextState = nextState;
+    return PC_BOX_STATE_WAIT_FADE;
+}
+
+static enum PCBoxState PCBox_StartFadeOut(PCBoxWork *work, enum PCBoxState nextState) {
+    BeginNormalPaletteFade(FADE_BOTH_SCREENS, FADE_TYPE_BRIGHTNESS_OUT, FADE_TYPE_BRIGHTNESS_OUT, 0, 6, 1, HEAP_ID_10);
+    work->view->fadeNextState = nextState;
+    return PC_BOX_STATE_WAIT_FADE;
+}
+
+static enum PCBoxState PCBox_WaitForUpdateFunc(PCBoxWork *work, PCBoxUpdateFunc cb, enum PCBoxState next) {
+    work->nextState = next;
+    PCBox_SetUpdateFunc(work->view, cb);
+    return PC_BOX_STATE_WAIT_UPDATE_FUNC;
+}
+
+static enum PCBoxState PCBox_WaitForPendingUpdateFunc(PCBoxWork *work, enum PCBoxState next) {
+    work->nextState = next;
+    PCBox_StartPendingUpdateFunc(work->view);
+    return PC_BOX_STATE_WAIT_UPDATE_FUNC;
+}
+
+static enum PCBoxState PCBox_ShowYesNo(PCBoxWork *work, int state) {
+    if (state == 1) {
+        PCBox_ShowYesNoPrompt(work, 1);
+    } else {
+        PCBox_ShowYesNoPrompt(work, 0);
+    }
+    work->view->yesNoHandler = state;
+    return PC_BOX_STATE_HANDLE_YES_NO;
+}
+
+static enum PCBoxState PCBox_StartSubApp(PCBoxWork *work, u32 value) {
+    work->subAppIndex = value;
+    work->nextState = PC_BOX_STATE_START_SUB_APP;
+    return PCBox_StartFadeOut(work, PC_BOX_STATE_TEARDOWN);
+}
+
+static enum PCBoxState PCBox_ScrollToPrevBox(PCBoxWork *work, enum PCBoxState next) {
+    work->activeBox = (work->activeBox == 0) ? NUM_BOXES - 1 : work->activeBox - 1;
+    PCBox_LoadBoxIconImages(work, work->activeBox);
+    PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 0);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_PREV_BOX_ARROW, 2);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+        PCBox_SlideOutActionMenu(work->view->panels);
+        if (work->args->mode == PC_BOX_MODE_MOVE_POKEMON || work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            PCBox_SlideInPartyButton(work->view->panels);
+            PCBox_SlideInTrayTab(work->view->panels);
+        }
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateScrollToPrevBox, next);
+}
+
+static enum PCBoxState PCBox_ScrollToNextBox(PCBoxWork *work, enum PCBoxState next) {
+    work->activeBox = (work->activeBox == NUM_BOXES - 1) ? 0 : work->activeBox + 1;
+    PCBox_LoadBoxIconImages(work, work->activeBox);
+    PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_NEXT_BOX_ARROW, 4);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+        PCBox_SlideOutActionMenu(work->view->panels);
+        if (work->args->mode == PC_BOX_MODE_MOVE_POKEMON || work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+            PCBox_SlideInPartyButton(work->view->panels);
+            PCBox_SlideInTrayTab(work->view->panels);
+        }
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateScrollToNextBox, next);
+}
+
+static enum PCBoxState PCBox_StartMoveModeBoxDrag(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, FALSE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_AllocMoveWork(work);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+        PCBox_SlideOutPartyButton(work->view->panels);
+        PCBox_SlideOutTrayTab(work->view->panels);
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    PCBox_SlideOutActionMenu(work->view->panels);
+    work->partyLayout = 0;
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateMoveModeBoxDrag, PC_BOX_STATE_APPLY_MON_MOVE);
+}
+
+static enum PCBoxState PCBox_StartWithdrawDrag(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, FALSE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_PlacePartyIconsRightHidden(work);
+    PCBox_SetIconsTranslucent(work, 1, 1);
+    PCBox_SetIconsTranslucent(work, 2, 1);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+    PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+    if (Party_GetCount(work->party) != 6) {
+        PCBox_PrintPanelHint(work, 0x28, 1);
+    } else {
+        PCBox_PrintPanelHint(work, 0x28, 3);
+    }
+    PCBox_AllocMoveWork(work);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    work->partyLayout = 2;
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateWithdrawDrag, PC_BOX_STATE_END_WITHDRAW_DRAG);
+}
+
+static enum PCBoxState PCBox_SelectWithdrawMon(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, TRUE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    PCBox_SlideInMovesPanel(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitSelectWithActionMenu, PC_BOX_STATE_END_CURSOR_SLIDE_TO_WITHDRAW);
+}
+
+static enum PCBoxState PCBox_SelectMoveModeBoxMon(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, TRUE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutPartyButton(work->view->panels);
+    PCBox_SlideOutTrayTab(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    PCBox_SlideInMovesPanel(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitSelectWithActionMenuAndButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE);
+}
+
+static enum PCBoxState PCBox_StartMoveModePartyDrag(PCBoxWork *work, u32 idx) {
+    Pokemon *mon;
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, FALSE);
+    PCBox_CreateSelectedIconOutline(work);
+    mon = Party_GetMonByIndex(work->party, idx - PC_BOX_SLOT_PARTY_START);
+    if (!PCBox_PartyHasOtherUsableMon(work, idx - PC_BOX_SLOT_PARTY_START) && PCStorage_CountMonsInBox(work->storage, work->activeBox) == 0) {
+        PCBox_PrintPanelHint(work, 0x28, 8);
+    } else if (ItemIdIsMail(GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+        PCBox_PrintPanelHint(work, 0x28, 6);
+    } else if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+        PCBox_PrintPanelHint(work, 0x28, 7);
+    } else {
+        PCBox_PrintPanelHint(work, 0x28, 0);
+    }
+    PCBox_AllocMoveWork(work);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    work->partyLayout = 1;
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateMoveModePartyDrag, PC_BOX_STATE_END_MOVE_MODE_PARTY_DRAG);
+}
+
+static enum PCBoxState PCBox_StartDepositDrag(PCBoxWork *work, u32 idx) {
+    Pokemon *mon;
+    u32 i;
+    work->selectedSlot = idx;
+    for (i = PC_BOX_SLOT_PARTY_START; i < PC_BOX_SLOT_COUNT; i++) {
+        if (i == work->selectedSlot) {
+            PCBox_SetIconLayer(work->view, i, FALSE);
+        } else {
+            PCBox_SetIconLayer(work->view, i, TRUE);
+        }
+    }
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_SetIconsTranslucent(work, 2, 1);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 0);
+    PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+    mon = Party_GetMonByIndex(work->party, idx - PC_BOX_SLOT_PARTY_START);
+    if (!PCBox_PartyHasOtherUsableMon(work, idx - PC_BOX_SLOT_PARTY_START)) {
+        PCBox_PrintPanelHint(work, 0x28, 8);
+    } else if (ItemIdIsMail(GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+        PCBox_PrintPanelHint(work, 0x28, 6);
+    } else if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+        PCBox_PrintPanelHint(work, 0x28, 7);
+    } else if (PCStorage_CountEmptySpotsInBox(work->storage, work->activeBox) == 0) {
+        PCBox_PrintPanelHint(work, 0x28, 2);
+    } else {
+        PCBox_PrintPanelHint(work, 0x28, 0);
+    }
+    PCBox_AllocMoveWork(work);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    work->partyLayout = 1;
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateDepositDrag, PC_BOX_STATE_END_DEPOSIT_DRAG);
+}
+
+static enum PCBoxState PCBox_SelectDepositMon(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, TRUE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_PrintMonActionMessage(work, work->selectedSlot, PC_BOX_MON_MSG_SELECTED, 0x27);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    PCBox_SlideInMovesPanel(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitSelectWithActionMenu, PC_BOX_STATE_END_CURSOR_SLIDE_TO_DEPOSIT);
+}
+
+static enum PCBoxState PCBox_SelectMoveModePartyMon(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, TRUE);
+    PCBox_CreateSelectedIconOutline(work);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    PCBox_SlideInMovesPanel(work->view);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitSelectWithActionMenuAndButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE_PARTY);
+}
+
+static enum PCBoxState PCBox_StartBoxTrayDrag(PCBoxWork *work, u32 idx) {
+    work->selectedSlot = idx;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, FALSE);
+    PCBox_CreateSelectedIconOutline(work);
+    if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutChangeBoxButton(work->view->panels);
+    } else if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutSummaryButton(work->view->panels);
+    }
+    PCBox_SlideInMovesPanel(work->view);
+    PCBox_DrawSummaryButton(work, 0);
+    PCBox_AllocMoveWork(work);
+    work->partyLayout = 2;
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateBoxTrayDrag, PC_BOX_STATE_END_BOX_TRAY_DRAG);
+}
+
+static void PCBox_AllocMoveWork(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork;
+    u32 i;
+    PCBoxMoveEntry *entry;
+
+    moveWork = Heap_Alloc(HEAP_ID_10, sizeof(PCBoxMoveWork));
+    for (i = 0, entry = moveWork->entries; i < NELEMS(moveWork->entries); i++, entry++) {
+        entry->mon = AllocMonZeroed(HEAP_ID_10);
+    }
+    moveWork->timer = 0;
+    work->view->temp = moveWork;
+}
+
+static void PCBox_FreeMoveWork(PCBoxWork *work) {
+    PCBoxMoveWork *moveWork;
+    u32 i;
+    PCBoxMoveEntry *entry;
+
+    moveWork = work->view->temp;
+    entry = moveWork->entries;
+    for (i = 0; i < 7; i++, entry++) {
+        Heap_Free(entry->mon);
+    }
+    Heap_Free(moveWork);
+}
+
+static enum PCBoxState PCBox_HandleItemCommand(PCBoxWork *work) {
+    u32 item;
+    if (PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_IS_EGG, NULL) != 0) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        PCBox_SlideOutActionMenu(work->view->panels);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_PRINT_EGG_CANT_HOLD_ITEM);
+    }
+    item = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    if (item == ITEM_NONE) {
+        work->returnCursorPos = 0x26;
+        return PCBox_StartSubApp(work, 1);
+    }
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    if (ItemIdIsMail(item) == TRUE) {
+        PCBox_SlideOutActionMenu(work->view->panels);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_PRINT_MAIL_CANT_BE_TAKEN);
+    }
+    PCBox_ResetActionMenu(work->view->panels);
+    PCBox_PrintTakeItemPrompt(work, item, 0x25);
+    return PCBox_ShowYesNo(work, 0);
+}
+
+static enum PCBoxState PCBox_CloseMarkingMenu(PCBoxWork *work) {
+    switch (work->args->mode) {
+    case PC_BOX_MODE_DEPOSIT:
+        PCBox_CreateGridInput(work, 0, 9);
+        break;
+    case PC_BOX_MODE_WITHDRAW:
+        PCBox_CreateGridInput(work, 2, 0x24);
+        break;
+    case PC_BOX_MODE_MOVE_POKEMON:
+    default:
+        if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+            PCBox_CreateGridInput(work, 3, 0x27);
+        } else {
+            PCBox_CreateGridInput(work, 5, 0xb);
+        }
+        break;
+    }
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_CloseMessageWindow(work->view, 0x26);
+    if (work->trayOpen != 0) {
+        PCBox_DrawTrayBoxNameAndCount(work);
+    }
+    if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        PCBox_SetIconsTranslucent(work, 1, 0);
+    }
+    PCBox_SetIconsTranslucent(work, 2, 0);
+    PCBox_SlideOutMarkingMenu(work->view->panels);
+    if (work->args->mode == PC_BOX_MODE_MOVE_POKEMON && work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+        return PCBox_WaitForUpdateFunc(work, PCBox_UpdateMarkingMenuSlide, PC_BOX_STATE_FINISH_CLOSE_MARKING_MENU);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateMarkingMenuSlide, PC_BOX_STATE_RETURN_TO_ACTION_MENU);
+}
+
+static enum PCBoxState PCBox_StartMarking(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuSlide, PC_BOX_STATE_MARKING_CHOSEN);
+}
+
+static enum PCBoxState PCBox_StartRelease(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_TRY_RELEASE);
+}
+
+static enum PCBoxState PCBox_OpenPartyPanel(PCBoxWork *work) {
+    work->partyPanelOpen = 1;
+    PCBox_SetBoxArrowsVisible(work->view, 0);
+    PCBox_SetIconsTranslucent(work, 1, 1);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutPartyButton(work->view->panels);
+    PCBox_SlideOutTrayTab(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_OPEN_PARTY_PANEL);
+}
+
+static enum PCBoxState PCBox_ClosePartyPanel(PCBoxWork *work) {
+    work->partyPanelOpen = 0;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+        return PCBox_State_SlideOutPartyPanel(work);
+    }
+    PCBox_ClearMonInfoAndSelection(work);
+    return PCBox_CloseActionMenuAndWait(work, PC_BOX_STATE_SLIDE_OUT_PARTY_PANEL);
+}
+
+static void PCBox_ShowPartyPanelLeft(PCBoxWork *work) {
+    PCBox_LoadPartyPanelTilemap(work->view->panels, 1);
+    PCBox_AttachPartyPanelLabelWindow(work->view);
+    PCBox_PrintPartyPanelSwitchLabel(work->view);
+    PCBox_HidePartyButtonAndTrayTab(work->view->panels);
+    PCBox_ShowExitButton(work);
+    PCBox_PlacePartyPanelLeft(work->view->panels);
+    PCBox_PlacePartyIconsLeft(work);
+}
+
+static void PCBox_ShowPartyPanelRight(PCBoxWork *work) {
+    PCBox_LoadPartyPanelTilemap(work->view->panels, 1);
+    PCBox_AttachPartyPanelLabelWindow(work->view);
+    PCBox_PrintPartyPanelExitLabel(work->view);
+    PCBox_HidePartyButtonAndTrayTab(work->view->panels);
+    PCBox_PlacePartyPanelRight(work->view->panels);
+    PCBox_PlacePartyIconsRight(work);
+}
+
+static void PCBox_ShowDepositPartyPanel(PCBoxWork *work) {
+    PCBox_PlacePartyIconsLeft(work);
+    PCBox_PlacePartyPanelLeft(work->view->panels);
+}
+
+static enum PCBoxState PCBox_OpenTrayFromPartyPanel(PCBoxWork *work) {
+    work->selectedSlot = PC_BOX_SLOT_NONE;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_ShiftPartyPanelAndReturnButtonRight(work->view->panels);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+        PCBox_SlideOutActionMenu(work->view->panels);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelAndActionMenuSlide, PC_BOX_STATE_OPEN_TRAY_BESIDE_PARTY);
+}
+
+static enum PCBoxState PCBox_CloseTrayToPartyPanel(PCBoxWork *work) {
+    work->selectedSlot = PC_BOX_SLOT_NONE;
+    PCBox_SetIconsTranslucent(work, 1, 1);
+    PCBox_ShiftPartyPanelAndReturnButtonLeft(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitPartyPanelSlideFunc, PC_BOX_STATE_SETUP_PARTY_INPUT_AFTER_TRAY);
+}
+
+static enum PCBoxState PCBox_OpenTrayFromBox(PCBoxWork *work) {
+    work->trayOpen = 1;
+    work->trayFromPartyPanel = 0;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutPartyButton(work->view->panels);
+    PCBox_SlideOutTrayTab(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitBottomButtonsSlide, PC_BOX_STATE_OPEN_TRAY_FROM_BOX);
+}
+
+static enum PCBoxState PCBox_CloseTray(PCBoxWork *work) {
+    work->trayOpen = 0;
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+        return PCBox_HideChangeBoxButtonAndWait(work, PC_BOX_STATE_SLIDE_OUT_TRAY);
+    }
+    if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+        return PCBox_HideInfoPanelAndWait(work, PC_BOX_STATE_SLIDE_OUT_TRAY);
+    }
+    return PCBox_CloseBoxTray(work, PC_BOX_STATE_TRAY_CLOSED);
+}
+
+static enum PCBoxState PCBox_HideInfoPanelAndWait(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_SlideOutSummaryButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitTrayButtonsSlide, next);
+}
+
+static enum PCBoxState PCBox_SelectTrayBox(PCBoxWork *work, s32 delta) {
+    enum PCBoxState st;
+    s32 cur;
+    s32 nv;
+    u8 x;
+    u8 y;
+    st = (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) ? PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT : PC_BOX_STATE_BOX_TRAY_INPUT;
+    cur = work->trayBox;
+    nv = delta + cur / 6 * 6;
+    if (nv != cur) {
+        work->trayBox = nv;
+        PCBox_UpdateTrayCursor(work);
+        PCBox_DrawTrayBoxNameAndCount(work);
+    }
+    if (work->trayBox == work->activeBox) {
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+            GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+            PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+            return PCBox_HideChangeBoxButtonAndWait(work, st);
+        }
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6 + 0x25));
+            GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+            PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+            PCBox_SlideOutSummaryButton(work->view->panels);
+            return PCBox_WaitForUpdateFunc(work, PCBox_WaitTrayButtonsSlide, st);
+        }
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 0xe);
+        return st;
+    }
+    GridInputHandler_SetNextInput(work->view->gridInput, 0x2d);
+    if (GridInputHandler_IsButtonInputMode(work->view->gridInput) == TRUE) {
+        DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, 0x2d), &x, &y);
+        ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    }
+    if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+        return st;
+    }
+    PCBox_DrawChangeBoxButton(work);
+    if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutSummaryButton(work->view->panels);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitSummaryOutChangeBoxIn, st);
+}
+
+static enum PCBoxState PCBox_HideChangeBoxButtonAndWait(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_SlideOutChangeBoxButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitTrayButtonsSlide, next);
+}
+
+static enum PCBoxState PCBox_JumpToTrayBox(PCBoxWork *work, u32 which) {
+    PCBoxUpdateFunc cb;
+    u32 prev;
+    prev = work->activeBox;
+    work->activeBox = work->trayBox;
+    if (prev > work->trayBox) {
+        PCBox_LoadBoxIconImages(work, work->activeBox);
+        PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 0);
+        cb = PCBox_UpdateScrollToPrevBox;
+    } else {
+        PCBox_LoadBoxIconImages(work, work->activeBox);
+        PCBox_LoadScrolledWallpaper(work, PCBox_GetWallpaperGfxIndex(work, work->activeBox), 1);
+        cb = PCBox_UpdateScrollToNextBox;
+    }
+    switch (which) {
+    case 0:
+        PCBox_UpdateCurrentBoxMarker(work);
+        if (work->partyPanelOpen == 0) {
+            work->nextState = PC_BOX_STATE_MOVE_MODE_INPUT;
+        } else {
+            work->nextState = PC_BOX_STATE_MOVE_MODE_PARTY_INPUT;
+        }
+        break;
+    case 1:
+        PCBox_UpdateCurrentBoxMarker(work);
+        work->nextState = PC_BOX_STATE_BOX_MENU_INPUT;
+        break;
+    case 2:
+        work->nextState = PC_BOX_STATE_WALLPAPER_FADE_OUT;
+        break;
+    case 3:
+        PCBox_UpdateCurrentBoxMarker(work);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            PCBox_SlideOutChangeBoxButton(work->view->panels);
+        }
+        work->nextState = PC_BOX_STATE_BOX_TRAY_INPUT;
+        break;
+    case 4:
+        PCBox_UpdateCurrentBoxMarker(work);
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            PCBox_SlideOutChangeBoxButton(work->view->panels);
+        }
+        work->nextState = PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+        break;
+    }
+    return PCBox_WaitForUpdateFunc(work, cb, work->nextState);
+}
+
+static void PCBox_ChangeTrayPage(PCBoxWork *work, s32 delta) {
+    s32 box;
+    box = work->trayBox + delta * 6;
+    if (box < 0) {
+        box += 0x12;
+    } else if (box >= 0x12) {
+        box -= 0x12;
+    }
+    work->trayBox = box;
+    PCBox_LoadTrayPageThumbnails(work);
+    PCBox_UpdateTrayCursor(work);
+    PCBox_UpdateCurrentBoxMarker(work);
+    PCBox_DrawTrayBoxNameAndCount(work);
+    if (delta > 0) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_TRAY_NEXT_ARROW, 4);
+    } else {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_TRAY_PREV_ARROW, 2);
+    }
+}
+
+static enum PCBoxState PCBox_OpenBoxTray(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_SetupBoxTraySprites(work);
+    PCBox_UpdateCurrentBoxMarker(work);
+    PCBox_UpdateTrayCursor(work);
+    PCBox_DrawTrayBoxNameAndCount(work);
+    PCBox_SlideInBoxTray(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateBoxTraySlideIn, next);
+}
+
+static enum PCBoxState PCBox_CloseBoxTray(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_SlideOutBoxTray(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateBoxTraySlideOut, next);
+}
+
+static enum PCBoxState PCBox_ShowExitButtonAndWait(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_DrawExitButton(work, 0);
+    PCBox_SlideInReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitReturnButtonSlide, next);
+}
+
+static enum PCBoxState PCBox_SlideOutReturnButtonAndWait(PCBoxWork *work, enum PCBoxState next) {
+    PCBox_SlideOutReturnButton(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitReturnButtonSlide, next);
+}
+
+static enum PCBoxState PCBox_CloseActionMenuAndWait(PCBoxWork *work, enum PCBoxState next) {
+    work->selectedSlot = PC_BOX_SLOT_NONE;
+    PCBox_SlideOutActionMenu(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuSlide, next);
+}
+
+static enum PCBoxState PCBox_StartBoxMenu(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    work->view->rowCursorPos = work->activeBox % 6;
+    work->returnCursorPos = work->view->rowCursorPos;
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 0) {
+        return PCBox_State_HideButtonsForBoxMenu(work);
+    } else {
+        return PCBox_CloseActionMenuAndWait(work, PC_BOX_STATE_OPEN_BOX_MENU_TRAY);
+    }
+}
+
+static enum PCBoxState PCBox_SelectBoxMenuBox(PCBoxWork *work, s32 delta) {
+    s32 input;
+    u8 x;
+    u8 y;
+    work->trayBox = delta + work->trayBox / 6 * 6;
+    PCBox_UpdateTrayCursor(work);
+    PCBox_DrawTrayBoxNameAndCount(work);
+    input = GridInputHandler_GetNextInput(work->view->gridInput);
+    work->view->rowCursorPos = input;
+    GridInputHandler_SetNextLastReturnInputs(work->view->gridInput, 8, input, input);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, 8), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    return PC_BOX_STATE_BOX_MENU_INPUT;
+}
+
+static enum PCBoxState PCBox_ChangeBoxMenuPage(PCBoxWork *work, s32 delta) {
+    PCBox_ChangeTrayPage(work, delta);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6));
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_BOX_MENU_INPUT;
+}
+
+static void PCBox_ChangeWallpaperPage(PCBoxWork *work, s32 delta) {
+    s32 wallpaper;
+    wallpaper = work->view->wallpaperSelection + delta * 4;
+    if (wallpaper < 0) {
+        wallpaper += 0x18;
+    } else if (wallpaper >= 0x18) {
+        wallpaper -= 0x18;
+    }
+    work->view->wallpaperSelection = wallpaper;
+    if (delta > 0) {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_TRAY_NEXT_ARROW, 4);
+    } else {
+        PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_TRAY_PREV_ARROW, 2);
+    }
+    PCBox_LoadWallpaperThumbnails(work);
+    PCBox_UpdateCurrentWallpaperMarker(work);
+    PCBox_DrawWallpaperName(work);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->view->wallpaperSelection % 4));
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+}
+
+static void PCBox_SelectWallpaperInPage(PCBoxWork *work, u32 delta) {
+    u8 x;
+    u8 y;
+    work->view->wallpaperSelection = delta + work->view->wallpaperSelection / 4 * 4;
+    PCBox_UpdateWallpaperCursor(work);
+    PCBox_DrawWallpaperName(work);
+    work->view->rowCursorPos = GridInputHandler_GetNextInput(work->view->gridInput);
+    ((void (*)(void *, s32, u8, u8))GridInputHandler_SetNextLastReturnInputs)(
+        work->view->gridInput,
+        6,
+        (u8)work->view->rowCursorPos,
+        (u8)work->view->rowCursorPos);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, 6), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+}
+
+static enum PCBoxState PCBox_ConfirmWallpaperChoice(PCBoxWork *work) {
+    if (work->view->wallpaperSelection >= 0x10
+        && !PCStorage_IsBonusWallpaperUnlocked(work->storage, work->view->wallpaperSelection - 0x10)) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_WALLPAPER_MENU_INPUT);
+    }
+    if (work->view->wallpaperSelection == PCBox_GetWallpaperGfxIndex(work, work->trayBox)) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_WALLPAPER_MENU_INPUT);
+    }
+    if (work->trayBox != work->activeBox) {
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_SWITCH_BOX_FOR_WALLPAPER);
+    }
+    PlaySE(SEQ_SE_DP_DECIDE);
+    return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_WALLPAPER_FADE_OUT);
+}
+
+static enum PCBoxState PCBox_TryWithdraw(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    if (Party_GetCount(work->party) != 6) {
+        PCBox_CloseMessageWindow(work->view, 0x27);
+        PCBox_SlideOutActionMenu(work->view->panels);
+        PCBox_SlideOutMovesPanel(work->view);
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuSlide, PC_BOX_STATE_SLIDE_IN_WITHDRAW_PARTY);
+    }
+    PCBox_ResetActionMenu(work->view->panels);
+    PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_PARTY_FULL, 0x25);
+    work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+static enum PCBoxState PCBox_StartDeposit(PCBoxWork *work) {
+    PCBox_CloseMessageWindow(work->view, 0x27);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, PC_BOX_STATE_TRY_DEPOSIT);
+}
+
+static enum PCBoxState PCBox_SelectDepositBox(PCBoxWork *work, s32 delta) {
+    s32 input;
+    u8 x;
+    u8 y;
+    work->trayBox = delta + work->trayBox / 6 * 6;
+    if (!System_GetTouchNew()) {
+        if (PCStorage_CountMonsAndEggsInBox(work->storage, work->trayBox) == MONS_PER_BOX) {
+            PlaySE(SEQ_SE_DP_BOX03);
+        } else {
+            PlaySE(SEQ_SE_DP_DECIDE);
+        }
+        return PC_BOX_STATE_CONFIRM_DEPOSIT_BOX;
+    }
+    PlaySE(SEQ_SE_DP_DECIDE);
+    PCBox_UpdateTrayCursor(work);
+    PCBox_DrawTrayBoxNameAndCount(work);
+    input = GridInputHandler_GetNextInput(work->view->gridInput);
+    work->view->rowCursorPos = input;
+    GridInputHandler_SetNextLastReturnInputs(work->view->gridInput, 8, input, input);
+    DpadMenuBox_GetPosition(GridInputHandler_GetDpadBox(work->view->gridInput, 8), &x, &y);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], x, y);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, TRUE);
+    return PC_BOX_STATE_DEPOSIT_BOX_INPUT;
+}
+
+static enum PCBoxState PCBox_ChangeDepositBoxPage(PCBoxWork *work, s32 delta) {
+    PCBox_ChangeTrayPage(work, delta);
+    GridInputHandler_SetNextInput(work->view->gridInput, (u8)(work->trayBox % 6));
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    return PC_BOX_STATE_DEPOSIT_BOX_INPUT;
+}
+
+static enum PCBoxState PCBox_CancelDepositBoxSelect(PCBoxWork *work, u32 unused) {
+    return PCBox_FlashPanel(work, PC_BOX_PANEL_RETURN_BUTTON, PC_BOX_STATE_CANCEL_DEPOSIT_BOX_SELECT);
+}
+
+static enum PCBoxState PCBox_ConfirmDepositBox(PCBoxWork *work) {
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_CURSOR, 8);
+    if (PCStorage_CountMonsAndEggsInBox(work->storage, work->trayBox) == MONS_PER_BOX) {
+        PlaySE(SEQ_SE_DP_BOX03);
+    } else {
+        PlaySE(SEQ_SE_DP_DECIDE);
+    }
+    return PCBox_FlashPanel(work, PC_BOX_PANEL_TITLE, PC_BOX_STATE_CONFIRM_DEPOSIT_BOX);
+}
+
+static enum PCBoxState PCBox_PickUpTrayMon(PCBoxWork *work, u32 value) {
+    work->selectedSlot = value;
+    work->view->cursorHolding = 1;
+    PCBox_SetIconLayer(work->view, work->selectedSlot, FALSE);
+    PCBox_HideSelectedIconOutline(work);
+    if (work->moveWithButtons == 0) {
+        PCBox_SlideInMovesPanel(work->view);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayPickUp, PC_BOX_STATE_BOX_TRAY_HOLDING_INPUT);
+}
+
+static enum PCBoxState PCBox_DropTrayMon(PCBoxWork *work, u32 index) {
+    struct {
+        s16 y, x;
+    } xy;
+
+    work->view->dropCancelled = index == PC_BOX_SLOT_NONE;
+    ManagedSprite_GetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], &xy.x, &xy.y);
+    ManagedSprite_SetPositionXY(work->view->sprites[work->view->slotIcons[work->selectedSlot]], xy.x, xy.y + 4);
+    if (index < PC_BOX_SLOT_COUNT) {
+        if (index >= PC_BOX_SLOT_PARTY_START) {
+            int count = Party_GetCount(work->party);
+            if (work->selectedSlot < PC_BOX_SLOT_PARTY_START) {
+                if (index - PC_BOX_SLOT_PARTY_START > count) {
+                    PCBox_ClearMonInfo(work);
+                    PCBox_SlideOutSummaryButton(work->view->panels);
+                } else {
+                    PCBox_SlideOutMovesPanel(work->view);
+                }
+            } else {
+                if (index - PC_BOX_SLOT_PARTY_START >= count) {
+                    PCBox_ClearMonInfo(work);
+                    PCBox_SlideOutSummaryButton(work->view->panels);
+                } else {
+                    PCBox_SlideOutMovesPanel(work->view);
+                }
+            }
+        } else {
+            PCBox_SlideOutMovesPanel(work->view);
+        }
+    } else if (index != 255) {
+        u32 selected;
+        work->trayBox = (work->trayBox / 6) * 6 + index - 37;
+        PCBox_UpdateTrayCursor(work);
+        PCBox_DrawTrayBoxNameAndCount(work);
+        selected = work->selectedSlot;
+        if (selected >= PC_BOX_SLOT_PARTY_START) {
+            Pokemon *mon;
+            selected -= PC_BOX_SLOT_PARTY_START;
+            mon = Party_GetMonByIndex(work->party, selected);
+            if (ItemIdIsMail((u16)GetMonData(mon, MON_DATA_HELD_ITEM, NULL)) == TRUE) {
+                PCBox_SlideOutMovesPanel(work->view);
+            } else if (GetMonData(mon, MON_DATA_BALL_CAPSULE_ID, NULL) != 0) {
+                PCBox_SlideOutMovesPanel(work->view);
+            } else if (!PCBox_PartyHasOtherUsableMon(work, (int)selected)) {
+                PCBox_SlideOutMovesPanel(work->view);
+            } else if (work->trayBox == work->activeBox) {
+                PCBox_ClearMonInfo(work);
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            } else if (!PCStorage_CountEmptySpotsInBox(work->storage, work->trayBox)) {
+                PCBox_SlideOutMovesPanel(work->view);
+            } else {
+                PCBox_ClearMonInfo(work);
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        } else if (work->trayBox == work->activeBox) {
+            PCBox_ClearMonInfo(work);
+            PCBox_SlideOutSummaryButton(work->view->panels);
+        } else if (!PCStorage_CountEmptySpotsInBox(work->storage, work->trayBox)) {
+            PCBox_SlideOutMovesPanel(work->view);
+        } else {
+            PCBox_ClearMonInfo(work);
+            PCBox_SlideOutSummaryButton(work->view->panels);
+        }
+    } else {
+        u32 next = GridInputHandler_GetNextInput(work->view->gridInput);
+        if (next < 36) {
+            if (!PCBox_ShowSlotMonInfo(work, next)) {
+                PCBox_SlideOutSummaryButton(work->view->panels);
+            }
+        } else {
+            PCBox_ClearMonInfo(work);
+            PCBox_SlideOutSummaryButton(work->view->panels);
+        }
+    }
+    work->view->dropTarget = (u8)index;
+    work->view->cursorHolding = 0;
+    PCBox_AllocMoveWork(work);
+    work->partyLayout = 2;
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayDrop, PC_BOX_STATE_END_TRAY_HOLDING_DROP);
+}
+
+static enum PCBoxState PCBox_SelectItemModeBoxMon(PCBoxWork *work, u32 value) {
+    work->selectedSlot = value;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_DrawBagGiveButton(work, work->view->heldItem);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutPartyButton(work->view->panels);
+    PCBox_SlideOutTrayTab(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    if (work->view->heldItem != ITEM_NONE) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 0);
+        PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+        PCBox_CreateHeldItemIconOutline(work->view);
+        PCBox_SlideInItemInfoPanel(work->view->panels);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeSelect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE);
+}
+
+static enum PCBoxState PCBox_StartItemModeBoxDrag(PCBoxWork *work, u32 value) {
+    s16 xy[2];
+    u16 oldItem = work->view->heldItem;
+    work->selectedSlot = value;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+        if (oldItem != ITEM_NONE || work->view->heldItem != ITEM_NONE) {
+            PCBox_ResetActionMenu(work->view->panels);
+        } else if (work->view->heldItem != ITEM_NONE) {
+            PCBox_SlideOutActionMenu(work->view->panels);
+        }
+    } else {
+        PCBox_SlideOutPartyButton(work->view->panels);
+        PCBox_SlideOutTrayTab(work->view->panels);
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    PCBox_DrawBagGiveButton(work, work->view->heldItem);
+    if (work->view->heldItem != ITEM_NONE) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 0);
+        PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+        PCBox_CreateHeldItemIconOutline(work->view);
+        PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+        PCBox_SlideInItemInfoPanel(work->view->panels);
+    } else if (PCBox_IsSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_HideSelectedIconOutline(work);
+    }
+    PCBox_GetSlotPosition(work->selectedSlot, &xy[1], &xy[0], 0);
+    work->view->touchX = xy[1] + 8;
+    work->view->touchY = xy[0] + 8;
+    PCBox_AllocHeldItemMove(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateItemModeBoxDrag, PC_BOX_STATE_END_ITEM_MODE_BOX_DRAG);
+}
+
+static enum PCBoxState PCBox_StartItemTrayDrag(PCBoxWork *work, u32 value) {
+    s16 xy[2];
+    work->selectedSlot = value;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_DrawSummaryButton(work, 0);
+    if (work->view->heldItem == ITEM_NONE) {
+        GridInputHandler_SetNextInput(work->view->gridInput, work->selectedSlot);
+        GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+        if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+            return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+        }
+        if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+            PCBox_SlideOutChangeBoxButton(work->view->panels);
+        }
+        return PCBox_WaitForUpdateFunc(work, PCBox_WaitChangeBoxOutSummaryIn, PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT);
+    }
+    PlaySE(SEQ_SE_DP_BOX02);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 2);
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    PCBox_CreateHeldItemIconOutline(work->view);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+    PCBox_SlideInItemInfoPanel(work->view->panels);
+    if (PCBox_IsChangeBoxButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutChangeBoxButton(work->view->panels);
+    } else if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutSummaryButton(work->view->panels);
+    }
+    PCBox_GetSlotPosition(work->selectedSlot, &xy[1], &xy[0], 2);
+    work->view->touchX = xy[1] + 8;
+    work->view->touchY = xy[0] + 8;
+    PCBox_AllocHeldItemMove(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateItemTrayDrag, PC_BOX_STATE_END_ITEM_TRAY_DRAG);
+}
+
+static enum PCBoxState PCBox_PickUpTrayItem(PCBoxWork *work, u32 value) {
+    work->selectedSlot = value;
+    work->view->itemFromSlot = value;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    if (work->view->heldItem == ITEM_NONE) {
+        return PC_BOX_STATE_ITEM_MODE_BOX_TRAY_INPUT;
+    }
+    PlaySE(SEQ_SE_DP_BOX02);
+    work->view->cursorHolding = 1;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBox_PlaceHeldItemIconAtSlot(work->view, work->selectedSlot, 2);
+    PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+    PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+    PCBox_SlideInItemInfoPanel(work->view->panels);
+    if (PCBox_IsSummaryButtonShown(work->view->panels) == 1) {
+        PCBox_SlideOutSummaryButton(work->view->panels);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayItemPickUp, PC_BOX_STATE_ITEM_TRAY_HOLDING_INPUT);
+}
+
+static enum PCBoxState PCBox_ReturnTrayItem(PCBoxWork *work) {
+    u32 input = GridInputHandler_GetNextInput(work->view->gridInput);
+    if (input < 36) {
+        if (PCBox_ShowSlotMonInfo(work, input) == TRUE) {
+            PCBox_SlideInSummaryButton(work->view->panels);
+        }
+    } else {
+        PCBox_ClearMonInfo(work);
+    }
+    PCBox_AllocHeldItemMove(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayItemReturn, PC_BOX_STATE_FINISH_ITEM_TRAY_DROP);
+}
+
+static enum PCBoxState PCBox_DropTrayItem(PCBoxWork *work, u32 value) {
+    s16 xy[2];
+    work->view->dropTarget = value;
+    work->view->cursorHolding = 0;
+    ManagedSprite_GetPositionXY(work->view->sprites[PC_BOX_SPRITE_CURSOR], &xy[1], &xy[0]);
+    ManagedSprite_SetPositionXY(work->view->sprites[PC_BOX_SPRITE_HELD_ITEM], xy[1], (s16)(xy[0] + 8));
+    if (work->view->dropTarget == PC_BOX_SLOT_NONE) {
+        return PCBox_ReturnTrayItem(work);
+    }
+    if (PCBox_CanSwapHeldItems(work, work->selectedSlot, value) == 0) {
+        return PCBox_ReturnTrayItem(work);
+    }
+    PCBox_SlideOutItemInfoPanel(work->view->panels);
+    return PCBox_WaitForUpdateFunc(work, PCBox_AnimateTrayItemDrop, PC_BOX_STATE_APPLY_ITEM_TRAY_HOLDING_DROP);
+}
+
+static enum PCBoxState PCBox_SelectItemModePartyMon(PCBoxWork *work, u32 value) {
+    work->selectedSlot = value;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    PCBox_DrawBagGiveButton(work, work->view->heldItem);
+    PCBox_SlideInActionMenu(work->view->panels);
+    PCBox_SlideOutReturnButton(work->view->panels);
+    if (work->view->heldItem != ITEM_NONE) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 1);
+        PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+        PCBox_CreateHeldItemIconOutline(work->view);
+        PCBox_SlideInItemInfoPanel(work->view->panels);
+    }
+    return PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeSelect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE_PARTY);
+}
+
+static enum PCBoxState PCBox_StartItemModePartyDrag(PCBoxWork *work, u32 value) {
+    s16 xy[2];
+    u16 oldItem;
+    work->selectedSlot = value;
+    oldItem = work->view->heldItem;
+    work->view->heldItem = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    if (PCBox_IsActionMenuOpen(work->view->panels) == 1) {
+        if (oldItem != ITEM_NONE || work->view->heldItem != ITEM_NONE) {
+            PCBox_ResetActionMenu(work->view->panels);
+        } else if (work->view->heldItem != ITEM_NONE) {
+            PCBox_SlideOutActionMenu(work->view->panels);
+        }
+    } else {
+        PCBox_SlideOutReturnButton(work->view->panels);
+    }
+    PCBox_DrawBagGiveButton(work, work->view->heldItem);
+    if (work->view->heldItem != ITEM_NONE) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_MoveHeldItemIconToSlot(work->view, work->selectedSlot, 1);
+        PCBox_LoadHeldItemIcon(work->view, work->view->heldItem);
+        PCBox_CreateHeldItemIconOutline(work->view);
+        PCBox_SetSlotIconTranslucent(work->view, work->selectedSlot, 1);
+        PCBox_SlideInItemInfoPanel(work->view->panels);
+        if (ItemIdIsMail(work->view->heldItem) == TRUE) {
+            PCBox_PrintPanelHint(work, 0x28, 9);
+        } else {
+            PCBox_PrintPanelHint(work, 0x28, 10);
+        }
+    } else if (PCBox_IsSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM) == 1) {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+        PCBox_HideSelectedIconOutline(work);
+    }
+    PCBox_GetSlotPosition(work->selectedSlot, &xy[1], &xy[0], 1);
+    work->view->touchX = xy[1] + 8;
+    work->view->touchY = xy[0] + 8;
+    PCBox_AllocHeldItemMove(work);
+    return PCBox_WaitForUpdateFunc(work, PCBox_UpdateItemModePartyDrag, PC_BOX_STATE_END_ITEM_MODE_PARTY_DRAG);
+}
+
+static PCBOX_TAIL_STATE PCBox_HandleBagGiveCommand(PCBoxWork *work) {
+    enum PCBoxState next;
+    if (work->view->heldItem == ITEM_NONE) {
+        BoxPokemon *boxMon;
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        boxMon = PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot);
+        if (GetBoxMonData(boxMon, MON_DATA_IS_EGG, NULL) == 0) {
+            work->returnCursorPos = 0x24;
+            PCBOX_TAIL_RETURN PCBox_StartSubApp(work, 1);
+            PCBOX_TAIL_DONE;
+        }
+        next = PC_BOX_STATE_ITEM_MODE_PRINT_EGG_CANT_HOLD_ITEM;
+    } else {
+        PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+        next = PC_BOX_STATE_ASK_PUT_AWAY_ITEM;
+    }
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitActionMenuAndButtonsSlide, next);
+}
+
+static void PCBox_AllocHeldItemMove(PCBoxWork *work) {
+    work->view->temp = Heap_Alloc(HEAP_ID_10, 0x1c);
+}
+
+static void PCBox_FreeHeldItemMove(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+}
+
+enum PCBoxState PCBox_State_BoxTrayHoldingInput(PCBoxWork *work) {
+    u32 input;
+    if (PCBox_IsSummaryShortcutPressed(work) == 1) {
+        PlaySE(SEQ_SE_DP_DECIDE);
+        work->summaryFromTray = 1;
+        work->summaryFromHolding = 1;
+        work->summaryCursorPos = GridInputHandler_GetNextInput(work->view->gridInput);
+        return PCBox_StartCellPaletteFlash(work, PC_BOX_PANEL_SUMMARY_BUTTON, PC_BOX_STATE_CHOOSE_SUMMARY);
+    }
+    input = PCBox_GetTrayHoldingInput(work);
+    if (!GridInputHandler_IsButtonInputMode(work->view->gridInput)) {
+        input = (u32)-2;
+    }
+    switch (input) {
+    case (u32)-3:
+        PlaySE(SEQ_SE_DP_SELECT);
+        return PCBox_WaitForPendingUpdateFunc(work, PC_BOX_STATE_END_CURSOR_SLIDE_TO_BOX_TRAY_HOLDING);
+    case (u32)-2:
+    case 0x24:
+        return PCBox_DropTrayMon(work, PC_BOX_SLOT_NONE);
+    case 0x25:
+    case 0x26:
+    case 0x27:
+    case 0x28:
+    case 0x29:
+    case 0x2a:
+    default:
+        return PCBox_DropTrayMon(work, input);
+    case (u32)-4:
+    case (u32)-1:
+        return PC_BOX_STATE_BOX_TRAY_HOLDING_INPUT;
+    }
+}
+
+enum PCBoxState PCBox_State_EndCursorSlideToBoxTrayHolding(PCBoxWork *work) {
+    Heap_Free(work->view->temp);
+    return PC_BOX_STATE_BOX_TRAY_HOLDING_INPUT;
+}
+
+enum PCBoxState PCBox_TakeHeldItemToBag(PCBoxWork *work) {
+    int item;
+    BoxPokemon *boxmon;
+    item = PCBox_GetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, NULL);
+    if (Bag_AddItem(work->bag, item, 1, HEAP_ID_10) == TRUE) {
+        boxmon = PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot);
+        PCBox_PrintTookItem(work, item, 0x25);
+        item = 0;
+        PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &item);
+        if (PCBox_UpdateArceusGiratinaForm(boxmon) == TRUE) {
+            PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+        }
+        PCBox_RedrawSlotMonInfo(work, work->selectedSlot);
+    } else {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintBagFull(work, 0x25);
+    }
+    work->nextState = PC_BOX_STATE_RETURN_TO_ACTION_MENU;
+    return PC_BOX_STATE_WAIT_BUTTON;
+}
+
+enum PCBoxState PCBox_ConfirmRelease(PCBoxWork *work) {
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    PCBox_StartReleaseMoveCheck(work);
+    PCBox_StartReleaseScale(work->view->releaseWork);
+    PCBox_SlideOutMovesPanel(work->view);
+    return PC_BOX_STATE_RELEASE_MOVE_CHECK;
+}
+
+enum PCBoxState PCBox_PutAwayHeldItem(PCBoxWork *work) {
+    u16 item;
+    if (!Bag_AddItem(Save_Bag_Get(work->args->saveData), work->view->heldItem, 1, HEAP_ID_10)) {
+        PlaySE(SEQ_SE_DP_BOX03);
+        PCBox_PrintItemActionMessage(work, PC_BOX_ITEM_MSG_BAG_FULL, 0x25);
+        work->nextState = PC_BOX_STATE_CANCEL_PUT_AWAY_ITEM;
+        return PC_BOX_STATE_WAIT_BUTTON;
+    }
+    item = ITEM_NONE;
+    PCBox_SetSlotMonData(work, work->selectedSlot, MON_DATA_HELD_ITEM, &item);
+    if (PCBox_UpdateArceusGiratinaForm(PCBox_GetSlotBoxMon(work, work->activeBox, work->selectedSlot)) == 1) {
+        PCBox_RefreshSlotIcon(work, work->activeBox, work->selectedSlot, work->view->slotIcons[work->selectedSlot]);
+    }
+    PCBox_ShowSlotMonInfo(work, work->selectedSlot);
+    PCBox_HideSelectedIconOutline(work);
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    PCBox_SetHeldItemIconAffine(work->view, 1);
+    PCBox_SetSpriteAnim(work->view, PC_BOX_SPRITE_HELD_ITEM, 2);
+    PCBox_SlideOutItemInfoPanel(work->view->panels);
+    return PC_BOX_STATE_WAIT_PUT_AWAY_ITEM;
+}
+
+enum PCBoxState PCBox_ConfirmExit(PCBoxWork *work) {
+    PlaySE(SEQ_SE_DP_PC_LOGOFF);
+    work->nextState = PC_BOX_STATE_EXIT;
+    return PCBox_StartFadeOut(work, PC_BOX_STATE_TEARDOWN);
+}
+
+enum PCBoxState PCBox_CancelExit(PCBoxWork *work) {
+    PCBox_CloseMessageWindow(work->view, 0x25);
+    GridInputHandler_SetButtonInputMode(work->view->gridInput, TRUE);
+    switch (work->args->mode) {
+    case PC_BOX_MODE_DEPOSIT:
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        PCBox_SetIconsTranslucent(work, 2, 0);
+        return PC_BOX_STATE_DEPOSIT_INPUT;
+    case PC_BOX_MODE_WITHDRAW:
+        PCBox_PrintMonActionMessage(work, 0, PC_BOX_MON_MSG_WHICH_ONE, 0x27);
+        PCBox_SetBoxArrowsVisible(work->view, 1);
+        PCBox_SetIconsTranslucent(work, 1, 0);
+        return PC_BOX_STATE_WITHDRAW_INPUT;
+    case PC_BOX_MODE_MOVE_POKEMON:
+        PCBox_SetBoxArrowsVisible(work->view, 1);
+        PCBox_SetIconsTranslucent(work, 1, 0);
+        return PC_BOX_STATE_MOVE_MODE_INPUT;
+    case PC_BOX_MODE_MOVE_ITEMS:
+        PCBox_SetBoxArrowsVisible(work->view, 1);
+        PCBox_SetIconsTranslucent(work, 0x81, 0);
+        return PC_BOX_STATE_ITEM_MODE_INPUT;
+    }
+    return PC_BOX_STATE_MOVE_MODE_INPUT;
+}
+
+static enum PCBoxState PCBox_FlashPanel(PCBoxWork *work, u32 panelIndex, enum PCBoxState nextState) {
+    s8 x;
+    s8 y;
+    u16 width;
+    u16 height;
+    BgCellManager_GetCellPosition(work->view->panels, panelIndex, &x, &y);
+    BgCellManager_GetCellSize(work->view->panels, panelIndex, &width, &height);
+    work->view->paletteFlash.isBg = 1;
+    work->view->paletteFlash.index = BgCellManager_GetCellBgId(work->view->panels, panelIndex);
+    work->view->paletteFlash.palA = 0xd;
+    work->view->paletteFlash.palB = 0xc;
+    work->view->paletteFlash.state = 0;
+    work->view->paletteFlash.timer = 0;
+    work->view->paletteFlash.x = x;
+    work->view->paletteFlash.y = y;
+    work->view->paletteFlash.w = width;
+    work->view->paletteFlash.h = height;
+    work->nextState = nextState;
+    return PC_BOX_STATE_WAIT_PALETTE_FLASH;
+}
+
+static enum PCBoxState PCBox_StartCellPaletteFlash(PCBoxWork *work, u32 panelIndex, enum PCBoxState nextState) {
+    s8 x;
+    s8 y;
+    u16 width;
+    u16 height;
+    BgCellManager_GetCellPosition(work->view->panels, panelIndex, &x, &y);
+    BgCellManager_GetCellSize(work->view->panels, panelIndex, &width, &height);
+    work->view->paletteFlash.isBg = 1;
+    work->view->paletteFlash.index = BgCellManager_GetCellBgId(work->view->panels, panelIndex);
+    work->view->paletteFlash.palA = 3;
+    work->view->paletteFlash.palB = 2;
+    work->view->paletteFlash.state = 0;
+    work->view->paletteFlash.timer = 0;
+    work->view->paletteFlash.x = x;
+    work->view->paletteFlash.y = y;
+    work->view->paletteFlash.w = width;
+    work->view->paletteFlash.h = height;
+    work->nextState = nextState;
+    return PC_BOX_STATE_WAIT_PALETTE_FLASH;
+}
+
+static enum PCBoxState PCBox_FlashMarkingMenuButton(PCBoxWork *work, u32 button, enum PCBoxState nextState) {
+    work->view->paletteFlash.isBg = 1;
+    work->view->paletteFlash.index = BgCellManager_GetCellBgId(work->view->panels, PC_BOX_PANEL_MARKING_MENU);
+    work->view->paletteFlash.palA = 3;
+    work->view->paletteFlash.palB = 2;
+    work->view->paletteFlash.state = 0;
+    work->view->paletteFlash.timer = 0;
+    if (button == 0) {
+        work->view->paletteFlash.y = 0x10;
+    } else {
+        work->view->paletteFlash.y = 0x14;
+    }
+    work->view->paletteFlash.x = 0x16;
+    work->view->paletteFlash.w = 9;
+    work->view->paletteFlash.h = 4;
+    work->nextState = nextState;
+    return PC_BOX_STATE_WAIT_PALETTE_FLASH;
+}
+
+static enum PCBoxState PCBox_FlashPartyPanelButton(PCBoxWork *work, u32 button, enum PCBoxState nextState) {
+    work->view->paletteFlash.isBg = 1;
+    work->view->paletteFlash.index = BgCellManager_GetCellBgId(work->view->panels, PC_BOX_PANEL_PARTY);
+    work->view->paletteFlash.palA = 3;
+    work->view->paletteFlash.palB = 2;
+    work->view->paletteFlash.state = 0;
+    work->view->paletteFlash.timer = 0;
+    if (button == 0) {
+        work->view->paletteFlash.x = 3;
+    } else {
+        work->view->paletteFlash.x = 0x16;
+    }
+    work->view->paletteFlash.y = 0x14;
+    work->view->paletteFlash.w = 9;
+    work->view->paletteFlash.h = 4;
+    work->nextState = nextState;
+    return PC_BOX_STATE_WAIT_PALETTE_FLASH;
+}
+
+static void PCBox_DimForExitPrompt(PCBoxWork *work) {
+    switch (work->args->mode) {
+    case PC_BOX_MODE_DEPOSIT:
+        PCBox_SetIconsTranslucent(work, 2, 1);
+        break;
+    case PC_BOX_MODE_WITHDRAW:
+    case PC_BOX_MODE_MOVE_POKEMON:
+    case PC_BOX_MODE_MOVE_ITEMS:
+        PCBox_SetBoxArrowsVisible(work->view, 0);
+        PCBox_SetIconsTranslucent(work, 1, 1);
+        break;
+    }
+}
+
+enum PCBoxState PCBox_State_AskExit(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_PrintExitPrompt(work, 0x25, 1);
+    PCBox_DimForExitPrompt(work);
+    return PCBox_ShowYesNo(work, 3);
+}
+
+enum PCBoxState PCBox_State_AskContinue(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_PrintExitPrompt(work, 0x25, 0);
+    PCBox_DimForExitPrompt(work);
+    return PCBox_ShowYesNo(work, 4);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseParty(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBOX_TAIL_RETURN PCBox_OpenPartyPanel(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseTrayTab(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBOX_TAIL_RETURN PCBox_OpenTrayFromBox(work);
+}
+
+enum PCBoxState PCBox_State_ChooseMoveFromBox(PCBoxWork *work) {
+    PCBox_SetSelectedIconOutlineVisible(work, 0);
+    work->trayOpen = 1;
+    work->trayFromPartyPanel = 0;
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    return PCBox_CloseActionMenuAndWait(work, PC_BOX_STATE_OPEN_TRAY_FROM_BOX);
+}
+
+enum PCBoxState PCBox_State_ChooseSummary(PCBoxWork *work) {
+    return PCBox_StartSubApp(work, 0);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseItem(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_HandleItemCommand(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseMarking(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_StartMarking(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseMarkingDone(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_CloseMarkingMenu(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseRelease(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_StartRelease(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseMoveModeActionMenu(PCBoxWork *work) {
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_SlideOutMovesPanel(work->view);
+    PCBox_SetSelectedIconOutlineVisible(work, 0);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE);
+}
+
+PCBOX_TAIL_STATE PCBox_State_PartyChooseTray(PCBoxWork *work) {
+    if (work->moveFromSlot == 0) {
+        PCBox_ClearMonInfoAndSelection(work);
+    } else {
+        PCBox_SetSelectedIconOutlineVisible(work, 0);
+    }
+    PCBOX_TAIL_RETURN PCBox_OpenTrayFromPartyPanel(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseMoveModePartyActionMenu(PCBoxWork *work) {
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_SlideOutMovesPanel(work->view);
+    PCBox_SetSelectedIconOutlineVisible(work, 0);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenButtons, PC_BOX_STATE_END_CURSOR_SLIDE_TO_MOVE_MODE_PARTY);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChoosePartyPanelExit(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBOX_TAIL_RETURN PCBox_ClosePartyPanel(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseTrayBox(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBOX_TAIL_RETURN PCBox_JumpToTrayBox(work, 3);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseTrayExit(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBOX_TAIL_RETURN PCBox_CloseTray(work);
+}
+
+enum PCBoxState PCBox_State_BoxMenuSwitchBox(PCBoxWork *work) {
+    return PCBox_JumpToTrayBox(work, 1);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseWallpaper(PCBoxWork *work) {
+    PCBox_CloseMessageWindow(work->view, 39);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBox_SetIconsTranslucent(work, 1, 1);
+    PCBOX_TAIL_RETURN PCBox_CloseBoxTray(work, PC_BOX_STATE_OPEN_WALLPAPER_MENU);
+}
+
+enum PCBoxState PCBox_State_ChooseRename(PCBoxWork *work) {
+    return PCBox_StartSubApp(work, 2);
+}
+
+enum PCBoxState PCBox_State_SwitchBoxForWallpaper(PCBoxWork *work) {
+    return PCBox_JumpToTrayBox(work, 2);
+}
+
+enum PCBoxState PCBox_State_ChooseWallpaperMenuExit(PCBoxWork *work) {
+    PCBox_CloseMessageWindow(work->view, 39);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    if (work->args->mode == PC_BOX_MODE_MOVE_ITEMS) {
+        PCBox_SetIconsTranslucent(work, 129, 0);
+    } else {
+        PCBox_SetIconsTranslucent(work, 1, 0);
+    }
+    work->view->rowCursorPos = work->trayBox % 6;
+    work->returnCursorPos = 9;
+    return PC_BOX_STATE_CLOSE_WALLPAPER_MENU;
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseWithdraw(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_TryWithdraw(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseWithdrawActionMenu(PCBoxWork *work) {
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_SlideOutMovesPanel(work->view);
+    PCBox_SetSelectedIconOutlineVisible(work, 0);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenReturnButton, PC_BOX_STATE_END_CURSOR_SLIDE_TO_WITHDRAW_PROMPT);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseDeposit(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_StartDeposit(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseDepositActionMenu(PCBoxWork *work) {
+    PCBox_DrawReturnButton(work, 0);
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_SlideOutMovesPanel(work->view);
+    PCBox_SetSelectedIconOutlineVisible(work, 0);
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitDeselectThenReturnButton, PC_BOX_STATE_END_CURSOR_SLIDE_TO_DEPOSIT_PROMPT);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ItemModeChooseParty(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBox_SetIconsTranslucent(work, 0x82, 1);
+    PCBOX_TAIL_RETURN PCBox_OpenPartyPanel(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ItemModeChooseTrayTab(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBox_SetIconsTranslucent(work, 0x82, 1);
+    PCBOX_TAIL_RETURN PCBox_OpenTrayFromBox(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ChooseBagGive(PCBoxWork *work) {
+    PCBOX_TAIL_RETURN PCBox_HandleBagGiveCommand(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseItemModeActionMenu(PCBoxWork *work) {
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInPartyButton(work->view->panels);
+    PCBox_SlideInTrayTab(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_HideSelectedIconOutline(work);
+    if (work->view->heldItem) {
+        PCBox_SlideOutItemInfoPanel(work->view->panels);
+    }
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeDeselect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ItemModeChooseTrayBox(PCBoxWork *work) {
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_CURSOR, FALSE);
+    PCBOX_TAIL_RETURN PCBox_JumpToTrayBox(work, 4);
+}
+
+PCBOX_TAIL_STATE PCBox_State_ItemModePartyChooseTray(PCBoxWork *work) {
+    PCBox_ClearMonInfoAndSelection(work);
+    PCBox_SetSpriteVisible(work->view, PC_BOX_SPRITE_HELD_ITEM, FALSE);
+    PCBOX_TAIL_RETURN PCBox_OpenTrayFromPartyPanel(work);
+}
+
+PCBOX_TAIL_STATE PCBox_State_CloseItemModePartyActionMenu(PCBoxWork *work) {
+    PCBox_SlideOutActionMenu(work->view->panels);
+    PCBox_SlideInReturnButton(work->view->panels);
+    PCBox_HideSelectedIconOutline(work);
+    if (work->view->heldItem) {
+        PCBox_SlideOutItemInfoPanel(work->view->panels);
+    }
+    PCBOX_TAIL_RETURN PCBox_WaitForUpdateFunc(work, PCBox_WaitItemModeDeselect, PC_BOX_STATE_END_CURSOR_SLIDE_TO_ITEM_MODE_PARTY);
+}
+
+static void PCBox_InitSprites(PCBoxWork *work) {
+    GfGfx_EngineATogglePlanes(GX_PLANEMASK_OBJ, GF_PLANE_TOGGLE_ON);
+    GfGfx_EngineBTogglePlanes(GX_PLANEMASK_OBJ, GF_PLANE_TOGGLE_ON);
+    PCBox_InitSpriteSystem(work->view);
+    PCBox_LoadSpriteResources(work->view);
+    PCBox_CreateSprites(work);
+    PCBox_CreateTrayTextObjs(work->view);
+}

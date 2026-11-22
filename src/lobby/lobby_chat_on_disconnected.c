@@ -1,0 +1,40 @@
+#include "global.h"
+
+#include <nitro/code32.h>
+
+#include "lobby_chat_internal.h"
+
+void LobbyChat_OnRaw(void) {
+    if (gLobbyChatManager && gLobbyChatManager->state == LOBBY_CHAT_STATE_ERROR) {
+        return;
+    }
+}
+
+// A disconnect requested by LobbyChat_Shutdown frees the session; any other one is an error.
+void LobbyChat_OnDisconnected(void) {
+    u32 timerId;
+    LobbyChatManager *manager;
+    if (gLobbyChatManager && gLobbyChatManager->state == LOBBY_CHAT_STATE_ERROR) {
+        return;
+    }
+    // stop the connect timeout
+    timerId = PPW_LOBBY_TIMER_CONNECT_TIMEOUT;
+    LobbyTimerMap_EraseKey(&gLobbyChatManager->timerMap, &timerId);
+    manager = gLobbyChatManager;
+    if (manager->state == LOBBY_CHAT_STATE_DISCONNECTING) {
+        if (!manager) {
+            return;
+        }
+        if (manager) {
+            LobbyChatManager_Destroy(manager);
+            if (manager) {
+                DWC_Free(0, manager, 0);
+            }
+        }
+        gLobbyChatManager = NULL;
+        return;
+    }
+    manager->lastError = PPW_LOBBY_ERROR_SESSION;
+    manager->state = LOBBY_CHAT_STATE_ERROR;
+    gLobbyChatManager->disconnected = TRUE;
+}

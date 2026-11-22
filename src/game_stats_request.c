@@ -1,0 +1,351 @@
+#include "game_stats_request.h"
+
+#include <string.h>
+
+#include "global.h"
+
+#ifndef PLATFORM_PC
+extern int strncmp(const char *a, const char *b, u32 n);
+#endif
+extern int sprintf(char *dest, const char *format, ...);
+
+static void GameStats_SeedRandom(u32 seed);
+static u8 GameStats_NextRandom(void);
+static int GameStats_EncodePayload(u32 key, const u8 *data, int len, char *out, int outSize);
+static int GameStats_GetBase64Length(int size);
+static void GameStats_SetRequestError(int result);
+static void GameStats_ResponseCallback(const char *response, int length, int error);
+
+void *DWC_Alloc(int category, u32 size);
+void DWC_Free(int category, void *ptr, u32 size);
+void B64Encode(const void *src, char *dst, int len, int mode);
+BOOL DWC_InitGHTTP(int value);
+BOOL DWC_ProcessGHTTP(void);
+int DWC_GetGHTTPData(char *url, void (*callback)(const char *, int, int), void *arg);
+void DWC_ShutdownGHTTP(void);
+
+static void GameStats_SeedRandom(u32 seed) {
+    gGameStatsRandState = seed | (seed << 16);
+}
+
+static u8 GameStats_NextRandom(void) {
+    gGameStatsRandState = (gGameStatsRandState * 0x45 + 0x1111) & 0x7FFFFFFF;
+    return (s32)gGameStatsRandState >> 16;
+}
+
+static int GameStats_EncodePayload(u32 key, const u8 *data, int len, char *out, int outSize) {
+    u32 sum = 0;
+    int total = len + 8;
+    int b1;
+    int b2;
+    int b3;
+    int b0;
+    u8 *buf;
+    int i;
+    u32 x;
+
+    if (outSize < GameStats_GetBase64Length(total) + 1) {
+        return 2;
+    }
+    buf = DWC_Alloc(10, total);
+    if (buf == NULL) {
+        return 1;
+    }
+    b3 = (u8)(key >> 24);
+    sum += (u8)b3;
+    b2 = (u8)(key >> 16);
+    sum += (u8)b2;
+    b1 = (u8)(key >> 8);
+    sum += (u8)b1;
+    b0 = (u8)key;
+    sum += (u8)b0;
+    for (i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    GameStats_SeedRandom(sum);
+    buf[4] = GameStats_NextRandom() ^ b0;
+    buf[5] = GameStats_NextRandom() ^ b1;
+    buf[6] = GameStats_NextRandom() ^ b2;
+    buf[7] = GameStats_NextRandom() ^ b3;
+    for (i = 0; i < len; i++) {
+        buf[8 + i] = data[i] ^ GameStats_NextRandom();
+    }
+    x = sum ^ 0x4A3B2C1D;
+    buf[0] = x >> 24;
+    buf[1] = x >> 16;
+    buf[2] = x >> 8;
+    buf[3] = x;
+    B64Encode(buf, out, len + 8, 2);
+    out[GameStats_GetBase64Length(total)] = 0;
+    DWC_Free(10, buf, 0);
+    return 0;
+}
+
+static int GameStats_GetBase64Length(int size) {
+    return ((u32)size / 3 + ((u32)size % 3 != 0)) * 4;
+}
+
+static void GameStats_SetRequestError(int result) {
+    switch (result) {
+    case -8:
+        gGameStatsRequest.error = 0;
+        break;
+    case -6:
+        gGameStatsRequest.error = 1;
+        break;
+    case -5:
+        gGameStatsRequest.error = 2;
+        break;
+    case -4:
+        gGameStatsRequest.error = 3;
+        break;
+    case -3:
+        gGameStatsRequest.error = 4;
+        break;
+    case -2:
+        gGameStatsRequest.error = 5;
+        break;
+    case -1:
+        gGameStatsRequest.error = 6;
+        break;
+    default:
+        gGameStatsRequest.error = 0;
+        break;
+    }
+}
+
+static void GameStats_ResponseCallback(const char *response, int length, int error) {
+    char text[54];
+    int i;
+    int j;
+    int result;
+
+    gGameStatsRequest.requestId = -1;
+    if (gGameStatsRequest.state == GAME_STATS_STATE_IDLE) {
+        return;
+    }
+    if (error == 0) {
+        switch (gGameStatsRequest.state) {
+        case GAME_STATS_STATE_WAIT_CHALLENGE:
+            if (length == 32) {
+                // The SHA1 digest is computed in the second half of the hash text and
+                // expanded to 40 hex digits in place.
+                u8 *digest = (u8 *)gGameStatsRequest.hashText + MATH_SHA1_DIGEST_SIZE;
+                char hexDigits[] = "0123456789abcdef";
+
+                strcpy(text, "sAdeqWo3voLeC5r16DYv");
+                strncat(text, response, length);
+                MATH_CalcSHA1(digest, text, strlen(text));
+                strcat(gGameStatsRequest.url, "&hash=");
+                for (i = 0, j = 0; i < MATH_SHA1_DIGEST_SIZE; i++, j += 2) {
+                    gGameStatsRequest.hashText[j] = hexDigits[digest[i] >> 4];
+                    gGameStatsRequest.hashText[j + 1] = hexDigits[digest[i] & 15];
+                }
+                gGameStatsRequest.hashText[40] = 0;
+                strcat(gGameStatsRequest.url, "&data=");
+                result = GameStats_EncodePayload(gGameStatsRequest.pid, gGameStatsRequest.payload, gGameStatsRequest.payloadSize, gGameStatsRequest.dataText, gGameStatsRequest.dataTextSize);
+                switch (result) {
+                case 0:
+                    break;
+                case 1:
+                case 2:
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    return;
+                }
+                gGameStatsRequest.state = GAME_STATS_STATE_SEND_DATA;
+                return;
+            }
+            gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+            return;
+        case GAME_STATS_STATE_WAIT_RESPONSE:
+            if (length == 22) {
+                if (strncmp(response, "error: check sum      ", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_CHECK_SUM;
+                    return;
+                }
+                if (strncmp(response, "error: pid            ", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_PID;
+                    return;
+                }
+                if (strncmp(response, "error: data length    ", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_DATA_LENGTH;
+                    return;
+                }
+                if (strncmp(response, "error: token not found", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_TOKEN_NOT_FOUND;
+                    return;
+                }
+                if (strncmp(response, "error: token expired  ", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_TOKEN_EXPIRED;
+                    return;
+                }
+                if (strncmp(response, "error: incorrect hash ", 22) == 0) {
+                    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                    gGameStatsRequest.error = GAME_STATS_ERROR_INCORRECT_HASH;
+                    return;
+                }
+            }
+            if (length <= gGameStatsRequest.responseCapacity) {
+                memcpy(gGameStatsRequest.response, response, length);
+                gGameStatsRequest.state = GAME_STATS_STATE_DONE;
+            } else {
+                memcpy(gGameStatsRequest.response, response, gGameStatsRequest.responseCapacity);
+                gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+                gGameStatsRequest.error = GAME_STATS_ERROR_RESPONSE_TOO_LONG;
+            }
+            gGameStatsRequest.responseLength = length;
+            return;
+        }
+    } else {
+        gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+        switch (error) {
+        case 1:
+            gGameStatsRequest.error = 8;
+            return;
+        case 2:
+            gGameStatsRequest.error = 9;
+            return;
+        case 3:
+            gGameStatsRequest.error = 10;
+            return;
+        case 4:
+            gGameStatsRequest.error = 11;
+            return;
+        case 5:
+            gGameStatsRequest.error = 12;
+            return;
+        case 6:
+            gGameStatsRequest.error = 13;
+            return;
+        case 7:
+            gGameStatsRequest.error = 14;
+            return;
+        case 8:
+            gGameStatsRequest.error = 15;
+            return;
+        case 9:
+            gGameStatsRequest.error = 16;
+            return;
+        case 10:
+            gGameStatsRequest.error = 17;
+            return;
+        case 11:
+            gGameStatsRequest.error = 18;
+            return;
+        case 12:
+            gGameStatsRequest.error = 19;
+            return;
+        case 15:
+            gGameStatsRequest.error = 22;
+            return;
+        case 16:
+            gGameStatsRequest.error = 23;
+            return;
+        case 19:
+            gGameStatsRequest.error = 25;
+            break;
+        }
+    }
+}
+
+void GameStats_Start(void) {
+    gGameStatsRequest.state = GAME_STATS_STATE_STARTED;
+    gGameStatsRequest.requestId = -1;
+    if (!DWC_InitGHTTP(0)) {
+        gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+    }
+}
+
+enum GameStatsPrepareResult GameStats_PrepareRequest(const char *url, int pid, void *payload, int payloadSize, void *response, int responseCapacity) {
+    int total;
+    int len;
+    int textLength;
+    char *requestUrl;
+
+    if (gGameStatsRequest.state != GAME_STATS_STATE_STARTED) {
+        return GAME_STATS_PREPARE_NOT_STARTED;
+    }
+    gGameStatsRequest.pid = pid;
+    gGameStatsRequest.payload = payload;
+    gGameStatsRequest.payloadSize = payloadSize;
+    gGameStatsRequest.response = response;
+    gGameStatsRequest.responseCapacity = responseCapacity;
+    total = payloadSize + 8;
+    len = strlen(url);
+    textLength = GameStats_GetBase64Length(total);
+    gGameStatsRequest.url = DWC_Alloc(10, len + 69 + textLength);
+    if (gGameStatsRequest.url == NULL) {
+        return GAME_STATS_PREPARE_NO_MEMORY;
+    }
+    sprintf(gGameStatsRequest.url, "%s?pid=%d", url, pid);
+    requestUrl = gGameStatsRequest.url;
+    len = strlen(requestUrl);
+    textLength = strlen("&hash=");
+    gGameStatsRequest.hashText = requestUrl + len + textLength;
+    textLength = strlen("&data=");
+    gGameStatsRequest.dataText = gGameStatsRequest.hashText + 40 + textLength;
+    gGameStatsRequest.dataTextSize = GameStats_GetBase64Length(total) + 1;
+    gGameStatsRequest.state = GAME_STATS_STATE_PREPARED;
+    return GAME_STATS_PREPARE_OK;
+}
+
+GameStatsRequest gGameStatsRequest = { GAME_STATS_STATE_IDLE };
+u32 gGameStatsRandState;
+
+int GameStats_Update(void) {
+    switch (gGameStatsRequest.state) {
+    case GAME_STATS_STATE_PREPARED:
+        gGameStatsRequest.requestId = DWC_GetGHTTPData(gGameStatsRequest.url, GameStats_ResponseCallback, &gGameStatsRequest);
+        GameStats_SetRequestError(gGameStatsRequest.requestId);
+        if (gGameStatsRequest.requestId >= 0) {
+            gGameStatsRequest.state = GAME_STATS_STATE_WAIT_CHALLENGE;
+        } else {
+            gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+        }
+        break;
+    case GAME_STATS_STATE_WAIT_CHALLENGE:
+        if (!DWC_ProcessGHTTP()) {
+            gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+        }
+        break;
+    case GAME_STATS_STATE_SEND_DATA:
+        gGameStatsRequest.requestId = DWC_GetGHTTPData(gGameStatsRequest.url, GameStats_ResponseCallback, &gGameStatsRequest);
+        GameStats_SetRequestError(gGameStatsRequest.requestId);
+        if (gGameStatsRequest.requestId >= 0) {
+            gGameStatsRequest.state = GAME_STATS_STATE_WAIT_RESPONSE;
+        } else {
+            gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+        }
+        break;
+    case GAME_STATS_STATE_WAIT_RESPONSE:
+        if (!DWC_ProcessGHTTP()) {
+            gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+        }
+        break;
+    case GAME_STATS_STATE_DONE:
+        break;
+    }
+    return gGameStatsRequest.state;
+}
+
+void GameStats_Shutdown(void) {
+    if (gGameStatsRequest.url != NULL) {
+        DWC_Free(10, gGameStatsRequest.url, 0);
+        gGameStatsRequest.url = NULL;
+    }
+    DWC_ShutdownGHTTP();
+    gGameStatsRequest.state = GAME_STATS_STATE_IDLE;
+}
+
+int GameStats_GetError(void) {
+    return gGameStatsRequest.error;
+}
+
+int GameStats_GetResponseLength(void) {
+    return gGameStatsRequest.responseLength;
+}

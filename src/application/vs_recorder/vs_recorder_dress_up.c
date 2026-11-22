@@ -1,0 +1,1563 @@
+#include <string.h>
+
+#include "global.h"
+
+#include "constants/sndseq.h"
+
+#include "application/dress_up/accessory_portrait.h"
+#include "application/vs_recorder/vs_recorder_internal.h"
+#include "application/vs_recorder/vs_recorder_screens.h"
+#include "global_terminal/global_terminal_net.h"
+#include "msgdata/msg.naix"
+#include "msgdata/msg/msg_0013.h"
+
+#include "bg_window.h"
+#include "fashion_case.h"
+#include "font.h"
+#include "font_sprite.h"
+#include "gf_gfx_loader.h"
+#include "gf_gfx_planes.h"
+#include "heap.h"
+#include "message_format.h"
+#include "msgdata.h"
+#include "orbit_cursor.h"
+#include "palette.h"
+#include "pm_string.h"
+#include "poke_overlay.h"
+#include "pokedex.h"
+#include "render_text.h"
+#include "save_fashion.h"
+#include "sound_playback.h"
+#include "sprite_system.h"
+#include "swap_3d_buffers.h"
+#include "system.h"
+#include "text.h"
+#include "touch_hitbox_controller.h"
+#include "touchscreen.h"
+#include "vram_transfer_manager.h"
+
+// VS Recorder dress-up photo screens: send the player's own photo and view photos of a chosen species.
+
+FS_EXTERN_OVERLAY(OVY_41);
+
+enum VsRecorderFrontierExitStep {
+    FRONTIER_EXIT_STEP_SPIN_OUT,
+    FRONTIER_EXIT_STEP_WAIT,
+    FRONTIER_EXIT_STEP_FREE,
+    FRONTIER_EXIT_STEP_REBUILD_MENU,
+    FRONTIER_EXIT_STEP_RESET_FADE,
+    FRONTIER_EXIT_STEP_FADE_IN_MENU,
+};
+
+enum VsRecorderDressUpEnterStep {
+    DRESS_UP_ENTER_STEP_FADE_OUT_MENU,
+    DRESS_UP_ENTER_STEP_HIDE_CURSOR,
+    DRESS_UP_ENTER_STEP_FLIP_SCREENS,
+    DRESS_UP_ENTER_STEP_DONE,
+};
+
+enum VsRecorderDressUpSendShowStep {
+    DRESS_UP_SEND_SHOW_STEP_CREATE_PHOTO,
+    DRESS_UP_SEND_SHOW_STEP_LOAD_PALETTE,
+    DRESS_UP_SEND_SHOW_STEP_FADE_IN,
+    DRESS_UP_SEND_SHOW_STEP_DONE,
+};
+
+enum VsRecorderDressUpSendUploadStep {
+    DRESS_UP_SEND_UPLOAD_STEP_FREE_CARD,
+    DRESS_UP_SEND_UPLOAD_STEP_FADE_OUT,
+    DRESS_UP_SEND_UPLOAD_STEP_SHOW_SENDING,
+    DRESS_UP_SEND_UPLOAD_STEP_REQUEST,
+    DRESS_UP_SEND_UPLOAD_STEP_CHECK_RESULT,
+    DRESS_UP_SEND_UPLOAD_STEP_HIDE_CURSOR,
+    DRESS_UP_SEND_UPLOAD_STEP_REBUILD_MENU,
+    DRESS_UP_SEND_UPLOAD_STEP_FADE_IN_MENU,
+};
+
+enum VsRecorderDressUpSendExitStep {
+    DRESS_UP_SEND_EXIT_STEP_FREE_CARD,
+    DRESS_UP_SEND_EXIT_STEP_FADE_OUT,
+    DRESS_UP_SEND_EXIT_STEP_REBUILD_MENU,
+    DRESS_UP_SEND_EXIT_STEP_FADE_IN_MENU,
+};
+
+enum VsRecorderDressUpViewSelectCategoryStep {
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_LOAD_SCREEN,
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_FADE_IN,
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_INPUT,
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_REMOVE_WINDOWS,
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_FADE_OUT,
+    DRESS_UP_VIEW_SELECT_CATEGORY_STEP_DONE,
+};
+
+enum VsRecorderDressUpViewSelectSpeciesStep {
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_LOAD_SCREEN,
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_CREATE_LIST,
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_INPUT,
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_REMOVE_LIST,
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_FADE_OUT,
+    DRESS_UP_VIEW_SELECT_SPECIES_STEP_DONE,
+};
+
+enum VsRecorderDressUpViewExitStep {
+    DRESS_UP_VIEW_EXIT_STEP_FREE_CARD,
+    DRESS_UP_VIEW_EXIT_STEP_FADE_OUT,
+    DRESS_UP_VIEW_EXIT_STEP_REBUILD_MENU,
+    DRESS_UP_VIEW_EXIT_STEP_FADE_IN_MENU,
+};
+
+enum VsRecorderDressUpViewDownloadStep {
+    DRESS_UP_VIEW_DOWNLOAD_STEP_SHOW_RECEIVING,
+    DRESS_UP_VIEW_DOWNLOAD_STEP_REQUEST,
+    DRESS_UP_VIEW_DOWNLOAD_STEP_CHECK_RESULT,
+    DRESS_UP_VIEW_DOWNLOAD_STEP_HIDE_CURSOR,
+    DRESS_UP_VIEW_DOWNLOAD_STEP_CHECK_FOUND,
+    DRESS_UP_VIEW_DOWNLOAD_STEP_WAIT_NOT_FOUND,
+};
+
+enum VsRecorderDressUpViewShowPhotoStep {
+    DRESS_UP_VIEW_SHOW_PHOTO_STEP_CREATE_PHOTO,
+    DRESS_UP_VIEW_SHOW_PHOTO_STEP_LOAD_PALETTE,
+    DRESS_UP_VIEW_SHOW_PHOTO_STEP_FADE_IN,
+    DRESS_UP_VIEW_SHOW_PHOTO_STEP_DONE,
+};
+
+enum VsRecorderDressUpViewClosePhotoStep {
+    DRESS_UP_VIEW_CLOSE_PHOTO_STEP_REMOVE_CAPTION,
+    DRESS_UP_VIEW_CLOSE_PHOTO_STEP_FADE_OUT,
+    DRESS_UP_VIEW_CLOSE_PHOTO_STEP_DONE,
+};
+
+enum VsRecorderDressUpViewToggleProfileStep {
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_REMOVE_CAPTION,
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_BLEND_OUT,
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_CREATE,
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_LOAD_PALETTE,
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_BLEND_IN,
+    DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_DONE,
+};
+
+enum VsRecorderDressUpViewChangePhotoStep {
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_REMOVE_CAPTION,
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_BLEND_OUT,
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_CREATE_PHOTO,
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_LOAD_PALETTE,
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_BLEND_IN,
+    DRESS_UP_VIEW_CHANGE_PHOTO_STEP_DONE,
+};
+
+// substates of sending a Dress-Up photo (gVsRecorderDressUpSendSubStates)
+#define DRESS_UP_SEND_MAIN   3
+#define DRESS_UP_SEND_UPLOAD 4
+#define DRESS_UP_SEND_EXIT   5
+
+// substates of viewing Dress-Up photos (gVsRecorderDressUpViewSubStates)
+#define DRESS_UP_VIEW_SELECT_CATEGORY 3
+#define DRESS_UP_VIEW_SELECT_SPECIES  4
+#define DRESS_UP_VIEW_EXIT            5
+#define DRESS_UP_VIEW_DOWNLOAD        6
+#define DRESS_UP_VIEW_SHOW_PHOTO      7
+#define DRESS_UP_VIEW_MAIN            8
+#define DRESS_UP_VIEW_CLOSE_PHOTO     9
+#define DRESS_UP_VIEW_TOGGLE_PROFILE  10
+#define DRESS_UP_VIEW_CHANGE_PHOTO    11
+
+static void VsRecorder_RemoveDressUpToggleWindow(VsRecorderWork *work);
+static void VsRecorder_PrintDressUpToggleLabel(VsRecorderWork *work, u32 msgId);
+static void VsRecorder_CreateDressUpToggleWindow(VsRecorderWork *work);
+static void VsRecorder_DressUpVBlankCB(void *data);
+static void VsRecorder_SetPhotoWindow(void);
+static void VsRecorder_DisablePhotoWindow(void);
+static void VsRecorder_SetDressUpSendButtonHidden(VsRecorderWork *work, BOOL hidden);
+static void VsRecorder_CreateDressUpButtons(VsRecorderWork *work);
+static void VsRecorder_FreeDressUpButtons(VsRecorderWork *work);
+static void VsRecorder_PrintOwnPhotoCaption(VsRecorderWork *work);
+static void VsRecorder_PrintPhotoCaption(VsRecorderWork *work, int index);
+static BOOL VsRecorder_DressUpCategoryHasSeen(VsRecorderWork *work, int category);
+static void VsRecorder_BuildDressUpSpeciesList(VsRecorderWork *work, int category);
+static void VsRecorder_FreeDressUpSpeciesList(VsRecorderWork *work);
+static void VsRecorder_OnDressUpCategoryTouch(u32 index, u32 event, void *arg);
+static void VsRecorder_CreateDressUpCategoryWindows(VsRecorderWork *work);
+static void VsRecorder_RemoveDressUpCategoryWindows(VsRecorderWork *work);
+static void VsRecorder_RemovePhotoCaption(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpEnter(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpInit(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpSendExit(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpSendMain(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpSendShow(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpSendUpload(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewChangePhoto(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewClosePhoto(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewDownload(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewExit(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewInit(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewMain(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewSelectCategory(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewSelectSpecies(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewShowPhoto(VsRecorderWork *work);
+static BOOL VsRecorder_DressUpViewToggleProfile(VsRecorderWork *work);
+
+// first species list index of each group
+static u16 sVsRecorderDressUpSpeciesGroupStarts[10] = { 0, 87, 136, 191, 235, 303, 360, 457, 487, 493 };
+
+// right bottom button (send)
+static const TouchscreenHitbox sVsRecorderDressUpRightButtonHitbox = { 152, 184, 128, 224 };
+
+// top bar (photo / profile)
+static const TouchscreenHitbox sVsRecorderDressUpTopBarHitbox = { 16, 48, 56, 200 };
+
+// centre bottom button (exit)
+static const TouchscreenHitbox sVsRecorderDressUpCenterButtonHitbox = { 152, 184, 80, 176 };
+
+// next photo
+static const TouchscreenHitbox sVsRecorderDressUpNextPhotoHitbox = { 72, 104, 184, 232 };
+
+// previous photo
+static const TouchscreenHitbox sVsRecorderDressUpPrevPhotoHitbox = { 72, 104, 24, 72 };
+
+// left bottom button (exit)
+static const TouchscreenHitbox sVsRecorderDressUpLeftButtonHitbox = { 152, 184, 32, 128 };
+
+static const TouchscreenHitbox sVsRecorderDressUpSpeciesListHitboxes[6] = {
+    { 24,  40,  56, 192 },
+    { 40,  56,  56, 192 },
+    { 56,  72,  56, 192 },
+    { 72,  88,  56, 192 },
+    { 88,  104, 56, 192 },
+    { 104, 120, 56, 192 },
+};
+
+// species list
+static const VsRecorderListConfig sVsRecorderDressUpSpeciesListConfig = {
+    .entries = NULL,
+    .count = 0,
+    .lineHeight = 1,
+    .x = 9,
+    .y = 3,
+    .width = 14,
+    .height = 12,
+    .baseTile = 0x20,
+    .bgId = 6,
+    .rows = 6,
+    .hitboxes = sVsRecorderDressUpSpeciesListHitboxes,
+};
+
+const VsRecorderScreenFunc gVsRecorderDressUpSendSubStates[6] = {
+    VsRecorder_DressUpInit,
+    VsRecorder_DressUpEnter,
+    VsRecorder_DressUpSendShow,
+    VsRecorder_DressUpSendMain,
+    VsRecorder_DressUpSendUpload,
+    VsRecorder_DressUpSendExit,
+};
+
+const VsRecorderScreenFunc gVsRecorderDressUpViewSubStates[12] = {
+    VsRecorder_DressUpInit,
+    VsRecorder_DressUpEnter,
+    VsRecorder_DressUpViewInit,
+    VsRecorder_DressUpViewSelectCategory,
+    VsRecorder_DressUpViewSelectSpecies,
+    VsRecorder_DressUpViewExit,
+    VsRecorder_DressUpViewDownload,
+    VsRecorder_DressUpViewShowPhoto,
+    VsRecorder_DressUpViewMain,
+    VsRecorder_DressUpViewClosePhoto,
+    VsRecorder_DressUpViewToggleProfile,
+    VsRecorder_DressUpViewChangePhoto,
+};
+
+BOOL VsRecorder_FrontierExit(VsRecorderWork *work) {
+    VsRecorderFrontierRecord *record = work->screenWork;
+
+    switch (work->step) {
+    case FRONTIER_EXIT_STEP_SPIN_OUT:
+        if (record->fade == 0) {
+            PlaySE(SEQ_SE_PL_BREC21);
+        }
+        if (record->fade != 16) {
+            record->fade += 2;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 28, record->fade, work->blendColor);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 0x4018, record->fade, work->blendColor);
+        if (!VsRecorder_SpinOutFrontierSprites(work)) {
+            record->fade = 0;
+            work->step++;
+        }
+        break;
+    case FRONTIER_EXIT_STEP_WAIT:
+        work->step++;
+    case FRONTIER_EXIT_STEP_FREE:
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_FreeFrontierSprites(work);
+        VsRecorder_FreeFrontierButtons(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        record->fade = 0;
+        work->step++;
+        break;
+    case FRONTIER_EXIT_STEP_REBUILD_MENU:
+        VsRecorder_SetScreensFlipped(TRUE);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_RebuildMenuRowsParent(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+        work->step++;
+        break;
+    case FRONTIER_EXIT_STEP_RESET_FADE:
+        if (record->fade != 0) {
+            record->fade -= 2;
+            break;
+        }
+        work->step++;
+        VsRecorder_ResetFade(&record->fade);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, record->fade, work->blendColor);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 28, record->fade, work->blendColor);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, record->fade, work->blendColor);
+        break;
+    default:
+        if (VsRecorder_StepFade(&record->fade, 0)) {
+            G2_SetBlendAlpha(GX_BLEND_PLANEMASK_BG2, GX_BLEND_PLANEMASK_BG1 | GX_BLEND_PLANEMASK_OBJ, 7, 8);
+            G2S_SetBlendAlpha(GX_BLEND_PLANEMASK_BG2, GX_BLEND_PLANEMASK_BG1 | GX_BLEND_PLANEMASK_OBJ, 7, 8);
+            Heap_Free(record);
+            VsRecorder_ClearPaletteBlend(work);
+            VsRecorder_ResetFade(&record->fade);
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, 16, work->blendColor);
+            VsRecorder_SetScreenIfDone(work, VS_RECORDER_SCREEN_MENU, TRUE, work->screenPtr);
+            VsRecorder_SetSubState(work, VS_RECORDER_MENU_SLIDE_IN);
+        } else {
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, record->fade, work->blendColor);
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, record->fade, work->blendColor);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// both dress-up screens, substate 0
+static BOOL VsRecorder_DressUpInit(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = Heap_Alloc(HEAP_ID_109, sizeof(VsRecorderDressUp));
+    memset(dressUp, 0, sizeof(VsRecorderDressUp));
+    work->screenWork = dressUp;
+    HandleLoadOverlay(FS_OVERLAY_ID(OVY_41), OVY_LOAD_ASYNC);
+    dressUp->portraitConfig.bgConfig = work->bgConfig;
+    dressUp->portraitConfig.x = 72;
+    dressUp->portraitConfig.y = 16;
+    dressUp->portraitConfig.heapID = HEAP_ID_109;
+    dressUp->photo = FashionEntry_New(HEAP_ID_109);
+    dressUp->profile.card = FrontierCard_New(HEAP_ID_109);
+    BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+    BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+    BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+    BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+    VsRecorder_InitBgBlend(&dressUp->eva, &dressUp->evb, VS_RECORDER_BLEND_BOTH);
+    VsRecorder_SetSubState(work, 1);
+    return FALSE;
+}
+
+// both dress-up screens, substate 1: fade out the menu and flip the screens
+static BOOL VsRecorder_DressUpEnter(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_ENTER_STEP_FADE_OUT_MENU:
+        if (VsRecorder_StepFade(&dressUp->fade, 1)) {
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, dressUp->fade, work->blendColor);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, dressUp->fade, work->blendColor);
+        break;
+    case DRESS_UP_ENTER_STEP_HIDE_CURSOR:
+        SetBgPriority(GF_BG_LYR_MAIN_0, 0);
+        SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+        SetBgPriority(GF_BG_LYR_MAIN_1, 3);
+        SetBgPriority(GF_BG_LYR_MAIN_3, 2);
+        SetBgPriority(GF_BG_LYR_SUB_0, 0);
+        SetBgPriority(GF_BG_LYR_SUB_2, 1);
+        SetBgPriority(GF_BG_LYR_SUB_1, 3);
+        SetBgPriority(GF_BG_LYR_SUB_3, 2);
+        OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+        work->step++;
+        break;
+    case DRESS_UP_ENTER_STEP_FLIP_SCREENS:
+        VsRecorder_StartFlipScreens(work, FALSE);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        work->step++;
+        break;
+    default:
+        if (VsRecorder_IsFlipScreensDone(work)) {
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeMenuRows(work);
+            VsRecorder_CreateDressUpButtons(work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            GfGfxLoader_LoadCharDataFromOpenNarc(work->narc, 62, work->bgConfig, GF_BG_LYR_MAIN_3, 0, 0, FALSE, HEAP_ID_109);
+            GfGfxLoader_LoadCharDataFromOpenNarc(work->narc, 62, work->bgConfig, GF_BG_LYR_SUB_3, 0, 0, FALSE, HEAP_ID_109);
+            VsRecorder_SetSubState(work, 2);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// send screen, substate 2: show the player's own photo
+static BOOL VsRecorder_DressUpSendShow(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_SEND_SHOW_STEP_CREATE_PHOTO:
+        VsRecorder_SetPhotoWindow();
+        VsRecorder_LoadScreen(work, 35, GF_BG_LYR_MAIN_3);
+        VsRecorder_LoadScreen(work, 37, GF_BG_LYR_SUB_3);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        dressUp->ownPhoto = Save_FashionData_GetEntry(Save_FashionData_Get(work->saveData), 0);
+        if (dressUp->portrait == NULL) {
+            dressUp->portrait = AccessoryPortrait_Create(&dressUp->portraitConfig, dressUp->ownPhoto);
+            AccessoryPortrait_SetMonVisible(dressUp->portrait, TRUE);
+        }
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_OFF);
+        Main_SetVBlankIntrCB(VsRecorder_DressUpVBlankCB, work);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_SHOW_STEP_LOAD_PALETTE:
+        PaletteData_LoadPaletteSlotFromHardware(work->plttData, PLTTBUF_MAIN_BG, 0, 0x200);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_SHOW_STEP_FADE_IN:
+        VsRecorder_StepFade(&dressUp->fade, 0);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_BOTH)) {
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_ON);
+            VsRecorder_PrintOwnPhotoCaption(work);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    default:
+        VsRecorder_SetSubState(work, DRESS_UP_SEND_MAIN);
+        break;
+    }
+    if (dressUp->portrait != NULL) {
+        Thunk_G3X_Reset();
+        AccessoryPortrait_Draw(dressUp->portrait);
+        RequestSwap3DBuffers(GX_SORTMODE_AUTO, GX_BUFFERMODE_Z);
+    }
+    return FALSE;
+}
+
+// send screen, substate 3: wait for EXIT or SEND
+static BOOL VsRecorder_DressUpSendMain(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpLeftButtonHitbox)) {
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_SEND_EXIT);
+    }
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpRightButtonHitbox)) {
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_SEND_UPLOAD);
+    }
+    if (dressUp->portrait != NULL) {
+        Thunk_G3X_Reset();
+        AccessoryPortrait_Draw(dressUp->portrait);
+        RequestSwap3DBuffers(GX_SORTMODE_AUTO, GX_BUFFERMODE_Z);
+    }
+    return FALSE;
+}
+
+// send screen, substate 4: upload the photo, then return to the menu
+static BOOL VsRecorder_DressUpSendUpload(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    GlobalTerminalNetError *error;
+
+    if (!VsRecorder_IsNetIdle(work)) {
+        return FALSE;
+    }
+    switch (work->step) {
+    case DRESS_UP_SEND_UPLOAD_STEP_FREE_CARD:
+        SetBgPriority(GF_BG_LYR_MAIN_0, 1);
+        SetBgPriority(GF_BG_LYR_MAIN_1, 3);
+        SetBgPriority(GF_BG_LYR_MAIN_2, 2);
+        SetBgPriority(GF_BG_LYR_MAIN_3, 1);
+        SetBgPriority(GF_BG_LYR_SUB_0, 1);
+        SetBgPriority(GF_BG_LYR_SUB_1, 3);
+        SetBgPriority(GF_BG_LYR_SUB_2, 2);
+        SetBgPriority(GF_BG_LYR_SUB_3, 1);
+        Heap_Free(dressUp->photo);
+        FrontierCard_Delete(dressUp->profile.card);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        VsRecorder_RemovePhotoCaption(work);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_FADE_OUT:
+        VsRecorder_StepFade(&dressUp->fade, 1);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_BOTH)) {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeDressUpButtons(work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+            BgSetPosTextAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2, BG_POS_OP_SET_X, 0);
+            SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_SHOW_SENDING:
+        VsRecorder_PlaceOrbitCursor(work, work->orbitCursors[0], 128, 96);
+        OrbitCursor_SetVisible(work->orbitCursors[0], TRUE);
+        OrbitCursor_SetRadius(work->orbitCursors[0], 24, 24);
+        VsRecorder_ShowTopMessage(work, msg_0013_00286);
+        dressUp->uploadCard = FrontierCard_New(HEAP_ID_109);
+        FrontierCard_InitFromSave(dressUp->uploadCard, work->saveData);
+        PlaySE(SEQ_SE_PL_BREC80);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_REQUEST:
+        if (GlobalTerminalNet_RequestDressUpUpload(VsRecorder_GetNet(work), dressUp->uploadCard, dressUp->ownPhoto) == TRUE) {
+            FrontierCard_Delete(dressUp->uploadCard);
+            work->step++;
+        }
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_CHECK_RESULT:
+        VsRecorder_HideTopMessage(work);
+        if (GlobalTerminalNet_GetError(VsRecorder_GetNet(work), &error) == TRUE) {
+            StopSE(SEQ_SE_PL_BREC80, 0);
+            VsRecorder_ShowMessageScreen(work, VS_RECORDER_REQUEST_DRESS_UP_UPLOAD, error->code, error->type);
+            work->step++;
+        } else {
+            StopSE(SEQ_SE_PL_BREC80, 0);
+            VsRecorder_AddGameStatsScore(work, 36);
+            PlaySE(SEQ_SE_PL_BREC12);
+            work->step++;
+        }
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_HIDE_CURSOR:
+        OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+        OrbitCursor_SetRadius(work->orbitCursors[0], 0, 0);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_UPLOAD_STEP_REBUILD_MENU:
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_ResetFade(&dressUp->fade);
+        VsRecorder_RebuildMenuRowsParent(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+        VsRecorder_StartFlipScreens(work, TRUE);
+        work->step++;
+        break;
+    default:
+        if (VsRecorder_IsFlipScreensDone(work)) {
+            if (VsRecorder_StepFade(&dressUp->fade, 0)) {
+                if (dressUp->portrait) {
+                    AccessoryPortrait_Destroy(dressUp->portrait);
+                    VsRecorder_ResetBg2(work);
+                    SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                    VsRecorder_DisablePhotoWindow();
+                }
+                VsRecorder_ClearPaletteBlend(work);
+                VsRecorder_ResetFade(&dressUp->fade);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, 16, work->blendColor);
+                VsRecorder_SetScreenIfDone(work, VS_RECORDER_SCREEN_MENU, TRUE, work->screenPtr);
+                VsRecorder_SetSubState(work, VS_RECORDER_MENU_SLIDE_IN);
+                Heap_Free(dressUp);
+                UnloadOverlayByID(FS_OVERLAY_ID(OVY_41));
+                Main_SetVBlankIntrCB(VsRecorder_VBlankCB, work);
+            } else {
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, dressUp->fade, work->blendColor);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+            }
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// send screen, substate 5: back to the menu without sending
+static BOOL VsRecorder_DressUpSendExit(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_SEND_EXIT_STEP_FREE_CARD:
+        SetBgPriority(GF_BG_LYR_MAIN_0, 1);
+        SetBgPriority(GF_BG_LYR_MAIN_1, 3);
+        SetBgPriority(GF_BG_LYR_MAIN_2, 2);
+        SetBgPriority(GF_BG_LYR_MAIN_3, 1);
+        SetBgPriority(GF_BG_LYR_SUB_0, 1);
+        SetBgPriority(GF_BG_LYR_SUB_1, 3);
+        SetBgPriority(GF_BG_LYR_SUB_2, 2);
+        SetBgPriority(GF_BG_LYR_SUB_3, 1);
+        Heap_Free(dressUp->photo);
+        FrontierCard_Delete(dressUp->profile.card);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        VsRecorder_RemovePhotoCaption(work);
+        work->step++;
+        break;
+    case DRESS_UP_SEND_EXIT_STEP_FADE_OUT:
+        VsRecorder_StepFade(&dressUp->fade, 1);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_BOTH)) {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeDressUpButtons(work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    case DRESS_UP_SEND_EXIT_STEP_REBUILD_MENU:
+        VsRecorder_ResetFade(&dressUp->fade);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_RebuildMenuRowsParent(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+        VsRecorder_StartFlipScreens(work, TRUE);
+        work->step++;
+        break;
+    default:
+        if (VsRecorder_IsFlipScreensDone(work)) {
+            if (VsRecorder_StepFade(&dressUp->fade, 0)) {
+                VsRecorder_SetVBlankPaused(work, TRUE);
+                if (dressUp->portrait != NULL) {
+                    AccessoryPortrait_Destroy(dressUp->portrait);
+                    VsRecorder_ResetBg2(work);
+                    SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                    VsRecorder_DisablePhotoWindow();
+                }
+                VsRecorder_SetVBlankPaused(work, FALSE);
+                VsRecorder_ClearPaletteBlend(work);
+                VsRecorder_ResetFade(&dressUp->fade);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, 16, work->blendColor);
+                VsRecorder_SetScreenIfDone(work, VS_RECORDER_SCREEN_MENU, TRUE, work->screenPtr);
+                VsRecorder_SetSubState(work, VS_RECORDER_MENU_SLIDE_IN);
+                Heap_Free(dressUp);
+                UnloadOverlayByID(FS_OVERLAY_ID(OVY_41));
+                Main_SetVBlankIntrCB(VsRecorder_VBlankCB, work);
+            } else {
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, dressUp->fade, work->blendColor);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+            }
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 2: EXIT only
+static BOOL VsRecorder_DressUpViewInit(VsRecorderWork *work) {
+    if (work->step == 0) {
+        VsRecorder_SetDressUpSendButtonHidden(work, TRUE);
+        work->step = work->step + 1;
+    } else {
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_CATEGORY);
+    }
+    return FALSE;
+}
+
+// view screen, substate 3: choose a species group
+static BOOL VsRecorder_DressUpViewSelectCategory(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    switch (work->step) {
+    case DRESS_UP_VIEW_SELECT_CATEGORY_STEP_LOAD_SCREEN:
+        VsRecorder_LoadScreen(work, 60, GF_BG_LYR_SUB_3);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+        dressUp->hitboxes = TouchHitboxController_Create(gVsRecorderSpeciesGroupHitboxes, 9, VsRecorder_OnDressUpCategoryTouch, work, HEAP_ID_109);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_SELECT_CATEGORY_STEP_FADE_IN:
+        VsRecorder_StepFade(&dressUp->fade, 0);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_BOTH)) {
+            VsRecorder_ShowTopMessage(work, msg_0013_00114);
+            VsRecorder_CreateDressUpCategoryWindows(work);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    case DRESS_UP_VIEW_SELECT_CATEGORY_STEP_INPUT:
+        TouchHitboxController_IsTriggered(dressUp->hitboxes);
+        if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpCenterButtonHitbox) || dressUp->categoryChosen == TRUE) {
+            VsRecorder_OnTouchConfirm(work);
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_SELECT_CATEGORY_STEP_REMOVE_WINDOWS:
+        VsRecorder_RemoveDressUpCategoryWindows(work);
+        TouchHitboxController_Destroy(dressUp->hitboxes);
+        VsRecorder_HideTopMessage(work);
+        work->step++;
+        // fallthrough
+    case DRESS_UP_VIEW_SELECT_CATEGORY_STEP_FADE_OUT:
+        if (dressUp->categoryChosen == TRUE) {
+            if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_SUB)) {
+                work->step++;
+            }
+        } else {
+            VsRecorder_StepFade(&dressUp->fade, 1);
+            if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_SUB)) {
+                work->step++;
+            }
+            PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        }
+        break;
+    default:
+        if (dressUp->categoryChosen == TRUE) {
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_SPECIES);
+        } else {
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_EXIT);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 4: choose a species of the group
+static BOOL VsRecorder_DressUpViewSelectSpecies(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    switch (work->step) {
+    case DRESS_UP_VIEW_SELECT_SPECIES_STEP_LOAD_SCREEN:
+        VsRecorder_SetDressUpSendButtonHidden(work, TRUE);
+        VsRecorder_LoadScreen(work, 58, GF_BG_LYR_SUB_3);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_SELECT_SPECIES_STEP_CREATE_LIST:
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_SUB)) {
+            VsRecorder_ShowTopMessage(work, msg_0013_00114);
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_CreateTouchScrollSprites(&work->touchScroll, work);
+            dressUp->listConfig = sVsRecorderDressUpSpeciesListConfig;
+            dressUp->listConfig.entries = dressUp->entries;
+            dressUp->listConfig.count = dressUp->speciesCount;
+            VsRecorder_ClearListWindow(&work->listWindow);
+            VsRecorder_InitList(&work->listWindow, work, dressUp->speciesNames, &dressUp->listConfig);
+            VsRecorder_TouchScrollSetEnabled(&work->touchScroll, &work->listWindow);
+            VsRecorder_CreateListArrows(&work->listWindow, work, NNS_G2D_VRAM_TYPE_2DSUB);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            dressUp->species = 0;
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_SELECT_SPECIES_STEP_INPUT: {
+        int species;
+        VsRecorder_UpdateTouchScroll(&work->touchScroll);
+        VsRecorder_ListScroll(&work->listWindow, work->touchScroll.direction);
+        species = VsRecorder_UpdateMessageList(&work->listWindow, work);
+        if (species != 0) {
+            dressUp->species = species;
+            VsRecorder_OnTouchConfirm(work);
+            work->step++;
+        }
+        if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpCenterButtonHitbox)) {
+            VsRecorder_OnTouchConfirm(work);
+            work->step++;
+        }
+        break;
+    }
+    case DRESS_UP_VIEW_SELECT_SPECIES_STEP_REMOVE_LIST:
+        VsRecorder_HideTopMessage(work);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_FreeTouchScroll(&work->touchScroll);
+        VsRecorder_RemoveListWindow(&work->listWindow);
+        VsRecorder_FreeListArrows(&work->listWindow, work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        work->step++;
+        // fallthrough
+    case DRESS_UP_VIEW_SELECT_SPECIES_STEP_FADE_OUT:
+        VsRecorder_StepFade(&dressUp->fade, 1);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_BOTH)) {
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    default:
+        VsRecorder_FreeDressUpSpeciesList(work);
+        if (dressUp->species != 0) {
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_DOWNLOAD);
+        } else {
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_CATEGORY);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 5: back to the menu
+static BOOL VsRecorder_DressUpViewExit(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    switch (work->step) {
+    case DRESS_UP_VIEW_EXIT_STEP_FREE_CARD:
+        SetBgPriority(GF_BG_LYR_MAIN_0, 1);
+        SetBgPriority(GF_BG_LYR_MAIN_1, 3);
+        SetBgPriority(GF_BG_LYR_MAIN_2, 2);
+        SetBgPriority(GF_BG_LYR_MAIN_3, 1);
+        SetBgPriority(GF_BG_LYR_SUB_0, 1);
+        SetBgPriority(GF_BG_LYR_SUB_1, 3);
+        SetBgPriority(GF_BG_LYR_SUB_2, 2);
+        SetBgPriority(GF_BG_LYR_SUB_3, 1);
+        Heap_Free(dressUp->photo);
+        FrontierCard_Delete(dressUp->profile.card);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_EXIT_STEP_FADE_OUT:
+        VsRecorder_StepFade(&dressUp->fade, 1);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_BOTH)) {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeDressUpButtons(work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    case DRESS_UP_VIEW_EXIT_STEP_REBUILD_MENU:
+        VsRecorder_ResetFade(&dressUp->fade);
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        VsRecorder_RebuildMenuRowsParent(work);
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+        BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+        VsRecorder_StartFlipScreens(work, TRUE);
+        work->step++;
+        break;
+    default:
+        if (VsRecorder_IsFlipScreensDone(work)) {
+            if (VsRecorder_StepFade(&dressUp->fade, 0)) {
+                VsRecorder_SetVBlankPaused(work, TRUE);
+                if (dressUp->portrait != NULL) {
+                    AccessoryPortrait_Destroy(dressUp->portrait);
+                    VsRecorder_ResetBg2(work);
+                    SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                    VsRecorder_DisablePhotoWindow();
+                }
+                VsRecorder_SetVBlankPaused(work, FALSE);
+                VsRecorder_ClearPaletteBlend(work);
+                VsRecorder_ResetFade(&dressUp->fade);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_MAIN_OBJ, 12, 16, work->blendColor);
+                VsRecorder_SetScreenIfDone(work, VS_RECORDER_SCREEN_MENU, TRUE, work->screenPtr);
+                VsRecorder_SetSubState(work, VS_RECORDER_MENU_SLIDE_IN);
+                Heap_Free(dressUp);
+                UnloadOverlayByID(FS_OVERLAY_ID(OVY_41));
+                Main_SetVBlankIntrCB(VsRecorder_VBlankCB, work);
+            } else {
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_BG, 2, dressUp->fade, work->blendColor);
+                PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+            }
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 6: download the photos of the chosen species
+static BOOL VsRecorder_DressUpViewDownload(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    GlobalTerminalNetError *error;
+    if (!VsRecorder_IsNetIdle(work)) {
+        return FALSE;
+    }
+    switch (work->step) {
+    case DRESS_UP_VIEW_DOWNLOAD_STEP_SHOW_RECEIVING:
+        VsRecorder_PlaceOrbitCursor(work, work->orbitCursors[0], 128, 96);
+        OrbitCursor_SetVisible(work->orbitCursors[0], TRUE);
+        OrbitCursor_SetRadius(work->orbitCursors[0], 24, 24);
+        VsRecorder_ShowTopMessage(work, msg_0013_00287);
+        PlaySE(SEQ_SE_PL_BREC80);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_DOWNLOAD_STEP_REQUEST:
+        if (GlobalTerminalNet_RequestDressUpDownload(VsRecorder_GetNet(work), dressUp->species) == TRUE) {
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_DOWNLOAD_STEP_CHECK_RESULT:
+        VsRecorder_HideTopMessage(work);
+        if (GlobalTerminalNet_GetError(VsRecorder_GetNet(work), &error) == TRUE) {
+            StopSE(SEQ_SE_PL_BREC80, 0);
+            VsRecorder_ShowMessageScreen(work, VS_RECORDER_REQUEST_DRESS_UP_DOWNLOAD, error->code, error->type);
+            dressUp->downloadCount = 0;
+            work->counter = 0;
+            OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_CATEGORY);
+        } else {
+            StopSE(SEQ_SE_PL_BREC80, 0);
+            PlaySE(SEQ_SE_PL_BREC12);
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_DOWNLOAD_STEP_HIDE_CURSOR:
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        OrbitCursor_SetVisible(work->orbitCursors[0], FALSE);
+        OrbitCursor_SetRadius(work->orbitCursors[0], 0, 0);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_DOWNLOAD_STEP_CHECK_FOUND:
+        if (dressUp->downloadCount != 0) {
+            dressUp->photoIndex = 0;
+            dressUp->unk_230 = 0;
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_SHOW_PHOTO);
+        } else {
+            VsRecorder_ShowTopMessage(work, msg_0013_00293); // no photos
+            work->step++;
+            work->counter = 0;
+        }
+        break;
+    default:
+        work->counter++;
+        if (work->counter >= 60 || System_GetTouchNew() == TRUE) {
+            work->counter = 0;
+            VsRecorder_HideTopMessage(work);
+            VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_CATEGORY);
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 7: show the current downloaded photo
+static BOOL VsRecorder_DressUpViewShowPhoto(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_VIEW_SHOW_PHOTO_STEP_CREATE_PHOTO:
+        dressUp->showProfile = FALSE;
+        {
+            GlobalTerminalNetDressUpUpload *download = dressUp->downloads[dressUp->photoIndex];
+            GlobalTerminalNet_UnpackDressUpPhoto(&download->form, dressUp->photo);
+            dressUp->portrait = AccessoryPortrait_Create(&dressUp->portraitConfig, dressUp->photo);
+        }
+        AccessoryPortrait_SetMonVisible(dressUp->portrait, FALSE);
+        VsRecorder_SetPhotoWindow();
+        VsRecorder_LoadScreen(work, 35, GF_BG_LYR_MAIN_3);
+        VsRecorder_LoadScreen(work, 36, GF_BG_LYR_SUB_3);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_OFF);
+        Main_SetVBlankIntrCB(VsRecorder_DressUpVBlankCB, work);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_SHOW_PHOTO_STEP_LOAD_PALETTE:
+        PaletteData_LoadPaletteSlotFromHardware(work->plttData, PLTTBUF_MAIN_BG, 0, 0x200);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_SHOW_PHOTO_STEP_FADE_IN:
+        VsRecorder_StepFade(&dressUp->fade, 0);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_BOTH)) {
+            AccessoryPortrait_SetMonVisible(dressUp->portrait, TRUE);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_ON);
+            VsRecorder_PrintPhotoCaption(work, dressUp->photoIndex);
+            VsRecorder_CreateDressUpToggleWindow(work);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    default:
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_MAIN);
+        break;
+    }
+    if (dressUp->portrait != NULL) {
+        Thunk_G3X_Reset();
+        AccessoryPortrait_Draw(dressUp->portrait);
+        RequestSwap3DBuffers(GX_SORTMODE_AUTO, GX_BUFFERMODE_Z);
+    }
+    return FALSE;
+}
+
+// view screen, substate 8: EXIT, photo / profile toggle, previous / next photo
+static BOOL VsRecorder_DressUpViewMain(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpCenterButtonHitbox)) {
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_CLOSE_PHOTO);
+    }
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpTopBarHitbox)) {
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_TOGGLE_PROFILE);
+    }
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpPrevPhotoHitbox)) {
+        if (dressUp->photoIndex != 0) {
+            dressUp->photoIndex--;
+        } else {
+            dressUp->photoIndex = dressUp->downloadCount - 1;
+        }
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_CHANGE_PHOTO);
+    }
+    if (TouchscreenHitbox_TouchNewIsIn(&sVsRecorderDressUpNextPhotoHitbox)) {
+        dressUp->photoIndex++;
+        dressUp->photoIndex %= dressUp->downloadCount;
+        VsRecorder_OnTouchConfirm(work);
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_CHANGE_PHOTO);
+    }
+    if (dressUp->portrait != NULL) {
+        Thunk_G3X_Reset();
+        AccessoryPortrait_Draw(dressUp->portrait);
+        RequestSwap3DBuffers(GX_SORTMODE_AUTO, GX_BUFFERMODE_Z);
+    }
+    return FALSE;
+}
+
+// view screen, substate 9: close the photo, back to the species groups
+static BOOL VsRecorder_DressUpViewClosePhoto(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_VIEW_CLOSE_PHOTO_STEP_REMOVE_CAPTION:
+        if (!dressUp->showProfile) {
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+            VsRecorder_RemovePhotoCaption(work);
+        } else {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeProfile(&dressUp->profile, work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+        }
+        VsRecorder_RemoveDressUpToggleWindow(work);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_CLOSE_PHOTO_STEP_FADE_OUT:
+        VsRecorder_StepFade(&dressUp->fade, 1);
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_BOTH)) {
+            if (dressUp->portrait != NULL) {
+                AccessoryPortrait_Destroy(dressUp->portrait);
+                VsRecorder_ResetBg2(work);
+                SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                dressUp->portrait = NULL;
+                VsRecorder_DisablePhotoWindow();
+            }
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_3);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_SUB_2);
+            work->step++;
+        }
+        PaletteData_BlendPalettes(work->plttData, PLTTBUF_SUB_OBJ, 12, dressUp->fade, work->blendColor);
+        break;
+    default:
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_SELECT_CATEGORY);
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 10: switch between the photo and the sender's profile
+static BOOL VsRecorder_DressUpViewToggleProfile(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_REMOVE_CAPTION:
+        if (!dressUp->showProfile) {
+            VsRecorder_RemovePhotoCaption(work);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        } else {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeProfile(&dressUp->profile, work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+        }
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_BLEND_OUT:
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_MAIN)) {
+            if (!dressUp->showProfile) {
+                if (dressUp->portrait != NULL) {
+                    AccessoryPortrait_Destroy(dressUp->portrait);
+                    VsRecorder_ResetBg2(work);
+                    SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                    dressUp->portrait = NULL;
+                    VsRecorder_DisablePhotoWindow();
+                }
+                BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+                BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+            }
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_CREATE:
+        if (!dressUp->showProfile) {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            GlobalTerminalNet_CopyRequestHeader(dressUp->downloads[dressUp->photoIndex], dressUp->profile.card);
+            VsRecorder_CreateProfile(&dressUp->profile, work);
+            VsRecorder_SetProfileDrawFlag(&dressUp->profile, FALSE);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+            VsRecorder_LoadScreen(work, 80, GF_BG_LYR_MAIN_3);
+        } else {
+            GlobalTerminalNet_UnpackDressUpPhoto(&dressUp->downloads[dressUp->photoIndex]->form, dressUp->photo);
+            dressUp->portrait = AccessoryPortrait_Create(&dressUp->portraitConfig, dressUp->photo);
+            AccessoryPortrait_SetMonVisible(dressUp->portrait, FALSE);
+            VsRecorder_SetPhotoWindow();
+            VsRecorder_LoadScreen(work, 35, GF_BG_LYR_MAIN_3);
+            GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_OFF);
+        }
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_LOAD_PALETTE:
+        if (dressUp->showProfile) {
+            PaletteData_LoadPaletteSlotFromHardware(work->plttData, PLTTBUF_MAIN_BG, 0, 0x200);
+        }
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_TOGGLE_PROFILE_STEP_BLEND_IN:
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_MAIN)) {
+            if (!dressUp->showProfile) {
+                VsRecorder_SetProfileDrawFlag(&dressUp->profile, TRUE);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+            } else {
+                VsRecorder_PrintPhotoCaption(work, dressUp->photoIndex);
+                AccessoryPortrait_SetMonVisible(dressUp->portrait, TRUE);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_ON);
+            }
+            work->step++;
+        }
+        break;
+    default:
+        dressUp->showProfile ^= TRUE;
+        VsRecorder_PrintDressUpToggleLabel(work, dressUp->showProfile + 121);
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_MAIN);
+        break;
+    }
+    return FALSE;
+}
+
+// view screen, substate 11: switch to the previous / next photo (photoIndex already moved)
+static BOOL VsRecorder_DressUpViewChangePhoto(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+
+    switch (work->step) {
+    case DRESS_UP_VIEW_CHANGE_PHOTO_STEP_REMOVE_CAPTION:
+        if (!dressUp->showProfile) {
+            VsRecorder_RemovePhotoCaption(work);
+            BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+        } else {
+            VsRecorder_SetVBlankPaused(work, TRUE);
+            VsRecorder_FreeProfile(&dressUp->profile, work);
+            VsRecorder_SetVBlankPaused(work, FALSE);
+        }
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_CHANGE_PHOTO_STEP_BLEND_OUT:
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, TRUE, VS_RECORDER_BLEND_MAIN)) {
+            if (!dressUp->showProfile) {
+                if (dressUp->portrait != NULL) {
+                    AccessoryPortrait_Destroy(dressUp->portrait);
+                    VsRecorder_ResetBg2(work);
+                    SetBgPriority(GF_BG_LYR_MAIN_2, 0);
+                    dressUp->portrait = NULL;
+                    VsRecorder_DisablePhotoWindow();
+                }
+                BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_2);
+                BgClearTilemapBufferAndCommit(work->bgConfig, GF_BG_LYR_MAIN_3);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+            }
+            work->step++;
+        }
+        break;
+    case DRESS_UP_VIEW_CHANGE_PHOTO_STEP_CREATE_PHOTO:
+        VsRecorder_SetVBlankPaused(work, TRUE);
+        if (!dressUp->showProfile) {
+            GlobalTerminalNet_UnpackDressUpPhoto(&dressUp->downloads[dressUp->photoIndex]->form, dressUp->photo);
+            dressUp->portrait = AccessoryPortrait_Create(&dressUp->portraitConfig, dressUp->photo);
+            AccessoryPortrait_SetMonVisible(dressUp->portrait, FALSE);
+            VsRecorder_SetPhotoWindow();
+            VsRecorder_LoadScreen(work, 35, GF_BG_LYR_MAIN_3);
+            GfGfx_EngineBTogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG3, GF_PLANE_TOGGLE_ON);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_OFF);
+        } else {
+            GlobalTerminalNet_CopyRequestHeader(dressUp->downloads[dressUp->photoIndex], dressUp->profile.card);
+            VsRecorder_CreateProfile(&dressUp->profile, work);
+            VsRecorder_SetProfileDrawFlag(&dressUp->profile, FALSE);
+            VsRecorder_LoadScreen(work, 80, GF_BG_LYR_MAIN_3);
+            GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_OFF);
+        }
+        VsRecorder_SetVBlankPaused(work, FALSE);
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_CHANGE_PHOTO_STEP_LOAD_PALETTE:
+        if (!dressUp->showProfile) {
+            PaletteData_LoadPaletteSlotFromHardware(work->plttData, PLTTBUF_MAIN_BG, 0, 0x200);
+        }
+        work->step++;
+        break;
+    case DRESS_UP_VIEW_CHANGE_PHOTO_STEP_BLEND_IN:
+        if (VsRecorder_StepBlend(&dressUp->eva, &dressUp->evb, FALSE, VS_RECORDER_BLEND_MAIN)) {
+            if (!dressUp->showProfile) {
+                VsRecorder_PrintPhotoCaption(work, dressUp->photoIndex);
+                AccessoryPortrait_SetMonVisible(dressUp->portrait, TRUE);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG0, GF_PLANE_TOGGLE_ON);
+            } else {
+                VsRecorder_SetProfileDrawFlag(&dressUp->profile, TRUE);
+                GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, GF_PLANE_TOGGLE_ON);
+            }
+            work->step++;
+        }
+        break;
+    default:
+        VsRecorder_SetSubState(work, DRESS_UP_VIEW_MAIN);
+        break;
+    }
+    return FALSE;
+}
+
+static void VsRecorder_RemoveDressUpToggleWindow(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    ClearWindowTilemapAndCopyToVram(&dressUp->windows[0]);
+    RemoveWindow(&dressUp->windows[0]);
+}
+
+static void VsRecorder_PrintDressUpToggleLabel(VsRecorderWork *work, u32 msgId) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    Window *window = &dressUp->windows[0];
+    String *str;
+    FillWindowPixelBuffer(window, 0);
+    str = NewString_ReadMsgData(work->msgData, msgId);
+    AddTextPrinterParameterizedWithColor(window, 0, str, VsRecorder_GetCenteredTextX(window, str), 0, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(15, 13, 0), NULL);
+    String_Delete(str);
+    ScheduleWindowCopyToVram(window);
+}
+
+static void VsRecorder_CreateDressUpToggleWindow(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    Window *window = &dressUp->windows[0];
+    InitWindow(window);
+    AddWindowParameterized(work->bgConfig, window, GF_BG_LYR_SUB_2, 8, 3, 16, 2, 14, 1);
+    VsRecorder_PrintDressUpToggleLabel(work, msg_0013_00121); // the photo is shown
+}
+
+static void VsRecorder_DressUpVBlankCB(void *data) {
+    VsRecorderWork *work = data;
+    VsRecorderDressUp *dressUp = work->screenWork;
+    if (dressUp->portrait != NULL) {
+        AccessoryPortrait_VBlank(dressUp->portrait);
+    }
+    GF_RunVramTransferTasks();
+    PaletteData_PushTransparentBuffers(work->plttData);
+    DoScheduledBgGpuUpdates(work->bgConfig);
+    OS_SetIrqCheckFlag(OS_IE_V_BLANK);
+}
+
+// window 0 around the photo: everything inside, BG0 (the frame) hidden outside
+static void VsRecorder_SetPhotoWindow(void) {
+    GX_SetVisibleWnd(GX_WNDMASK_W0);
+    G2_SetWnd0InsidePlane(GX_WND_PLANEMASK_BG0 | GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ, TRUE);
+    G2_SetWndOutsidePlane(GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ, TRUE);
+    G2_SetWnd0Position(72, 16, 184, 144);
+}
+
+static void VsRecorder_DisablePhotoWindow(void) {
+    GX_SetVisibleWnd(GX_WNDMASK_NONE);
+    GXS_SetVisibleWnd(GX_WNDMASK_NONE);
+}
+
+// send screen: EXIT on the left and SEND on the right; view screens: SEND hidden, EXIT centred
+static void VsRecorder_SetDressUpSendButtonHidden(VsRecorderWork *work, BOOL hidden) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    if (!hidden) {
+        ManagedSprite_SetDrawFlag(dressUp->sendButton.sprite, TRUE);
+        TextOBJ_SetSpritesDrawFlag(dressUp->sendButton.text, TRUE);
+        ManagedSprite_SetPositionXY(dressUp->exitButton.sprite, 32, 232);
+    } else {
+        ManagedSprite_SetDrawFlag(dressUp->sendButton.sprite, FALSE);
+        TextOBJ_SetSpritesDrawFlag(dressUp->sendButton.text, FALSE);
+        ManagedSprite_SetPositionXY(dressUp->exitButton.sprite, 80, 232);
+    }
+    TextOBJ_SetPosition(dressUp->exitButton.text, 36, -8);
+    TextOBJ_SetPosition(dressUp->sendButton.text, 36, -8);
+}
+
+static void VsRecorder_CreateDressUpButtons(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    VsRecorder_LoadButtonGfx31(work, NNS_G2D_VRAM_TYPE_2DSUB);
+    dressUp->exitButton.sprite = VsRecorder_NewButtonSprite(work, NNS_G2D_VRAM_TYPE_2DSUB);
+    dressUp->sendButton.sprite = VsRecorder_NewButtonSprite(work, NNS_G2D_VRAM_TYPE_2DSUB);
+    VsRecorder_CreateTextSprite(&dressUp->exitButton, (VsRecorderGfx *)&work->narc, NNS_G2D_VRAM_TYPE_2DSUB);
+    VsRecorder_CreateTextSprite(&dressUp->sendButton, (VsRecorderGfx *)&work->narc, NNS_G2D_VRAM_TYPE_2DSUB);
+    VsRecorder_SetTextSpriteMsg(&dressUp->exitButton, (VsRecorderGfx *)&work->narc, msg_0013_00003); // EXIT
+    VsRecorder_SetTextSpriteMsg(&dressUp->sendButton, (VsRecorderGfx *)&work->narc, msg_0013_00053); // SEND
+    ManagedSprite_SetAnim(dressUp->exitButton.sprite, 0);
+    ManagedSprite_SetAnim(dressUp->sendButton.sprite, 4);
+    ManagedSprite_SetPositionXY(dressUp->exitButton.sprite, 32, 232);
+    ManagedSprite_SetPositionXY(dressUp->sendButton.sprite, 128, 232);
+    TextOBJ_SetPosition(dressUp->exitButton.text, 36, -8);
+    TextOBJ_SetPosition(dressUp->sendButton.text, 36, -8);
+    TextOBJ_SetSpritesDrawFlag(dressUp->exitButton.text, TRUE);
+    TextOBJ_SetSpritesDrawFlag(dressUp->sendButton.text, TRUE);
+    VsRecorder_SetDressUpSendButtonHidden(work, FALSE);
+}
+
+static void VsRecorder_FreeDressUpButtons(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    VsRecorder_FreeTextSprite(&dressUp->exitButton);
+    VsRecorder_FreeTextSprite(&dressUp->sendButton);
+    Sprite_DeleteAndFreeResources(dressUp->exitButton.sprite);
+    Sprite_DeleteAndFreeResources(dressUp->sendButton.sprite);
+    VsRecorder_FreeButtonGfx(work);
+}
+
+// caption under the player's own photo: the Pokemon's name and the photo's phrase
+static void VsRecorder_PrintOwnPhotoCaption(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    Window *window;
+    String *formatted;
+    String *template;
+    MessageFormat *msgFormat;
+    String *line;
+    u16 word;
+    u32 lineCount;
+    u32 i;
+    u32 y;
+
+    if (WindowIsInUse(&dressUp->caption) == TRUE) {
+        return;
+    }
+    window = &dressUp->caption;
+    InitWindow(window);
+    AddWindowParameterized(work->bgConfig, window, GF_BG_LYR_MAIN_2, 16, 19, 16, 4, 14, 300);
+    FillWindowPixelBuffer(window, 0);
+    msgFormat = VsRecorder_NewMessageFormat(HEAP_ID_109);
+    formatted = String_New(255, HEAP_ID_109);
+    template = NewString_ReadMsgData(work->msgData, msg_0013_00056);
+    line = String_New(255, HEAP_ID_109);
+    FashionEntry_GetMonSecondText(dressUp->ownPhoto, line);
+    VsRecorder_SanitizeName(work, line);
+    word = FashionEntry_GetMailMessageWord(dressUp->ownPhoto);
+    BufferString(msgFormat, 0, line, 0, 1, 2);
+    BufferECWord(msgFormat, 1, word);
+    StringExpandPlaceholders(msgFormat, formatted, template);
+    lineCount = String_CountLines(formatted);
+    for (i = 0; i < lineCount; i++) {
+        y = i * 16;
+        u32 x;
+        String_GetLineN(line, formatted, i);
+        x = FontID_String_GetWidth(0, line, 0);
+        x = (128 - x) >> 1;
+        AddTextPrinterParameterizedWithColor(window, 0, line, x, y, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(15, 13, 0), NULL);
+    }
+    ScheduleWindowCopyToVram(window);
+    String_Delete(line);
+    String_Delete(template);
+    String_Delete(formatted);
+    MessageFormat_Delete(msgFormat);
+}
+
+// the same for the downloaded photo (index: unused, the photo is already unpacked)
+static void VsRecorder_PrintPhotoCaption(VsRecorderWork *work, int index) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    Window *window;
+    String *formatted;
+    String *template;
+    MessageFormat *msgFormat;
+    String *line;
+    u16 word;
+    u32 lineCount;
+    u32 i;
+    u32 y;
+
+    if (WindowIsInUse(&dressUp->caption) == TRUE) {
+        return;
+    }
+    window = &dressUp->caption;
+    InitWindow(window);
+    AddWindowParameterized(work->bgConfig, window, GF_BG_LYR_MAIN_2, 16, 19, 16, 4, 14, 300);
+    FillWindowPixelBuffer(window, 0);
+    msgFormat = VsRecorder_NewMessageFormat(HEAP_ID_109);
+    formatted = String_New(255, HEAP_ID_109);
+    template = NewString_ReadMsgData(work->msgData, msg_0013_00056);
+    line = String_New(255, HEAP_ID_109);
+    FashionEntry_GetMonSecondText(dressUp->photo, line);
+    VsRecorder_SanitizeName(work, line);
+    word = FashionEntry_GetMailMessageWord(dressUp->photo);
+    BufferString(msgFormat, 0, line, 0, 1, 2);
+    BufferECWord(msgFormat, 1, word);
+    StringExpandPlaceholders(msgFormat, formatted, template);
+    lineCount = String_CountLines(formatted);
+    for (i = 0; i < lineCount; i++) {
+        y = i * 16;
+        u32 x;
+        String_GetLineN(line, formatted, i);
+        x = FontID_String_GetWidth(0, line, 0);
+        x = (128 - x) >> 1;
+        AddTextPrinterParameterizedWithColor(window, 0, line, x, y, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(15, 13, 0), NULL);
+    }
+    ScheduleWindowCopyToVram(window);
+    String_Delete(line);
+    String_Delete(template);
+    String_Delete(formatted);
+    MessageFormat_Delete(msgFormat);
+}
+
+// TRUE if the player has seen a species of the group
+static BOOL VsRecorder_DressUpCategoryHasSeen(VsRecorderWork *work, int category) {
+    BOOL found = FALSE;
+    int end = sVsRecorderDressUpSpeciesGroupStarts[category + 1];
+    int start = sVsRecorderDressUpSpeciesGroupStarts[category];
+    int count, i;
+    u16 *list = VsRecorder_LoadSpeciesList(HEAP_ID_109, found, &count);
+    Pokedex *pokedex = Save_Pokedex_Get(work->saveData);
+    for (i = start; i < end; i++) {
+        if (!Pokedex_CheckMonSeenFlag(pokedex, list[i])) {
+            list[i] = 0xFFFF;
+        }
+    }
+    for (; start < end; start++) {
+        if (list[start] != 0xFFFF) {
+            found = TRUE;
+            break;
+        }
+    }
+    Heap_Free(list);
+    return found;
+}
+
+// the seen species of the group first, then the rest of the list; entries for the list window
+static void VsRecorder_BuildDressUpSpeciesList(VsRecorderWork *work, int category) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    int end = sVsRecorderDressUpSpeciesGroupStarts[category + 1];
+    u16 *tmp;
+    Pokedex *pokedex;
+    int start = sVsRecorderDressUpSpeciesGroupStarts[category];
+    int i;
+
+    dressUp->speciesList = VsRecorder_LoadSpeciesList(HEAP_ID_109, 0, &dressUp->listSize);
+    tmp = VsRecorder_LoadSpeciesList(HEAP_ID_109, 0, &dressUp->listSize);
+    pokedex = Save_Pokedex_Get(work->saveData);
+    dressUp->speciesCount = 0;
+    for (i = start; i < end; i++) {
+        if (!Pokedex_CheckMonSeenFlag(pokedex, tmp[i])) {
+            tmp[i] = 0xFFFF;
+        } else {
+            dressUp->speciesCount++;
+        }
+    }
+    i = 0;
+    for (; start < end; start++) {
+        if (tmp[start] != 0xFFFF) {
+            dressUp->speciesList[i] = tmp[start];
+            i++;
+        }
+    }
+    for (; i < dressUp->listSize; i++) {
+        dressUp->speciesList[i] = tmp[i];
+    }
+    Heap_Free(tmp);
+    dressUp->entries = Heap_Alloc(HEAP_ID_109, dressUp->speciesCount * sizeof(VsRecorderListEntry));
+    MI_CpuFill8(dressUp->entries, 0, dressUp->speciesCount * sizeof(VsRecorderListEntry));
+    for (i = 0; i < dressUp->speciesCount; i++) {
+        dressUp->entries[i].msgId = dressUp->speciesList[i];
+        dressUp->entries[i].value = dressUp->speciesList[i];
+    }
+    dressUp->speciesNames = NewMsgDataFromNarc(MSGDATA_LOAD_DIRECT, NARC_msgdata_msg, NARC_msg_msg_0237_bin, HEAP_ID_109);
+    dressUp->categoryChosen = TRUE;
+}
+
+static void VsRecorder_FreeDressUpSpeciesList(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    DestroyMsgData(dressUp->speciesNames);
+    Heap_Free(dressUp->entries);
+    Heap_Free(dressUp->speciesList);
+    dressUp->categoryChosen = FALSE;
+}
+
+static void VsRecorder_OnDressUpCategoryTouch(u32 index, u32 event, void *arg) {
+    if (event != 0) {
+        return;
+    }
+    if (!VsRecorder_DressUpCategoryHasSeen(arg, index)) {
+        PlaySE(SEQ_SE_PL_BREC58);
+        return;
+    }
+    VsRecorder_BuildDressUpSpeciesList(arg, index);
+}
+
+// one window per species group, grayed out if no species of it was seen
+static void VsRecorder_CreateDressUpCategoryWindows(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    u32 textX;
+    String *string;
+    int baseTile;
+    u8 x, y, width;
+    int textY;
+    u8 height;
+    u32 i;
+    Window *window;
+    const TouchscreenHitbox *hitbox;
+
+    baseTile = 1;
+    hitbox = gVsRecorderSpeciesGroupHitboxes;
+    for (i = 0, window = dressUp->windows; i < 9; i++) {
+        x = hitbox->rect.left >> 3;
+        y = hitbox->rect.top >> 3;
+        width = ((u32)hitbox->rect.right >> 3) - x;
+        height = ((u32)hitbox->rect.bottom >> 3) - y;
+        InitWindow(window);
+        AddWindowParameterized(work->bgConfig, window, GF_BG_LYR_SUB_2, x, y, width, height, 14, baseTile);
+        FillWindowPixelBuffer(window, 0);
+        string = NewString_ReadMsgData(work->msgData, i + msg_0013_00068);
+        textX = VsRecorder_GetCenteredTextX(window, string);
+        textY = (height * 8 - 16) / 2;
+        if (VsRecorder_DressUpCategoryHasSeen(work, i) == TRUE) {
+            AddTextPrinterParameterizedWithColor(window, 0, string, textX, textY, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(15, 13, 0), NULL);
+        } else {
+            AddTextPrinterParameterizedWithColor(window, 0, string, textX, textY, TEXT_SPEED_NOTRANSFER, MAKE_TEXT_COLOR(12, 11, 0), NULL);
+        }
+        ScheduleWindowCopyToVram(window);
+        String_Delete(string);
+        baseTile += width * height;
+        window++;
+        hitbox++;
+    }
+}
+
+static void VsRecorder_RemoveDressUpCategoryWindows(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    u32 i;
+    Window *window = dressUp->windows;
+    for (i = 0; i < 9; i++) {
+        ClearWindowTilemapAndCopyToVram(window);
+        RemoveWindow(window);
+        window++;
+    }
+}
+
+static void VsRecorder_RemovePhotoCaption(VsRecorderWork *work) {
+    VsRecorderDressUp *dressUp = work->screenWork;
+    if (WindowIsInUse(&dressUp->caption) == TRUE) {
+        ClearWindowTilemapAndCopyToVram(&dressUp->caption);
+        RemoveWindow(&dressUp->caption);
+    }
+}

@@ -1,0 +1,142 @@
+#include "field_trainer_reveal.h"
+
+#include "global.h"
+
+#include "constants/field/field_effect_renderer.h"
+
+#include "field/field_effect_helpers.h"
+#include "field/field_effect_manager.h"
+
+#include "field_effects.h"
+#include "map_object.h"
+#include "map_object_movement_utilities.h"
+
+// The burst a hidden trainer makes when it jumps out of its hiding place (movement command RevealTrainer): a
+// billboard at the trainer's tile that plays its 7 frames once.
+
+#define TRAINER_REVEAL_RECORD   11
+#define TRAINER_REVEAL_RESOURCE 9
+#define TRAINER_REVEAL_SEQUENCE 9
+#define TRAINER_REVEAL_TEXTURE  10
+
+struct TrainerReveal {
+    FieldEffectManager *manager;
+};
+
+typedef struct TrainerRevealEffectArgs {
+    FieldSystem *fieldSystem;
+    FieldEffectManager *manager;
+    TrainerReveal *reveal;
+    LocalMapObject *mapObject;
+} TrainerRevealEffectArgs;
+
+typedef struct TrainerRevealEffect {
+    BOOL paused;
+    u32 objectId;
+    u32 mapId;
+    u8 unk_0C[4];
+    TrainerRevealEffectArgs args;
+    BillboardObject *billboard;
+} TrainerRevealEffect;
+
+static void TrainerReveal_LoadGfx(TrainerReveal *reveal);
+static void TrainerReveal_FreeGfx(TrainerReveal *reveal);
+static BOOL TrainerRevealEffect_Init(FieldEffect *effect, void *state);
+static void TrainerRevealEffect_Destroy(FieldEffect *effect, void *state);
+static void TrainerRevealEffect_Update(FieldEffect *effect, void *state);
+static void TrainerRevealEffect_Draw(FieldEffect *effect, void *state);
+
+static const FieldEffectBasicTemplate sTrainerRevealEffectTemplate;
+static const BillboardSequenceRange sTrainerRevealRanges[2];
+
+TrainerReveal *TrainerReveal_New(FieldEffectManager *manager) {
+    TrainerReveal *reveal = FieldEffectManager_HeapAllocAndFill(manager, sizeof(TrainerReveal), FALSE, 0);
+    reveal->manager = manager;
+    TrainerReveal_LoadGfx(reveal);
+    return reveal;
+}
+
+void TrainerReveal_Free(TrainerReveal *reveal) {
+    TrainerReveal_FreeGfx(reveal);
+    FieldEffectManager_HeapFree(reveal);
+}
+
+static void TrainerReveal_LoadGfx(TrainerReveal *reveal) {
+    FieldEffectManager_LoadBillboardResource(reveal->manager, TRAINER_REVEAL_RESOURCE, 0x7C);
+    FieldEffectManager_LoadBillboardSequence(reveal->manager, TRAINER_REVEAL_SEQUENCE, 0x94);
+    FieldEffectManager_LoadTexResource(reveal->manager, TRAINER_REVEAL_TEXTURE, 0x17, TRUE);
+    FieldEffectManager_AddRecord(reveal->manager, TRAINER_REVEAL_RECORD, TRAINER_REVEAL_RESOURCE, TRAINER_REVEAL_SEQUENCE, TRAINER_REVEAL_TEXTURE, 0, sTrainerRevealRanges);
+}
+
+static void TrainerReveal_FreeGfx(TrainerReveal *reveal) {
+    FieldEffectManager_FreeBillboardResource(reveal->manager, TRAINER_REVEAL_RESOURCE);
+    FieldEffectManager_FreeBillboardSequence(reveal->manager, TRAINER_REVEAL_SEQUENCE);
+    FieldEffectManager_FreeTexResource(reveal->manager, TRAINER_REVEAL_TEXTURE);
+    FieldEffectManager_ReleaseRecord(reveal->manager, TRAINER_REVEAL_RECORD);
+}
+
+void TrainerReveal_Spawn(LocalMapObject *mapObject) {
+    TrainerRevealEffectArgs args;
+    VecFx32 position;
+    int x;
+    int z;
+    FieldEffectManager *manager = FieldEffectManager_GetFromMapObject(mapObject);
+
+    args.fieldSystem = MapObject_GetFieldSystem(mapObject);
+    args.manager = manager;
+    args.reveal = FieldEffectManager_GetRendererData(manager, FIELD_EFFECT_RENDERER_TRAINER_REVEAL);
+    args.mapObject = mapObject;
+    MapObject_CopyPositionVector(mapObject, &position);
+    x = MapObject_GetXCoord(mapObject);
+    z = MapObject_GetZCoord(mapObject);
+    SetPositionToTileCenter(x, z, &position);
+    FieldEffectManager_CreateEffect(manager, &sTrainerRevealEffectTemplate, &position, 0, &args, MapObject_GetPriorityPlusValue(mapObject, 2));
+}
+
+static BOOL TrainerRevealEffect_Init(FieldEffect *effect, void *state) {
+    TrainerRevealEffect *work = state;
+    VecFx32 position;
+    TrainerRevealEffectArgs *args = FieldEffect_GetUserData(effect);
+    work->args = *args;
+    work->objectId = MapObject_GetID(work->args.mapObject);
+    work->mapId = MapObject_GetMapID(work->args.mapObject);
+    FieldEffect_GetPosition(effect, &position);
+    work->billboard = FieldEffectManager_CreateBillboardFromRecord(work->args.manager, TRAINER_REVEAL_RECORD, &position);
+    return TRUE;
+}
+
+static void TrainerRevealEffect_Destroy(FieldEffect *effect, void *state) {
+    TrainerRevealEffect *work = state;
+    BillboardObject_Delete(work->billboard);
+}
+
+static void TrainerRevealEffect_Update(FieldEffect *effect, void *state) {
+    TrainerRevealEffect *work = state;
+    if (!work->paused) {
+        BillboardObject_AdvanceFrame(work->billboard, FX32_ONE);
+        if (BillboardObject_GetSequenceFrame(work->billboard) / FX32_ONE >= 7) {
+            FieldEffectManager_DestroyEffect(effect);
+        }
+    }
+}
+
+static void TrainerRevealEffect_Draw(FieldEffect *effect, void *state) {
+    TrainerRevealEffect *work = state;
+    VecFx32 position;
+    FieldEffect_GetPosition(effect, &position);
+    position.z += 8 * FX32_ONE;
+    BillboardObject_SetPosition(work->billboard, &position);
+}
+
+static const FieldEffectBasicTemplate sTrainerRevealEffectTemplate = {
+    sizeof(TrainerRevealEffect),
+    TrainerRevealEffect_Init,
+    TrainerRevealEffect_Destroy,
+    TrainerRevealEffect_Update,
+    TrainerRevealEffect_Draw,
+};
+
+static const BillboardSequenceRange sTrainerRevealRanges[2] = {
+    { 0, 7, 1 },
+    { 0, 0, 2 },
+};

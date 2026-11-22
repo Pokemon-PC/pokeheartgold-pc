@@ -1,0 +1,3170 @@
+#include "wifi_setup/wifi_setup_local_wireless.h"
+
+#include "global.h"
+
+#include "nnsys/snd_arc_strm_internal.h"
+#include "wifi_setup/wifi_setup_access_points.h"
+#include "wifi_setup/wifi_setup_app.h"
+#include "wifi_setup/wifi_setup_share.h"
+#include "wifi_setup/wifi_setup_ui.h"
+#include "wifi_setup/wifi_setup_ui_parts.h"
+
+#include <nitro/code32.h>
+#include <nitro/mb/mb_comm.h>
+
+// Local wireless: sound player controls, title banner, dialog window, Wi-Fi USB connector scan and
+// DS Download Play parent.
+
+typedef struct WifiSetupDialogPlanes {
+    u8 planes[6];
+} WifiSetupDialogPlanes;
+
+// Pointers to the Download Play parent's AID masks, followed by the parent's tables and state names.
+typedef struct WifiSetupMbParentData {
+    u16 *masks[6];
+    u8 rest[0x848 - 0x18];
+} WifiSetupMbParentData;
+
+extern void *ov13_0224F5B0[];
+
+static inline void WifiSetupMbParent_ClearChild(u16 aid);
+static inline void WifiSetupMbParent_DisconnectChild(u16 aid);
+static void WifiSetupBanner_SlideInTask0(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideInTask1(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideInTask2(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideInTask3(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideInTask4(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_StopTask(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideOutTask4(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideOutTask3(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideOutTask2(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideOutTask1(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_SlideOffTask(WifiSetupTask *task, void *arg);
+static void WifiSetupBanner_LoadScreenTask(WifiSetupTask *task, void *arg);
+static BOOL WifiSetupUsbScan_StartScan(void);
+static void WifiSetupUsbScan_WmCallback(void *arg);
+static void WifiSetupUsbScan_StoreResults(WMStartScanExCallback *arg);
+static void WifiSetupUsbScan_CheckResults(WMStartScanExCallback *arg);
+static void WifiSetupUsbScan_TimeoutTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_FadeInTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_SlideInTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_InputTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_TimerTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_SetY(int y);
+static void WifiSetupDialog_ClipBlock(WifiSetupOamBlock *obj, int y);
+static void WifiSetupDialog_PressButton(int i);
+static void WifiSetupDialog_CloseDelayTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_SlideOutTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_FadeOutTask(WifiSetupTask *task, void *arg);
+static void WifiSetupDialog_FreeTask(WifiSetupTask *task, void *arg);
+static BOOL WifiSetupMbParent_RegisterFile(const WifiSetupSessionParams *params);
+static void WifiSetupMbParent_AcceptChild(u16 aid);
+static void WifiSetupMbParent_KickChild(u16 aid);
+static void WifiSetupMbParent_StartSending(u16 aid);
+static void WifiSetupMbParent_EndIfAllBooted(void);
+static void WifiSetupMbParent_StateCallback(u16 aid, u32 status, void *arg);
+static void WifiSetupMbParent_SetState(int state);
+
+int MB_Init(void *work, void *user, u32 ggid, u32 tgid, u32 dmaNo);
+void MB_SetParentCommParam(u16 sendSize, u16 maxChildren);
+void MB_CommSetParentStateCallback(void *callback);
+int MB_StartParentFromIdle(u32 channel);
+u32 MB_GetSegmentLength(FSFile *file);
+BOOL MB_ReadSegment(FSFile *file, void *buf, u32 len);
+BOOL MB_RegisterFile(const void *game, void *buf);
+BOOL MB_CommResponseRequest(u16 aid, u32 ack);
+void MB_DisconnectChild(u16 aid);
+BOOL MB_CommIsBootable(u16 aid);
+void *MB_CommGetChildUser(u16 aid);
+void MB_End(void);
+
+static inline void WifiSetupMbParent_ClearChild(u16 aid) {
+    u16 mask = ~(1 << aid);
+    OSIntrMode intrMode = OS_DisableInterrupts();
+    gWifiSetupMbParent->head.connectedMask &= mask;
+    gWifiSetupMbParent->head.requestedMask &= mask;
+    gWifiSetupMbParent->head.waitingMask &= mask;
+    gWifiSetupMbParent->head.sendingMask &= mask;
+    gWifiSetupMbParent->head.sentMask &= mask;
+    gWifiSetupMbParent->head.bootableMask &= mask;
+    OS_RestoreInterrupts(intrMode);
+}
+
+static inline void WifiSetupMbParent_DisconnectChild(u16 aid) {
+    WifiSetupMbParent_ClearChild(aid);
+    MB_DisconnectChild(aid);
+}
+
+WifiSetupMbParentData gWifiSetupMbParentData = {
+    { NULL, NULL, NULL, NULL, NULL, NULL },
+    {
+     0xC0,
+     0x68,
+     0x24,
+     0x02,
+     0x4C,
+     0x69,
+     0x24,
+     0x02,
+     0x80,
+     0x69,
+     0x24,
+     0x02,
+     0x34,
+     0x6B,
+     0x24,
+     0x02,
+     0xB4,
+     0x6A,
+     0x24,
+     0x02,
+     0x44,
+     0x6A,
+     0x24,
+     0x02,
+     0xD4,
+     0x69,
+     0x24,
+     0x02,
+     0xB8,
+     0x69,
+     0x24,
+     0x02,
+     0x7C,
+     0x68,
+     0x24,
+     0x02,
+     0xD4,
+     0x6A,
+     0x24,
+     0x02,
+     0x64,
+     0x69,
+     0x24,
+     0x02,
+     0x28,
+     0x6A,
+     0x24,
+     0x02,
+     0xA8,
+     0x68,
+     0x24,
+     0x02,
+     0x60,
+     0x6A,
+     0x24,
+     0x02,
+     0x7C,
+     0x6A,
+     0x24,
+     0x02,
+     0xF4,
+     0x6A,
+     0x24,
+     0x02,
+     0x98,
+     0x6A,
+     0x24,
+     0x02,
+     0x14,
+     0x6B,
+     0x24,
+     0x02,
+     0x9C,
+     0x69,
+     0x24,
+     0x02,
+     0xF0,
+     0x69,
+     0x24,
+     0x02,
+     0x68,
+     0x68,
+     0x24,
+     0x02,
+     0x90,
+     0x68,
+     0x24,
+     0x02,
+     0x0C,
+     0x6A,
+     0x24,
+     0x02,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x49,
+     0x44,
+     0x4C,
+     0x45,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x45,
+     0x4E,
+     0x54,
+     0x52,
+     0x59,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x52,
+     0x45,
+     0x51,
+     0x55,
+     0x45,
+     0x53,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x4F,
+     0x52,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x43,
+     0x41,
+     0x4E,
+     0x43,
+     0x45,
+     0x4C,
+     0x00,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x4D,
+     0x45,
+     0x4D,
+     0x42,
+     0x45,
+     0x52,
+     0x5F,
+     0x46,
+     0x55,
+     0x4C,
+     0x4C,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x57,
+     0x41,
+     0x49,
+     0x54,
+     0x5F,
+     0x54,
+     0x4F,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x44,
+     0x49,
+     0x53,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x50,
+     0x4C,
+     0x45,
+     0x54,
+     0x45,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x52,
+     0x45,
+     0x51,
+     0x5F,
+     0x41,
+     0x43,
+     0x43,
+     0x45,
+     0x50,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x5F,
+     0x50,
+     0x52,
+     0x4F,
+     0x43,
+     0x45,
+     0x45,
+     0x44,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x42,
+     0x4F,
+     0x4F,
+     0x54,
+     0x5F,
+     0x52,
+     0x45,
+     0x51,
+     0x55,
+     0x45,
+     0x53,
+     0x54,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x52,
+     0x45,
+     0x42,
+     0x4F,
+     0x4F,
+     0x54,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x49,
+     0x4E,
+     0x49,
+     0x54,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x50,
+     0x4C,
+     0x45,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x50,
+     0x4C,
+     0x45,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x4D,
+     0x42,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4D,
+     0x4D,
+     0x5F,
+     0x50,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x42,
+     0x4F,
+     0x4F,
+     0x54,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x41,
+     0x42,
+     0x4C,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x4D,
+     0x42,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x44,
+     0x41,
+     0x54,
+     0x41,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x00,
+     0x4E,
+     0x2F,
+     0x41,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x46,
+     0x41,
+     0x49,
+     0x4C,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x5F,
+     0x44,
+     0x41,
+     0x54,
+     0x41,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x54,
+     0x49,
+     0x4D,
+     0x45,
+     0x4F,
+     0x55,
+     0x54,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x53,
+     0x55,
+     0x43,
+     0x43,
+     0x45,
+     0x53,
+     0x53,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4D,
+     0x50,
+     0x5F,
+     0x49,
+     0x4E,
+     0x44,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x43,
+     0x46,
+     0x5F,
+     0x54,
+     0x45,
+     0x53,
+     0x54,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x5F,
+     0x45,
+     0x4E,
+     0x54,
+     0x52,
+     0x59,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x5F,
+     0x43,
+     0x48,
+     0x49,
+     0x4C,
+     0x44,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4F,
+     0x50,
+     0x45,
+     0x52,
+     0x41,
+     0x54,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x43,
+     0x46,
+     0x5F,
+     0x49,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4D,
+     0x50,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x46,
+     0x49,
+     0x46,
+     0x4F,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x4F,
+     0x52,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x5F,
+     0x44,
+     0x41,
+     0x54,
+     0x41,
+     0x53,
+     0x45,
+     0x54,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x57,
+     0x4D,
+     0x5F,
+     0x44,
+     0x49,
+     0x53,
+     0x41,
+     0x42,
+     0x4C,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x4F,
+     0x52,
+     0x54,
+     0x5F,
+     0x52,
+     0x45,
+     0x43,
+     0x56,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4D,
+     0x50,
+     0x41,
+     0x43,
+     0x4B,
+     0x5F,
+     0x49,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x5F,
+     0x46,
+     0x41,
+     0x49,
+     0x4C,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x43,
+     0x46,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x46,
+     0x4C,
+     0x41,
+     0x53,
+     0x48,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x4F,
+     0x52,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4D,
+     0x50,
+     0x45,
+     0x4E,
+     0x44,
+     0x5F,
+     0x49,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x4F,
+     0x52,
+     0x54,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x53,
+     0x43,
+     0x41,
+     0x4E,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x46,
+     0x49,
+     0x46,
+     0x4F,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x4F,
+     0x52,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x49,
+     0x4C,
+     0x4C,
+     0x45,
+     0x47,
+     0x41,
+     0x4C,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x42,
+     0x45,
+     0x41,
+     0x43,
+     0x4F,
+     0x4E,
+     0x5F,
+     0x4C,
+     0x4F,
+     0x53,
+     0x54,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x49,
+     0x4E,
+     0x56,
+     0x41,
+     0x4C,
+     0x49,
+     0x44,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x41,
+     0x4D,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x57,
+     0x4C,
+     0x5F,
+     0x4C,
+     0x45,
+     0x4E,
+     0x47,
+     0x54,
+     0x48,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x42,
+     0x45,
+     0x41,
+     0x43,
+     0x4F,
+     0x4E,
+     0x5F,
+     0x52,
+     0x45,
+     0x43,
+     0x56,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x52,
+     0x45,
+     0x41,
+     0x53,
+     0x53,
+     0x4F,
+     0x43,
+     0x49,
+     0x41,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x42,
+     0x45,
+     0x41,
+     0x43,
+     0x4F,
+     0x4E,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x54,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x45,
+     0x4E,
+     0x54,
+     0x5F,
+     0x46,
+     0x4F,
+     0x55,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x49,
+     0x53,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x53,
+     0x54,
+     0x4F,
+     0x50,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4F,
+     0x56,
+     0x45,
+     0x52,
+     0x5F,
+     0x4D,
+     0x41,
+     0x58,
+     0x5F,
+     0x45,
+     0x4E,
+     0x54,
+     0x52,
+     0x59,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x49,
+     0x44,
+     0x4C,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x49,
+     0x53,
+     0x41,
+     0x53,
+     0x53,
+     0x4F,
+     0x43,
+     0x49,
+     0x41,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x45,
+     0x4E,
+     0x54,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x42,
+     0x55,
+     0x53,
+     0x59,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x41,
+     0x55,
+     0x54,
+     0x48,
+     0x45,
+     0x4E,
+     0x54,
+     0x49,
+     0x43,
+     0x41,
+     0x54,
+     0x45,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x52,
+     0x54,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x4F,
+     0x52,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x53,
+     0x45,
+     0x4E,
+     0x44,
+     0x5F,
+     0x51,
+     0x55,
+     0x45,
+     0x55,
+     0x45,
+     0x5F,
+     0x46,
+     0x55,
+     0x4C,
+     0x4C,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x57,
+     0x4C,
+     0x5F,
+     0x49,
+     0x4E,
+     0x56,
+     0x41,
+     0x4C,
+     0x49,
+     0x44,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x41,
+     0x4D,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x5F,
+     0x52,
+     0x41,
+     0x44,
+     0x49,
+     0x4F,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x49,
+     0x4E,
+     0x56,
+     0x41,
+     0x4C,
+     0x49,
+     0x44,
+     0x5F,
+     0x50,
+     0x4F,
+     0x4C,
+     0x4C,
+     0x42,
+     0x49,
+     0x54,
+     0x4D,
+     0x41,
+     0x50,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x53,
+     0x43,
+     0x41,
+     0x4E,
+     0x4E,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x00,
+     0x00,
+     0x57,
+     0x4D,
+     0x5F,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x45,
+     0x4E,
+     0x54,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x54,
+     0x5F,
+     0x46,
+     0x4F,
+     0x55,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x4B,
+     0x45,
+     0x59,
+     0x53,
+     0x48,
+     0x41,
+     0x52,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x44,
+     0x41,
+     0x54,
+     0x41,
+     0x53,
+     0x48,
+     0x41,
+     0x52,
+     0x49,
+     0x4E,
+     0x47,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x44,
+     0x49,
+     0x53,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x45,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x43,
+     0x4F,
+     0x4E,
+     0x4E,
+     0x45,
+     0x43,
+     0x54,
+     0x5F,
+     0x46,
+     0x41,
+     0x49,
+     0x4C,
+     0x00,
+     0x00,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x53,
+     0x59,
+     0x53,
+     0x53,
+     0x54,
+     0x41,
+     0x54,
+     0x45,
+     0x5F,
+     0x4D,
+     0x45,
+     0x41,
+     0x53,
+     0x55,
+     0x52,
+     0x45,
+     0x43,
+     0x48,
+     0x41,
+     0x4E,
+     0x4E,
+     0x45,
+     0x4C,
+     0x00,
+     0x44,
+     0x57,
+     0x43,
+     0x69,
+     0x5F,
+     0x4D,
+     0x4F,
+     0x56,
+     0x5F,
+     0x57,
+     0x48,
+     0x5F,
+     0x45,
+     0x52,
+     0x52,
+     0x43,
+     0x4F,
+     0x44,
+     0x45,
+     0x5F,
+     0x50,
+     0x41,
+     0x52,
+     0x45,
+     0x4E,
+     0x54,
+     0x5F,
+     0x4E,
+     0x4F,
+     0x54,
+     0x5F,
+     0x46,
+     0x4F,
+     0x55,
+     0x4E,
+     0x44,
+     0x00,
+     0x00,
+     0x00,
+     0x00,
+     },
+};
+
+void WifiSetupSound_Play(int seq) {
+    NNS_SndArcPlayerStartSeqArc(&gWifiSetupSound->handle, 0, seq);
+}
+
+void WifiSetupSound_SetVolume(int volume) {
+    NNS_SndPlayerSetVolume(&gWifiSetupSound->handle, volume);
+}
+
+void WifiSetupSound_SetTrackPitch(int mask, int pitch) {
+    NNS_SndPlayerSetTrackPitch(&gWifiSetupSound->handle, mask, pitch);
+}
+
+void WifiSetupSound_Stop(void) {
+    NNS_SndPlayerStopSeq(&gWifiSetupSound->handle, 0);
+}
+
+void WifiSetupSound_UpdateTask(WifiSetupTask *task, void *arg) {
+    NNS_SndMain();
+}
+
+void WifiSetupBanner_Open(int kind) {
+    const u8 *res;
+    const u8 *anim;
+    int i;
+
+    gWifiSetupBanner.banner = WifiSetupHeap_AllocZeroed(sizeof(WifiSetupBanner), 4);
+    res = gWifiSetupBannerLetterTemplates[kind];
+    anim = gWifiSetupBannerLetterPalettes[kind];
+    for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        gWifiSetupBanner.banner->letters[i] = WifiSetupOamTemplate_AllocBlock(WIFI_SETUP_SCREEN_SUB, *res++, TRUE);
+        WifiSetupOamBlock_SetPriority(gWifiSetupBanner.banner->letters[i], -1, 0);
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, -0x2a, gWifiSetupBannerLetterPositions[i].y);
+        WifiSetupOamBlock_SetModeAndPalette(gWifiSetupBanner.banner->letters[i], -1, 0, *anim++);
+    }
+    gWifiSetupBanner.banner->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupBanner_SlideInTask0, NULL, 0x78);
+    WifiSetupBanner_LoadScreen(kind);
+    WifiSetupSound_Play(0xd);
+}
+
+static void WifiSetupBanner_SlideInTask0(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[0], 0, &x, &y);
+    x += 8;
+    if (x < 0x20 || x > 0x100) {
+        for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x20;
+    for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideInTask1);
+}
+
+static void WifiSetupBanner_SlideInTask1(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[1], 0, &x, &y);
+    x += 8;
+    if (x < 0x50 || x > 0x100) {
+        for (i = 1; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x50;
+    for (i = 1; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideInTask2);
+}
+
+static void WifiSetupBanner_SlideInTask2(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[2], 0, &x, &y);
+    x += 8;
+    if (x < 0x68 || x > 0x100) {
+        for (i = 2; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x68;
+    for (i = 2; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideInTask3);
+}
+
+static void WifiSetupBanner_SlideInTask3(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[3], 0, &x, &y);
+    x += 8;
+    if (x < 0x98 || x > 0x100) {
+        for (i = 3; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x98;
+    for (i = 3; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideInTask4);
+}
+
+#pragma push
+#pragma opt_propagation off
+
+static void WifiSetupBanner_SlideInTask4(WifiSetupTask *task, void *arg) {
+    int x, y;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[4], 0, &x, &y);
+    x += 8;
+    if (x < 0xB0 || x > 0x100) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[4], -1, x, 0x21);
+        return;
+    }
+    {
+        WifiSetupBannerState *state = &gWifiSetupBanner;
+        WifiSetupBanner *banner = state->banner;
+        x = 0xB0;
+        WifiSetupOamBlock_SetPosition(banner->letters[4], -1, x, 0x21);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_StopTask);
+}
+
+#pragma pop
+
+static void WifiSetupBanner_StopTask(WifiSetupTask *task, void *arg) {
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_MAIN, task);
+    gWifiSetupBanner.banner->task = NULL;
+}
+
+void WifiSetupBanner_Close(void) {
+    gWifiSetupBanner.banner->closing = TRUE;
+    gWifiSetupBanner.banner->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupBanner_SlideOutTask4, NULL, 0x78);
+}
+
+void WifiSetupBanner_SetKind(int kind) {
+    int i;
+    for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i += 2) {
+        WifiSetupOamTemplate_Copy(WIFI_SETUP_SCREEN_SUB, gWifiSetupBannerLetterTemplates[kind][i], WifiSetupOamBlock_GetOam(gWifiSetupBanner.banner->letters[i], 0));
+        WifiSetupOamBlock_SetPriority(gWifiSetupBanner.banner->letters[i], -1, 0);
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, gWifiSetupBannerLetterPositions[i].x, gWifiSetupBannerLetterPositions[i].y);
+        WifiSetupOamBlock_SetModeAndPalette(gWifiSetupBanner.banner->letters[i], -1, 0, gWifiSetupBannerLetterPalettes[kind][i]);
+    }
+    WifiSetupBanner_LoadScreen(kind);
+}
+
+BOOL WifiSetupBanner_IsMoving(void) {
+    return gWifiSetupBanner.banner->task != NULL;
+}
+
+#pragma push
+#pragma opt_propagation off
+
+static void WifiSetupBanner_SlideOutTask4(WifiSetupTask *task, void *arg) {
+    int x, y;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[4], 0, &x, &y);
+    x -= 8;
+    if (x > 0x98) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[4], -1, x, 0x21);
+        return;
+    }
+    {
+        WifiSetupBannerState *state = &gWifiSetupBanner;
+        WifiSetupBanner *banner = state->banner;
+        x = 0x98;
+        WifiSetupOamBlock_SetPosition(banner->letters[4], -1, x, 0x21);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideOutTask3);
+}
+
+#pragma pop
+
+static void WifiSetupBanner_SlideOutTask3(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[3], 0, &x, &y);
+    x -= 8;
+    if (x > 0x68) {
+        for (i = 3; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x68;
+    for (i = 3; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideOutTask2);
+}
+
+static void WifiSetupBanner_SlideOutTask2(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[2], 0, &x, &y);
+    x -= 8;
+    if (x > 0x50) {
+        for (i = 2; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x50;
+    for (i = 2; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideOutTask1);
+}
+
+static void WifiSetupBanner_SlideOutTask1(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[1], 0, &x, &y);
+    x -= 8;
+    if (x > 0x20) {
+        for (i = 1; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+            WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+        }
+        return;
+    }
+    x = 0x20;
+    for (i = 1; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupBanner_SlideOffTask);
+}
+
+static void WifiSetupBanner_SlideOffTask(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    int i;
+    WifiSetupOamBlock_GetPosition(gWifiSetupBanner.banner->letters[0], 0, &x, &y);
+    x -= 8;
+    for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_SetPosition(gWifiSetupBanner.banner->letters[i], -1, x, gWifiSetupBannerLetterPositions[i].y);
+    }
+    if (x > 0x1D6) {
+        return;
+    }
+    if (x < 0x100) {
+        return;
+    }
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_MAIN, task);
+    for (i = 0; i < WIFI_SETUP_BANNER_NUM_LETTERS; i++) {
+        WifiSetupOamBlock_Free(gWifiSetupBanner.banner->letters[i]);
+    }
+    WifiSetupHeap_FreeAndClear(ov13_0224F5B0);
+}
+
+BOOL WifiSetupBanner_IsNotClosing(void) {
+    if (gWifiSetupBanner.banner == NULL) {
+        return TRUE;
+    }
+    return gWifiSetupBanner.banner->closing == 0;
+}
+
+void WifiSetupBanner_LoadScreen(int kind) {
+    gWifiSetupBanner.screen = WifiSetupFile_Load(WifiSetup_LocalizePath(gWifiSetupBannerScreenPaths[kind]), NULL, 4);
+    WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_VBLANK, WifiSetupBanner_LoadScreenTask, NULL, 0x78);
+}
+
+static void WifiSetupBanner_LoadScreenTask(WifiSetupTask *task, void *arg) {
+    DC_FlushRange(gWifiSetupBanner.screen, 0x600);
+    GXS_LoadBG1Scr(gWifiSetupBanner.screen, 0, 0x600);
+    WifiSetupFile_Free(gWifiSetupBanner.screen);
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_VBLANK, task);
+}
+
+BOOL WifiSetupUsbScan_Start(void (*cb)(int)) {
+    OSOwnerInfo info;
+    WifiSetupUsbScan *scan = WifiSetupHeap_AllocZeroed(sizeof(WifiSetupUsbScan), 0x20);
+    gWifiSetupUsbScan = scan;
+    scan->callback = cb;
+    (*(WifiSetupUsbScan *volatile *)&gWifiSetupUsbScan)->startTick = OS_GetTick();
+    if (WM_Initialize(gWifiSetupUsbScan, WifiSetupUsbScan_WmCallback, 3) == WM_ERRCODE_OPERATING) {
+        do {
+            WM_ReadStatus(&gWifiSetupUsbScan->status);
+        } while (gWifiSetupUsbScan->status.state != WM_STATE_POWER_ON);
+        gWifiSetupUsbScan->param = gWifiSetupUsbScanParam;
+        gWifiSetupUsbScan->param.buffer = gWifiSetupUsbScan->scanBuf;
+        gWifiSetupUsbScan->param.dwell = WM_GetDispersionScanPeriod();
+        OS_GetOwnerInfo(&info);
+        MI_CpuCopy8(gWifiSetupUsbApSsid, gWifiSetupUsbScan->param.ssid, 8);
+        gWifiSetupUsbScan->param.ssid[9] = 1;
+        MI_CpuCopy8(info.nickName, &gWifiSetupUsbScan->param.ssid[12], info.nickNameLength * 2);
+        if (WifiSetupUsbScan_StartScan()) {
+            gWifiSetupUsbScan->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupUsbScan_TimeoutTask, NULL, 0x78);
+            return TRUE;
+        }
+    }
+    WifiSetupHeap_FreeAndClear(&ov13_0224F5B0[1]);
+    return FALSE;
+}
+
+static BOOL WifiSetupUsbScan_StartScan(void) {
+    return WM_StartScanEx(WifiSetupUsbScan_WmCallback, &gWifiSetupUsbScan->param) == WM_ERRCODE_OPERATING;
+}
+
+BOOL WifiSetupUsbScan_End(void) {
+    gWifiSetupUsbScan->endState = WIFI_SETUP_USB_SCAN_ENDING;
+    WM_ReadStatus(&gWifiSetupUsbScan->status);
+    if (gWifiSetupUsbScan->status.state != WM_STATE_POWER_ON) {
+        if (WM_Reset(WifiSetupUsbScan_WmCallback) != WM_ERRCODE_OPERATING) {
+            return FALSE;
+        }
+        do {
+            WM_ReadStatus(&gWifiSetupUsbScan->status);
+        } while (gWifiSetupUsbScan->status.state != WM_STATE_POWER_ON);
+    }
+    if (WM_End(WifiSetupUsbScan_WmCallback) != WM_ERRCODE_OPERATING) {
+        return FALSE;
+    }
+    if (gWifiSetupUsbScan->task != NULL) {
+        WifiSetupTask_Destroy(WIFI_SETUP_TASK_QUEUE_MAIN, gWifiSetupUsbScan->task);
+    }
+    while (gWifiSetupUsbScan->endState != WIFI_SETUP_USB_SCAN_ENDED) {
+    }
+    WifiSetupHeap_FreeAndClear(&ov13_0224F5B0[1]);
+    return TRUE;
+}
+
+void WifiSetupUsbScan_SetCallback(void (*cb)(int)) {
+    gWifiSetupUsbScan->callback = cb;
+}
+
+static void WifiSetupUsbScan_WmCallback(void *arg) {
+    WMStartScanExCallback *cb = arg;
+    if (cb->errcode != WM_ERRCODE_SUCCESS) {
+        return;
+    }
+    if (gWifiSetupUsbScan->endState != WIFI_SETUP_USB_SCAN_RUNNING) {
+        if (cb->apiid == WM_API_END) {
+            gWifiSetupUsbScan->endState = WIFI_SETUP_USB_SCAN_ENDED;
+        }
+        return;
+    }
+    if (cb->apiid != WM_API_START_SCAN_EX) {
+        return;
+    }
+    switch (cb->state) {
+    case 5:
+        if (gWifiSetupUsbScan->rescanning) {
+            WifiSetupUsbScan_CheckResults(cb);
+        } else {
+            WifiSetupUsbScan_StoreResults(cb);
+        }
+        WifiSetupUsbScan_StartScan();
+        break;
+    case 4:
+        WifiSetupUsbScan_StartScan();
+        break;
+    default:
+        OS_Terminate();
+        break;
+    }
+}
+
+static void WifiSetupUsbScan_StoreResults(WMStartScanExCallback *arg) {
+    WMBssDesc *bss;
+    int i;
+    int j;
+    WifiSetupUsbScan *scan;
+    for (i = 0; i < arg->bssDescCount; i++) {
+        bss = arg->bssDesc[i];
+        DC_InvalidateRange(bss, 0xC0);
+        if (memcmp(bss->ssid, gWifiSetupUsbApSsid, 8) != 0) {
+            continue;
+        }
+        scan = gWifiSetupUsbScan;
+        for (j = 0; j < WIFI_SETUP_USB_SCAN_NUM_ENTRIES; j++) {
+            if (memcmp(bss->bssid, scan->entries[j].bssid, sizeof(bss->bssid)) == 0) {
+                if (scan->entries[j].flag != 0) {
+                    goto next;
+                }
+                if (!(bss->ssid[9] & 1)) {
+                    goto next;
+                }
+                if (scan->callback != NULL) {
+                    scan->callback(WIFI_SETUP_USB_SCAN_FOUND);
+                }
+                return;
+            }
+        }
+        for (j = 0; j < WIFI_SETUP_USB_SCAN_NUM_ENTRIES; j++) {
+            if (memcmp(scan->entries[j].bssid, gWifiSetupUsbScanEmptyBssid, sizeof(scan->entries[j].bssid)) == 0) {
+                MI_CpuCopy8(bss->bssid, scan->entries[j].bssid, sizeof(scan->entries[j].bssid));
+                gWifiSetupUsbScan->entries[j].flag = (bss->ssid[9] & 1) ? 1 : 0;
+                break;
+            }
+        }
+next:;
+    }
+}
+
+static void WifiSetupUsbScan_CheckResults(WMStartScanExCallback *arg) {
+    WMBssDesc *bss;
+    int i, j;
+    WifiSetupUsbScanEntry *entry;
+    WifiSetupUsbScan *scan;
+    int count;
+    if (gWifiSetupUsbScan->found) {
+        if (gWifiSetupUsbScan->callback) {
+            gWifiSetupUsbScan->callback(gWifiSetupUsbScan->found);
+        }
+        return;
+    }
+    DC_InvalidateRange(gWifiSetupUsbScan->scanBuf, 0x400);
+    count = arg->bssDescCount;
+    i = 0;
+    if (count <= 0) {
+        return;
+    }
+    scan = gWifiSetupUsbScan;
+    do {
+        bss = arg->bssDesc[i];
+        if (memcmp(bss->ssid, gWifiSetupUsbApSsid, 8) == 0 && (bss->ssid[9] & 1)) {
+            for (j = 0, entry = scan->entries; j < WIFI_SETUP_USB_SCAN_NUM_ENTRIES; j++, entry++) {
+                if (memcmp(bss->bssid, entry->bssid, sizeof(bss->bssid)) == 0) {
+                    if (scan->entries[j].flag) {
+                        break;
+                    }
+                    if (!scan->callback) {
+                        scan->found = WIFI_SETUP_USB_SCAN_FOUND;
+                        return;
+                    }
+                    scan->callback(WIFI_SETUP_USB_SCAN_FOUND);
+                    return;
+                }
+            }
+        }
+    } while (++i < count);
+}
+
+static void WifiSetupUsbScan_TimeoutTask(WifiSetupTask *task, void *arg) {
+    int j;
+    BOOL flagged;
+    BOOL unflagged;
+    WifiSetupUsbScan *scan;
+    OSTick now = OS_GetTick();
+    scan = gWifiSetupUsbScan;
+    unflagged = FALSE;
+    if (now < scan->startTick + 0x17F898) {
+        return;
+    }
+    flagged = FALSE;
+    for (j = 0; j < WIFI_SETUP_USB_SCAN_NUM_ENTRIES; j++) {
+        if (memcmp(scan->entries[j].bssid, gWifiSetupUsbScanEmptyBssid, sizeof(scan->entries[j].bssid)) != 0) {
+            if (scan->entries[j].flag) {
+                flagged = TRUE;
+            } else {
+                unflagged = TRUE;
+            }
+        }
+    }
+    if (flagged && unflagged) {
+        if (scan->callback != NULL) {
+            scan->callback(WIFI_SETUP_USB_SCAN_MIXED);
+        }
+    } else if (flagged) {
+        if (scan->callback != NULL) {
+            scan->callback(WIFI_SETUP_USB_SCAN_FOUND);
+        }
+    } else if (!unflagged) {
+        if (scan->callback != NULL) {
+            scan->callback(WIFI_SETUP_USB_SCAN_NOT_FOUND);
+        }
+    }
+    gWifiSetupUsbScan->task = NULL;
+    gWifiSetupUsbScan->rescanning = 1;
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_MAIN, task);
+}
+
+void WifiSetupDialog_Open(int message, int kind, u8 fade, int digitPos, int digit) {
+    u16 *text;
+    WifiSetupDialogPlanes tbl = *(WifiSetupDialogPlanes *)(gWifiSetupDialogWindowPlanes + 4);
+    u32 numObjs;
+    int i;
+    text = WifiSetupText_GetStringWithDigit(gWifiSetupTextBank, message, digitPos, digit);
+    gWifiSetupDialog = WifiSetupHeap_AllocZeroed(sizeof(WifiSetupDialog), 4);
+    gWifiSetupDialog->kind = kind;
+    gWifiSetupDialog->selected = WIFI_SETUP_SELECTED_NOT_SHOWN;
+    gWifiSetupDialog->fade = fade;
+    G2_SetBlendBrightness(GX_BLEND_PLANEMASK_BG0 | GX_BLEND_PLANEMASK_BG1 | GX_BLEND_PLANEMASK_BG2 | GX_BLEND_PLANEMASK_BG3 | GX_BLEND_PLANEMASK_OBJ, 0);
+    gWifiSetupDialog->frame = WifiSetupOamTemplate_AllocBlock(WIFI_SETUP_SCREEN_MAIN, gWifiSetupDialogFrameTemplates[kind], FALSE);
+    WifiSetupOamBlock_SetPosition(gWifiSetupDialog->frame, -1, 0x100, 0);
+    WifiSetupOamBlock_SetPriority(gWifiSetupDialog->frame, -1, 0);
+    for (i = 0; i < gWifiSetupDialogButtonCounts[kind]; i++) {
+        gWifiSetupDialog->buttons[i] = WifiSetupOamTemplate_AllocBlock(WIFI_SETUP_SCREEN_MAIN, gWifiSetupDialogButtonTemplates[kind][i], FALSE);
+        WifiSetupOamBlock_SetPosition(gWifiSetupDialog->buttons[i], -1, 0x100, 0);
+        WifiSetupOamBlock_SetPriority(gWifiSetupDialog->buttons[i], -1, 0);
+    }
+    gWifiSetupDialog->canvas = WifiSetupText_AllocObjCanvas(WIFI_SETUP_SCREEN_MAIN, 0x20, 0xC, TRUE, &numObjs, 0);
+    gWifiSetupDialog->textBlock = WifiSetupOamBlock_Alloc(WIFI_SETUP_SCREEN_MAIN, numObjs, FALSE);
+    WifiSetupText_DrawInRect(gWifiSetupDialog->canvas, 0, 0, gWifiSetupDialogTextSizes[kind].x, gWifiSetupDialogTextSizes[kind].y, 2, WifiSetup_GetTextFlags(), text);
+    WifiSetupText_ShowObjCanvas(gWifiSetupDialog->canvas, 0x100, 0, gWifiSetupDialog->textBlock, 0);
+    WifiSetupDisplay_SetWindowPlanes(WIFI_SETUP_SCREEN_MAIN, WIFI_SETUP_WINDOW_0, GX_WND_PLANEMASK_BG0 | GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ, FALSE);
+    WifiSetupDisplay_SetWindowPlanes(WIFI_SETUP_SCREEN_MAIN, WIFI_SETUP_WINDOW_1, GX_WND_PLANEMASK_BG0 | GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ, tbl.planes[gWifiSetupDialog->kind]);
+    WifiSetupDisplay_SetWindowPlanes(WIFI_SETUP_SCREEN_MAIN, WIFI_SETUP_WINDOW_OUTSIDE, GX_WND_PLANEMASK_BG0 | GX_WND_PLANEMASK_BG1 | GX_WND_PLANEMASK_BG2 | GX_WND_PLANEMASK_BG3 | GX_WND_PLANEMASK_OBJ, TRUE);
+    WifiSetupDisplay_SetWindowRect(WIFI_SETUP_SCREEN_MAIN, WIFI_SETUP_WINDOW_1, &gWifiSetupDialogWindowRect);
+    WifiSetupDialog_SetY(0xC0);
+    GX_SetVisibleWnd(GX_WNDMASK_W0 | GX_WNDMASK_W1);
+    if (fade) {
+        gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_VBLANK, WifiSetupDialog_FadeInTask, NULL, 0x78);
+    } else {
+        gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_VBLANK, WifiSetupDialog_SlideInTask, NULL, 0x78);
+    }
+}
+
+void WifiSetupDialog_Close(void) {
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_MAIN, gWifiSetupDialog->task);
+    gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_VBLANK, WifiSetupDialog_CloseDelayTask, NULL, 0x78);
+}
+
+int WifiSetupDialog_GetSelected(void) {
+    return gWifiSetupDialog->selected;
+}
+
+BOOL WifiSetupDialog_IsOpen(void) {
+    return gWifiSetupDialog != NULL;
+}
+
+static void WifiSetupDialog_FadeInTask(WifiSetupTask *task, void *arg) {
+    gWifiSetupDialog->brightness--;
+    G2x_ChangeBlendBrightness_((u16 *)&reg_G2_BLDCNT, gWifiSetupDialog->brightness);
+    if (gWifiSetupDialog->brightness > -12) {
+        return;
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupDialog_SlideInTask);
+}
+
+static void WifiSetupDialog_SlideInTask(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    WifiSetupOamBlock_GetPosition(gWifiSetupDialog->frame, 0, &x, &y);
+    y -= 12;
+    if (y > gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].y) {
+        WifiSetupDialog_SetY(y);
+        return;
+    }
+    WifiSetupDialog_SetY(gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].y);
+    if (gWifiSetupDialog->kind == 5) {
+        gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupDialog_TimerTask, NULL, 0x78);
+    } else {
+        gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_MAIN, WifiSetupDialog_InputTask, NULL, 0x78);
+    }
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_VBLANK, task);
+}
+
+static void WifiSetupDialog_InputTask(WifiSetupTask *task, void *arg) {
+    WifiSetupRect temp;
+    int i;
+    int j;
+    for (i = 0; i < gWifiSetupDialogButtonCounts[gWifiSetupDialog->kind]; i++) {
+        WifiSetup_RectFromPosSize(&gWifiSetupDialogButtonPos[gWifiSetupDialog->kind][gWifiSetupDialogButtonPositions[gWifiSetupDialog->kind][i]], &gWifiSetupDialogButtonSizes[gWifiSetupDialog->kind], &temp);
+        if (WifiSetupInput_IsTouchPressed(&temp)) {
+            gWifiSetupDialog->selected = i;
+            break;
+        }
+    }
+    if (WifiSetupInput_IsKeyPressed(PAD_BUTTON_A)) {
+        gWifiSetupDialog->selected = gWifiSetupDialogAButtonChoice[gWifiSetupDialog->kind][0];
+    }
+    if (WifiSetupInput_IsKeyPressed(PAD_BUTTON_B)) {
+        gWifiSetupDialog->selected = gWifiSetupDialogBButtonChoice[gWifiSetupDialog->kind][0];
+    }
+    for (j = 0; j < gWifiSetupDialogButtonCounts[gWifiSetupDialog->kind]; j++) {
+        if (j == gWifiSetupDialog->selected) {
+            WifiSetupDialog_PressButton(j);
+            return;
+        }
+    }
+    gWifiSetupDialog->selected = WIFI_SETUP_SELECTED_NONE;
+}
+
+static void WifiSetupDialog_TimerTask(WifiSetupTask *task, void *arg) {
+    gWifiSetupDialog->selected = WIFI_SETUP_SELECTED_NONE;
+    gWifiSetupDialog->timer++;
+    if (gWifiSetupDialog->timer < 0x78) {
+        return;
+    }
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_MAIN, task);
+    gWifiSetupDialog->task = WifiSetupTask_Create(WIFI_SETUP_TASK_QUEUE_VBLANK, WifiSetupDialog_CloseDelayTask, NULL, 0x78);
+}
+
+static void WifiSetupDialog_SetY(int y) {
+    int i;
+    int k;
+    int top;
+    int bottom;
+    int left;
+    int right;
+    WifiSetupRect win;
+    WifiSetupOamBlock_SetPosition(gWifiSetupDialog->frame, -1, gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].x, y);
+    WifiSetupOamBlock_SetPosition(gWifiSetupDialog->textBlock, -1, gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].x + 8, y + 8);
+    WifiSetupDialog_ClipBlock(gWifiSetupDialog->frame, y);
+    WifiSetupDialog_ClipBlock(gWifiSetupDialog->textBlock, y);
+    for (i = 0; i < gWifiSetupDialogButtonCounts[gWifiSetupDialog->kind]; i++) {
+        k = gWifiSetupDialogButtonPositions[gWifiSetupDialog->kind][i];
+        WifiSetupOamBlock_SetPosition(gWifiSetupDialog->buttons[i], -1, gWifiSetupDialogButtonPos[gWifiSetupDialog->kind][k].x, y + gWifiSetupDialogButtonPos[gWifiSetupDialog->kind][k].y - gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].y);
+        WifiSetupDialog_ClipBlock(gWifiSetupDialog->buttons[i], y);
+    }
+    top = (u8)y;
+    if (top >= GX_LCD_SIZE_Y) {
+        bottom = 0;
+        top = 0;
+    } else {
+        bottom = top + gWifiSetupDialogFrameSizes[gWifiSetupDialog->kind].y;
+    }
+    left = gWifiSetupDialogFramePositions[gWifiSetupDialog->kind].x;
+    right = left + gWifiSetupDialogFrameSizes[gWifiSetupDialog->kind].x;
+    if (bottom > GX_LCD_SIZE_Y) {
+        bottom = GX_LCD_SIZE_Y;
+    }
+    WifiSetup_SetRect(left, top, right, bottom, &win);
+    WifiSetupDisplay_SetWindowRect(WIFI_SETUP_SCREEN_MAIN, WIFI_SETUP_WINDOW_0, &win);
+}
+
+static void WifiSetupDialog_ClipBlock(WifiSetupOamBlock *obj, int y) {
+    int count = WifiSetupOamBlock_GetCount(obj);
+    int i;
+    int x;
+    int yy;
+    int mode;
+    for (i = 0; i < count; i++) {
+        WifiSetupOamBlock_GetPosition(obj, i, &x, &yy);
+        if (yy >= y && yy < GX_LCD_SIZE_Y) {
+            mode = 0;
+        } else {
+            mode = 0x200;
+        }
+        WifiSetupOamBlock_SetAffineMode(obj, i, mode, 0);
+    }
+}
+
+static void WifiSetupDialog_PressButton(int i) {
+    int k;
+    WifiSetupOamTemplate_Copy(WIFI_SETUP_SCREEN_MAIN, gWifiSetupDialogButtonTemplates[gWifiSetupDialog->kind][i] + 1, WifiSetupOamBlock_GetOam(gWifiSetupDialog->buttons[i], 0));
+    k = gWifiSetupDialogButtonPositions[gWifiSetupDialog->kind][i];
+    WifiSetupOamBlock_SetPosition(gWifiSetupDialog->buttons[i], -1, gWifiSetupDialogButtonPos[gWifiSetupDialog->kind][k].x, gWifiSetupDialogButtonPos[gWifiSetupDialog->kind][k].y);
+    WifiSetupOamBlock_SetPriority(gWifiSetupDialog->buttons[i], -1, 0);
+}
+
+static void WifiSetupDialog_CloseDelayTask(WifiSetupTask *task, void *arg) {
+    gWifiSetupDialog->closeDelay++;
+    if (gWifiSetupDialog->closeDelay < 8) {
+        return;
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupDialog_SlideOutTask);
+}
+
+static void WifiSetupDialog_SlideOutTask(WifiSetupTask *task, void *arg) {
+    int x;
+    int y;
+    WifiSetupOamBlock_GetPosition(gWifiSetupDialog->frame, 0, &x, &y);
+    y += 12;
+    WifiSetupDialog_SetY(y);
+    if (y < GX_LCD_SIZE_Y) {
+        return;
+    }
+    if (gWifiSetupDialog->fade) {
+        WifiSetupTask_SetFunc(task, WifiSetupDialog_FadeOutTask);
+    } else {
+        WifiSetupTask_SetFunc(task, WifiSetupDialog_FreeTask);
+    }
+}
+
+static void WifiSetupDialog_FadeOutTask(WifiSetupTask *task, void *arg) {
+    gWifiSetupDialog->brightness++;
+    G2x_ChangeBlendBrightness_((u16 *)&reg_G2_BLDCNT, gWifiSetupDialog->brightness);
+    if (gWifiSetupDialog->brightness < 0) {
+        return;
+    }
+    WifiSetupTask_SetFunc(task, WifiSetupDialog_FreeTask);
+}
+
+static void WifiSetupDialog_FreeTask(WifiSetupTask *task, void *arg) {
+    int i;
+    GX_SetVisibleWnd(GX_WNDMASK_NONE);
+    WifiSetupOamBlock_Free(gWifiSetupDialog->frame);
+    WifiSetupOamBlock_Free(gWifiSetupDialog->textBlock);
+    for (i = 0; i < gWifiSetupDialogButtonCounts[gWifiSetupDialog->kind]; i++) {
+        if (gWifiSetupDialog->buttons[i] != NULL) {
+            WifiSetupOamBlock_Free(gWifiSetupDialog->buttons[i]);
+        }
+    }
+    WifiSetupText_FreeObjCanvas(gWifiSetupDialog->canvas);
+    WifiSetupTask_DestroyLater(WIFI_SETUP_TASK_QUEUE_VBLANK, task);
+    WifiSetupHeap_FreeAndClear(&ov13_0224F5B0[2]);
+}
+
+void WifiSetupMbParent_Init(WifiSetupMbParent *parent) {
+    gWifiSetupMbParent = parent;
+    WifiSetupWh_Init(&gWifiSetupMbParent->whWork);
+    gWifiSetupMbParent->mbWorkPtr = NULL;
+    gWifiSetupMbParent->segmentPtr = NULL;
+}
+
+void WifiSetupMbParent_Setup(u32 ggid, u32 tgid) {
+    WifiSetupMbParentUser user;
+    OSOwnerInfo info;
+    OS_GetOwnerInfo(&info);
+    user.favoriteColor = info.favoriteColor;
+    user.nameLength = info.nickNameLength;
+    MI_CpuCopy8(info.nickName, user.name, info.nickNameLength * 2);
+    user.playerNo = 0;
+    gWifiSetupMbParent->head = (WifiSetupMbParentState) { 0, 0, 0, 0, 0, 0, 0 };
+    gWifiSetupMbParent->mbWorkPtr = gWifiSetupMbParent->mbWork;
+    if (MB_Init(gWifiSetupMbParent->mbWorkPtr, &user, ggid, tgid, 2) != 0) {
+        OS_Terminate();
+    }
+    MB_SetParentCommParam(0x100, 1);
+    MB_CommSetParentStateCallback(WifiSetupMbParent_StateCallback);
+    WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_READY);
+}
+
+void WifiSetupMbParent_Start(const WifiSetupSessionParams *params, u32 channel) {
+    WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_ACCEPTING);
+    if (MB_StartParentFromIdle(channel) != 0) {
+        WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_FAILED);
+        return;
+    }
+    if (!WifiSetupMbParent_RegisterFile(params)) {
+        OS_Terminate();
+    }
+}
+
+static BOOL WifiSetupMbParent_RegisterFile(const WifiSetupSessionParams *params) {
+    FSFile file;
+    FSFile *fp;
+    BOOL ok = FALSE;
+    if (params->filePath == NULL) {
+        fp = NULL;
+    } else {
+        FS_InitFile(&file);
+        if (!FS_OpenFile(&file, params->filePath)) {
+            return FALSE;
+        }
+        fp = &file;
+    }
+    if (MB_GetSegmentLength(fp) != 0) {
+        gWifiSetupMbParent->segmentPtr = gWifiSetupMbParent->segment;
+        if (gWifiSetupMbParent->segmentPtr != NULL && MB_ReadSegment(fp, gWifiSetupMbParent->segmentPtr, 0x10000)) {
+            if (MB_RegisterFile(params, gWifiSetupMbParent->segmentPtr)) {
+                ok = TRUE;
+            }
+        }
+    }
+    if (fp == &file) {
+        FS_CloseFile(&file);
+    }
+    return ok;
+}
+
+static void WifiSetupMbParent_AcceptChild(u16 aid) {
+    if (MB_CommResponseRequest(aid, MB_COMM_RESPONSE_REQUEST_ACCEPT)) {
+        return;
+    }
+    WifiSetupMbParent_DisconnectChild(aid);
+}
+
+static void WifiSetupMbParent_KickChild(u16 aid) {
+    OSIntrMode intrMode;
+    if (!MB_CommResponseRequest(aid, MB_COMM_RESPONSE_REQUEST_KICK)) {
+        WifiSetupMbParent_DisconnectChild(aid);
+        return;
+    }
+    intrMode = OS_DisableInterrupts();
+    gWifiSetupMbParent->head.requestedMask &= ~(1 << aid);
+    gWifiSetupMbParent->head.connectedMask &= ~(1 << aid);
+    OS_RestoreInterrupts(intrMode);
+}
+
+static void WifiSetupMbParent_StartSending(u16 aid) {
+    OSIntrMode intrMode;
+    if (!MB_CommResponseRequest(aid, MB_COMM_RESPONSE_REQUEST_DOWNLOAD)) {
+        WifiSetupMbParent_DisconnectChild(aid);
+        return;
+    }
+    intrMode = OS_DisableInterrupts();
+    gWifiSetupMbParent->head.waitingMask &= ~(1 << aid);
+    gWifiSetupMbParent->head.sendingMask |= 1 << aid;
+    OS_RestoreInterrupts(intrMode);
+}
+
+void WifiSetupMbParent_StartDownload(void) {
+    u16 i;
+    WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_DOWNLOADING);
+    for (i = 1; i < 16; i++) {
+        if ((gWifiSetupMbParent->head.connectedMask & (1 << i)) && !(gWifiSetupMbParent->head.requestedMask & (1 << i))) {
+            if (!(gWifiSetupMbParent->head.waitingMask & (1 << i))) {
+                WifiSetupMbParent_DisconnectChild(i);
+            } else {
+                WifiSetupMbParent_StartSending(i);
+            }
+        }
+    }
+}
+
+BOOL WifiSetupMbParent_AreAllBootable(void) {
+    u16 i;
+    if (gWifiSetupMbParent->head.connectedMask == 0) {
+        return FALSE;
+    }
+    for (i = 1; i < 16; i++) {
+        if (gWifiSetupMbParent->head.connectedMask & (1 << i)) {
+            if (!MB_CommIsBootable(i)) {
+                return FALSE;
+            }
+        }
+    }
+    return TRUE;
+}
+
+void WifiSetupMbParent_BootChildren(void) {
+    u16 i;
+    u16 ok = 0;
+    for (i = 1; i < 16; i++) {
+        if (gWifiSetupMbParent->head.sentMask & (1 << i)) {
+            if (!MB_CommResponseRequest(i, MB_COMM_RESPONSE_REQUEST_BOOT)) {
+                WifiSetupMbParent_DisconnectChild(i);
+            } else {
+                ok |= 1 << i;
+            }
+        }
+    }
+    if (ok == 0) {
+        WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_FAILED);
+    } else {
+        WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_BOOTING);
+    }
+}
+
+void WifiSetupMbParent_End(void) {
+    WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_ENDING);
+    MB_End();
+}
+
+static void WifiSetupMbParent_EndIfAllBooted(void) {
+    if (gWifiSetupMbParent->head.state == WIFI_SETUP_MB_PARENT_STATE_BOOTING && gWifiSetupMbParent->head.connectedMask == gWifiSetupMbParent->head.bootableMask) {
+        MB_End();
+    }
+}
+
+static void WifiSetupMbParent_StateCallback(u16 aid, u32 status, void *arg) {
+    WifiSetupMbParentConnectArg *connectArg = arg;
+    WifiSetupMbParentState *head;
+    OSIntrMode intrMode;
+    void *user;
+    u8 *mac;
+    switch (status) {
+    case MB_COMM_PSTATE_INIT_COMPLETE:
+    case MB_COMM_PSTATE_KICKED:
+    case MB_COMM_PSTATE_REQ_ACCEPTED:
+    case MB_COMM_PSTATE_SEND_PROCEED:
+    case MB_COMM_PSTATE_BOOT_REQUEST:
+    case MB_COMM_PSTATE_MEMBER_FULL:
+        break;
+    case MB_COMM_PSTATE_CONNECTED:
+        if (WifiSetupMbParent_GetState() != WIFI_SETUP_MB_PARENT_STATE_ACCEPTING) {
+            break;
+        }
+        head = &gWifiSetupMbParent->head;
+        intrMode = OS_DisableInterrupts();
+        head->connectedMask |= 1 << aid;
+        OS_RestoreInterrupts(intrMode);
+        mac = gWifiSetupMbParent->children[aid - 1].macAddr;
+        mac[0] = connectArg->macAddr[0];
+        mac[1] = connectArg->macAddr[1];
+        mac[2] = connectArg->macAddr[2];
+        mac[3] = connectArg->macAddr[3];
+        mac[4] = connectArg->macAddr[4];
+        mac[5] = connectArg->macAddr[5];
+        gWifiSetupMbParent->children[aid - 1].aid = aid;
+        break;
+    case MB_COMM_PSTATE_DISCONNECTED:
+        if (WifiSetupMbParent_GetChildState(aid) == WIFI_SETUP_MB_CHILD_BOOTABLE) {
+            break;
+        }
+        WifiSetupMbParent_ClearChild(aid);
+        WifiSetupMbParent_EndIfAllBooted();
+        break;
+    case MB_COMM_PSTATE_REQUESTED:
+        if (WifiSetupMbParent_GetState() != WIFI_SETUP_MB_PARENT_STATE_ACCEPTING) {
+            WifiSetupMbParent_KickChild(aid);
+            break;
+        }
+        gWifiSetupMbParent->head.requestedMask |= 1 << aid;
+        WifiSetupMbParent_AcceptChild(aid);
+        user = MB_CommGetChildUser(aid);
+        if (user != NULL) {
+            MI_CpuCopy8(user, gWifiSetupMbParent->children[aid - 1].user, sizeof(gWifiSetupMbParent->children[aid - 1].user));
+        }
+        break;
+    case MB_COMM_PSTATE_WAIT_TO_SEND:
+        gWifiSetupMbParent->head.requestedMask &= ~(1 << aid);
+        gWifiSetupMbParent->head.waitingMask |= 1 << aid;
+        if (WifiSetupMbParent_GetState() == WIFI_SETUP_MB_PARENT_STATE_DOWNLOADING) {
+            WifiSetupMbParent_StartSending(aid);
+        }
+        break;
+    case MB_COMM_PSTATE_SEND_COMPLETE:
+        gWifiSetupMbParent->head.sendingMask &= ~(1 << aid);
+        gWifiSetupMbParent->head.sentMask |= 1 << aid;
+        break;
+    case MB_COMM_PSTATE_BOOT_STARTABLE:
+        gWifiSetupMbParent->head.sentMask &= ~(1 << aid);
+        gWifiSetupMbParent->head.bootableMask |= 1 << aid;
+        WifiSetupMbParent_EndIfAllBooted();
+        break;
+    case MB_COMM_PSTATE_END:
+        if (WifiSetupMbParent_GetState() == WIFI_SETUP_MB_PARENT_STATE_BOOTING) {
+            WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_BOOTED);
+        } else {
+            WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_NONE);
+        }
+        if (gWifiSetupMbParent->segmentPtr != NULL) {
+            gWifiSetupMbParent->segmentPtr = NULL;
+        }
+        if (gWifiSetupMbParent->mbWorkPtr != NULL) {
+            gWifiSetupMbParent->mbWorkPtr = NULL;
+        }
+        break;
+    case MB_COMM_PSTATE_ERROR:
+        switch (*(u16 *)arg) {
+        case 1:
+        case 2:
+        case 9:
+            WifiSetupMbParent_SetState(WIFI_SETUP_MB_PARENT_STATE_FAILED);
+            break;
+        case 8:
+            break;
+        }
+        break;
+    default:
+        OS_Terminate();
+        break;
+    }
+}
+
+static void WifiSetupMbParent_SetState(int state) {
+    gWifiSetupMbParent->head.state = state;
+}
+
+u16 WifiSetupMbParent_GetState(void) {
+    return gWifiSetupMbParent->head.state;
+}
+
+u16 WifiSetupMbParent_GetMask(int index) {
+    WifiSetupMbParentState *head = &gWifiSetupMbParent->head;
+    gWifiSetupMbParentData.masks[0] = &head->connectedMask;
+    gWifiSetupMbParentData.masks[1] = &head->requestedMask;
+    gWifiSetupMbParentData.masks[2] = &head->waitingMask;
+    gWifiSetupMbParentData.masks[3] = &head->sendingMask;
+    gWifiSetupMbParentData.masks[4] = &head->sentMask;
+    gWifiSetupMbParentData.masks[5] = &head->bootableMask;
+    return *gWifiSetupMbParentData.masks[index];
+}

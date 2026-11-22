@@ -1,0 +1,101 @@
+#ifndef POKEHEARTGOLD_FRONTIER_SCRIPT_UI_H
+#define POKEHEARTGOLD_FRONTIER_SCRIPT_UI_H
+
+#include "frontier/frontier_script_context.h"
+
+#include "list_menu.h"
+#include "list_menu_2d.h"
+
+#define FRONTIER_MENU_ITEMS_MAX      28
+#define FRONTIER_MENU_NO_DESCRIPTION 0xFF
+
+// Menu result values besides the selected item's value
+#define FRONTIER_MENU_RESULT_WAITING 0xEEEE
+#define FRONTIER_MENU_RESULT_CLOSE   0xEEDD
+#define FRONTIER_MENU_RESULT_CANCEL  0xFFFE
+
+// Text options of a message (speed, auto scroll, font).
+typedef struct FrontierMessageParams {
+    u8 speed;
+    u8 autoScroll;
+    u8 font;
+    u8 unk_03;
+} FrontierMessageParams;
+
+// Script menus: a 2D menu or a list menu, with an optional description message per item printed into the frontier system's message window.
+typedef struct FrontierMenu {
+    FrontierSystem *system;
+    SysTask *task;
+    Window window;
+    Window *messageWindow;
+    String *strings[FRONTIER_MENU_ITEMS_MAX];
+    MsgData *msgData;
+    MessageFormat *msgFormat;
+    u8 delay; // frames before input is read
+    u8 unk_095;
+    u8 initialSelection;
+    u8 canCancel : 1;
+    u8 ownsMsgData : 1;
+    u8 unk_097_2 : 4;
+    u8 alignRight : 1;
+    u8 alignBottom : 1;
+    u8 x;
+    u8 y;
+    u8 unk_09A;
+    u8 count;
+    u8 padding_09C[4];
+    u16 *result;
+    struct ListMenu2DTemplate menuTemplate;
+    struct ListMenu2D *menu;
+    ListMenuItem menuItems[FRONTIER_MENU_ITEMS_MAX];
+    ListMenuTemplate listTemplate;
+    ListMenu *listMenu;
+    u16 unk_1B8;
+    u16 listCursor;
+    ListMenuItem listItems[FRONTIER_MENU_ITEMS_MAX];
+    u16 descriptions[FRONTIER_MENU_ITEMS_MAX];
+    u16 listCursorPos;
+    u16 unk_2D6;
+} FrontierMenu;
+
+// Work of a map object's movement task
+typedef struct FrontierMovementTask {
+    u8 state;
+    u8 repeat;
+    s16 wait;
+    u16 id;
+    u8 *runningCount;  // the frontier system's count of running movements
+    const u16 *script; // (opcode, count) pairs
+    Field2DMoveQueue *moveQueue;
+    FrontierMapObject *object;
+} FrontierMovementTask;
+
+void FrontierSystem_PrintMessage(FrontierSystem *system, MsgData *msgData, u16 msgId, u16 canABSpeedUp, const FrontierMessageParams *params);
+void FrontierSystem_CloseMessageWindow(FrontierSystem *system);
+FrontierMenu *FrontierMenu_New(FrontierSystem *system, u8 x, u8 y, u8 initialSelection, u8 canCancel, u16 *result, MessageFormat *msgFormat, MsgData *msgData);
+void FrontierMenu_AddItem(FrontierMenu *menu, u16 msgId, u16 description, u16 value);
+void FrontierMenu_Show(FrontierMenu *menu);
+FrontierMenu *FrontierListMenu_New(FrontierSystem *system, u8 x, u8 y, u8 initialSelection, u8 canCancel, u16 *result, MessageFormat *msgFormat, MsgData *msgData);
+void FrontierListMenu_AddItem(FrontierMenu *menu, u16 msgId, u16 description, u16 value);
+void FrontierListMenu_Show(FrontierMenu *menu);
+void FrontierListMenu_Cancel(FrontierMenu *menu);
+void FrontierScript_MovementTask(SysTask *task, FrontierMovementTask *data);
+void FrontierScript_GetMovementStep(Field2DMove *step, Field2DObject *object, u16 id, s32 opcode);
+void FrontierMap_CreateMonSprite(FrontierMap *map, Pokemon *mon, enum HeapID heapId, int id, int x, int y, int drawPriority, int bgPriority, int blend, u16 blendColor);
+void FrontierMap_DeleteMonSprite(FrontierMap *map, u32 id);
+void FrontierMap_LoadMonIconResources(FrontierMap *map);
+void FrontierMap_UnloadMonIconResources(FrontierMap *map);
+ManagedSprite *FrontierMap_CreateMonIcon(FrontierMap *map, Pokemon *mon, s32 index, s32 x, s32 y);
+void FrontierMap_DeleteMonIcon(FrontierMap *map, ManagedSprite *sprite, u32 index);
+void FrontierMap_LoadItemIconResources(FrontierMap *map);
+void FrontierMap_UnloadItemIconResources(FrontierMap *map);
+ManagedSprite *FrontierMap_CreateItemIcon(FrontierMap *map, int x, int y);
+void FrontierMap_DeleteItemIcon(FrontierMap *map, ManagedSprite *sprite);
+void FrontierScript_PrintMessageEntry(FrontierScriptContext *ctx, const u16 *entry);
+void FrontierScript_PrintMessageEntryFromBank(FrontierScriptContext *ctx, const u16 *entry, u32 bank);
+void FrontierMap_ShakeTask(SysTask *task, FrontierMapShake *shake);
+void FrontierMap_WindowTask(SysTask *task, FrontierMapWindowTask *data);
+void FrontierMenu_SetAlignRight(FrontierMenu *menu, int value);
+void FrontierMenu_SetAlignBottom(FrontierMenu *menu, int value);
+
+#endif // POKEHEARTGOLD_FRONTIER_SCRIPT_UI_H

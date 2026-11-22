@@ -1,0 +1,10 @@
+#ifndef POKEHEARTGOLD_BATTLE_TERRAIN_H
+#define POKEHEARTGOLD_BATTLE_TERRAIN_H
+
+#include "battle.h"
+
+void BattleTerrain_Init(BattleTerrain *terrain, BattleSystem *battleSystem, s32 side, s32 terrainId);
+void BattleTerrain_SetDrawFlag(BattleTerrain *terrain, s32);
+void BattleTerrain_Free(BattleTerrain *terrain);
+
+#endif

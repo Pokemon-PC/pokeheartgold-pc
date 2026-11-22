@@ -1,0 +1,8 @@
+#ifndef POKEHEARTGOLD_FRONTIER_LAUNCH_H
+#define POKEHEARTGOLD_FRONTIER_LAUNCH_H
+
+#include "frontier/frontier.h"
+
+FrontierLaunchArgs *Frontier_LaunchApp(FieldSystem *fieldSystem, void *frontierFsys);
+
+#endif // POKEHEARTGOLD_FRONTIER_LAUNCH_H

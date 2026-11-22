@@ -1,0 +1,140 @@
+#include "field_union_chat_marker.h"
+
+#include "global.h"
+
+#include "constants/field/field_effect_renderer.h"
+
+#include "field/field_effect_helpers.h"
+#include "field/field_effect_manager.h"
+
+#include "field_effects.h"
+#include "map_object.h"
+
+// The marker shown over a Union Room player for a moment when the touch screen chat log entry of
+// something they said is touched: a billboard that follows the player's map
+// object until the effect is destroyed.
+
+#define UNION_CHAT_MARKER_RECORD   4
+#define UNION_CHAT_MARKER_RESOURCE 4
+#define UNION_CHAT_MARKER_TEXTURE  3
+
+struct UnionChatMarker {
+    FieldEffectManager *manager;
+};
+
+typedef struct UnionChatMarkerEffectArgs {
+    FieldSystem *fieldSystem;
+    FieldEffectManager *manager;
+    UnionChatMarker *marker;
+    LocalMapObject *mapObject;
+} UnionChatMarkerEffectArgs;
+
+typedef struct UnionChatMarkerEffect {
+    u8 unk00[4];
+    u32 objectId;
+    u32 mapId;
+    u8 unk0C[4];
+    UnionChatMarkerEffectArgs args;
+    BillboardObject *billboard;
+} UnionChatMarkerEffect;
+
+static void UnionChatMarker_LoadGfx(UnionChatMarker *marker);
+static void UnionChatMarker_FreeGfx(UnionChatMarker *marker);
+static BOOL UnionChatMarkerEffect_Init(FieldEffect *effect, void *state);
+static void UnionChatMarkerEffect_Destroy(FieldEffect *effect, void *state);
+static void UnionChatMarkerEffect_Update(FieldEffect *effect, void *state);
+static void UnionChatMarkerEffect_Draw(FieldEffect *effect, void *state);
+
+static const FieldEffectBasicTemplate sUnionChatMarkerEffectTemplate = {
+    sizeof(UnionChatMarkerEffect),
+    UnionChatMarkerEffect_Init,
+    UnionChatMarkerEffect_Destroy,
+    UnionChatMarkerEffect_Update,
+    UnionChatMarkerEffect_Draw,
+};
+
+static const BillboardSequenceRange sUnionChatMarkerRanges[2] = {
+    { 0, 1, 1 },
+    { 0, 0, 2 },
+};
+
+UnionChatMarker *UnionChatMarker_New(FieldEffectManager *manager) {
+    UnionChatMarker *marker = FieldEffectManager_HeapAllocAndFill(manager, sizeof(UnionChatMarker), FALSE, 0);
+    marker->manager = manager;
+    UnionChatMarker_LoadGfx(marker);
+    return marker;
+}
+
+void UnionChatMarker_Free(UnionChatMarker *marker) {
+    UnionChatMarker_FreeGfx(marker);
+    FieldEffectManager_HeapFree(marker);
+}
+
+static void UnionChatMarker_LoadGfx(UnionChatMarker *marker) {
+    FieldEffectManager_LoadBillboardResource(marker->manager, UNION_CHAT_MARKER_RESOURCE, 0x78);
+    FieldEffectManager_LoadTexResource(marker->manager, UNION_CHAT_MARKER_TEXTURE, 0x13, TRUE);
+    FieldEffectManager_AddRecord(marker->manager, UNION_CHAT_MARKER_RECORD, UNION_CHAT_MARKER_RESOURCE, 0, UNION_CHAT_MARKER_TEXTURE, 0, sUnionChatMarkerRanges);
+}
+
+static void UnionChatMarker_FreeGfx(UnionChatMarker *marker) {
+    FieldEffectManager_FreeBillboardResource(marker->manager, UNION_CHAT_MARKER_RESOURCE);
+    FieldEffectManager_FreeTexResource(marker->manager, UNION_CHAT_MARKER_TEXTURE);
+    FieldEffectManager_ReleaseRecord(marker->manager, UNION_CHAT_MARKER_RECORD);
+}
+
+FieldEffect *UnionChatMarker_Spawn(LocalMapObject *mapObject) {
+    FieldEffectManager *manager = FieldEffectManager_GetFromMapObject(mapObject);
+    UnionChatMarkerEffectArgs args;
+
+    args.fieldSystem = MapObject_GetFieldSystem(mapObject);
+    args.manager = manager;
+    args.marker = FieldEffectManager_GetRendererData(manager, FIELD_EFFECT_RENDERER_UNION_CHAT_MARKER);
+    {
+        VecFx32 position = { 0, 0, 0 };
+        args.mapObject = mapObject;
+        return FieldEffectManager_CreateEffect(manager, &sUnionChatMarkerEffectTemplate, &position, 0, &args, MapObject_GetPriorityPlusValue(mapObject, 2));
+    }
+}
+
+static BOOL UnionChatMarkerEffect_Init(FieldEffect *effect, void *state) {
+    UnionChatMarkerEffect *work = state;
+    VecFx32 position = { 0, 0, 0 };
+    UnionChatMarkerEffectArgs *args = FieldEffect_GetUserData(effect);
+    work->args = *args;
+    work->objectId = MapObject_GetID(work->args.mapObject);
+    work->mapId = MapObject_GetMapID(work->args.mapObject);
+    FieldEffect_SetPosition(effect, &position);
+    work->billboard = FieldEffectManager_CreateBillboardFromRecord(work->args.manager, UNION_CHAT_MARKER_RECORD, &position);
+    return TRUE;
+}
+
+static void UnionChatMarkerEffect_Destroy(FieldEffect *effect, void *state) {
+    UnionChatMarkerEffect *work = state;
+    BillboardObject_Delete(work->billboard);
+}
+
+static void UnionChatMarkerEffect_Update(FieldEffect *effect, void *state) {
+    UnionChatMarkerEffect *work = state;
+    if (!MapObject_CheckIDAndMap(work->args.mapObject, work->objectId, work->mapId)) {
+        FieldEffectManager_DestroyEffect(effect);
+    }
+}
+
+static void UnionChatMarkerEffect_Draw(FieldEffect *effect, void *state) {
+    UnionChatMarkerEffect *work = state;
+    LocalMapObject *mapObject = work->args.mapObject;
+    VecFx32 position;
+    VecFx32 facing;
+
+    if (!MapObject_CheckIDAndMap(mapObject, work->objectId, work->mapId)) {
+        FieldEffectManager_DestroyEffect(effect);
+        return;
+    }
+    MapObject_CopyPositionVector(mapObject, &position);
+    MapObject_CopyFacingVector(mapObject, &facing);
+    position.x += facing.x;
+    position.y += facing.y;
+    position.z += facing.z;
+    position.z += 12 * FX32_ONE;
+    BillboardObject_SetPosition(work->billboard, &position);
+}

@@ -1,0 +1,347 @@
+#include "frontier/battle_castle_setup.h"
+
+#include "global.h"
+
+#include "constants/battle.h"
+#include "constants/pokemon.h"
+
+#include "battle/battle_setup.h"
+#include "frontier/battle_castle_data.h"
+#include "frontier/frontier.h"
+#include "frontier/frontier_trainer_record.h"
+#include "frontier/frontier_trainers.h"
+
+#include "assert.h"
+#include "bg_window.h"
+#include "communication_core.h"
+#include "communication_player_state.h"
+#include "frontier_save_access.h"
+#include "frontier_stat_ids.h"
+#include "heap.h"
+#include "math_util.h"
+#include "party.h"
+#include "player_data.h"
+#include "pokemon.h"
+#include "use_item_on_mon.h"
+
+static u32 BattleCastle_GetBattleType(int type);
+static int BattleCastle_GetTrainerAIFlags(BattleCastleData *data);
+static void BattleCastle_BuildRoundTilemap(u16 *tilemap, int round);
+static int BattleCastle_ClampRound(int round);
+
+// Battle Castle trainers and battles: the trainers of a round, the battle setup of a castle battle, the party kept
+// between battles, the round tiles and spending castle points.
+
+static const FrontierTrainerRange sBattleCastleTrainerRanges[] = {
+    { 0,   99,  100, 119 },
+    { 80,  119, 120, 139 },
+    { 100, 139, 140, 159 },
+    { 120, 159, 160, 179 },
+    { 140, 179, 180, 199 },
+    { 160, 199, 200, 219 },
+    { 180, 219, 220, 239 },
+    { 200, 299, 200, 299 },
+};
+
+static int BattleCastle_GetRandomTrainerId(int type, u32 round, int battleNo) {
+    int min;
+    int span;
+
+    if (type == FRONTIER_CHALLENGE_SINGLE) {
+        int battle = battleNo + 1;
+        int number = 7 * round + battle;
+        if (number == FRONTIER_BRAIN_BATTLE_SILVER) {
+            return CASTLE_VALET_SILVER;
+        }
+        if (number == FRONTIER_BRAIN_BATTLE_GOLD) {
+            return CASTLE_VALET_GOLD;
+        }
+    }
+    if (round >= 8) {
+        round = 7;
+    }
+    if (battleNo == 6 || battleNo == 13) {
+        min = sBattleCastleTrainerRanges[round].lastBattleMin;
+        span = sBattleCastleTrainerRanges[round].lastBattleMax - min;
+    } else {
+        min = sBattleCastleTrainerRanges[round].min;
+        span = sBattleCastleTrainerRanges[round].max - min;
+    }
+    return min + LCRandom() % span;
+}
+
+void BattleCastle_GetRoundTrainerIds(u32 type, u32 round, u16 *trainerIds, int count) {
+    int i = 0;
+    u16 *trainerId = trainerIds;
+
+    do {
+        int j;
+        *trainerId = BattleCastle_GetRandomTrainerId(type, round, i);
+        for (j = 0; j < i; j++) {
+            if (trainerIds[j] == trainerIds[i]) {
+                break;
+            }
+        }
+        if (j == i) {
+            trainerId++;
+            i++;
+        }
+    } while (i < count);
+}
+
+int BattleCastle_GetPartySize(int type, int both) {
+    switch (type) {
+    case 0:
+    case 1:
+        return 3;
+    case 2:
+    case 3:
+        if (both == FALSE) {
+            return 2;
+        }
+        return 4;
+    default:
+        GF_ASSERT(FALSE);
+        return 3;
+    }
+}
+
+u8 BattleCastle_GetOpponentMonCount(int type, int both) {
+    switch (type) {
+    case 0:
+    case 1:
+        return 3;
+    case 2:
+    case 3:
+        if (both == FALSE) {
+            return 2;
+        }
+        return 4;
+    default:
+        GF_ASSERT(FALSE);
+        return 3;
+    }
+}
+
+BattleSetup *BattleCastle_NewBattleSetup(BattleCastleData *data, FrontierLaunchArgs *args) {
+    int i;
+    int playerCount = BattleCastle_GetPartySize(data->type, FALSE);
+    int opponentCount = BattleCastle_GetOpponentMonCount(data->type, FALSE);
+    int slot;
+    int j;
+    int count;
+    BattleSetup *setup;
+    Pokemon *mon;
+    FrontierTrainerRecord trainer;
+
+    HealParty(data->opponentParty);
+    setup = BattleSetup_New(HEAP_ID_FIELD2, BattleCastle_GetBattleType(data->type));
+    BattleSetup_InitFromSaveData(setup, NULL, args->saveData, args->mapId, args->bagCursor, args->keyPressedSave);
+    setup->battleBg = BATTLE_BG_BATTLE_CASTLE;
+    setup->terrain = TERRAIN_BATTLE_CASTLE;
+    Party_InitWithMaxSize(setup->party[BATTLER_PLAYER], playerCount);
+    // in link battles the second player's Pokemon follow the first player's in the party
+    slot = Comm_GetLocalNetId() == 0 ? 0 : 2;
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < playerCount; i++) {
+        CopyPokemonToPokemon(Party_GetMonByIndex(data->playerParty, slot), mon);
+        BattleSetup_AddMonToParty(setup, mon, BATTLER_PLAYER);
+        slot++;
+    }
+    Heap_Free(mon);
+    BattleSetup_SetAllySideBattlersToPlayer(setup);
+    Heap_Free(FrontierTrainer_Load(&trainer, data->trainerIds[data->battleNo], HEAP_ID_FIELD2, NARC_a_2_0_2));
+    FrontierTrainer_SetBattleTrainer(setup, &trainer, opponentCount, BATTLER_ENEMY, HEAP_ID_FIELD2);
+    Party_InitWithMaxSize(setup->party[BATTLER_ENEMY], BattleCastle_GetOpponentMonCount(data->type, FALSE));
+    for (j = 0; j < BATTLER_MAX; j++) {
+        setup->trainer[j].data.aiFlags = BattleCastle_GetTrainerAIFlags(data);
+    }
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (slot = 0; slot < opponentCount; slot++) {
+        CopyPokemonToPokemon(Party_GetMonByIndex(data->opponentParty, slot), mon);
+        BattleSetup_AddMonToParty(setup, mon, BATTLER_ENEMY);
+    }
+    Heap_Free(mon);
+    switch (data->type) {
+    case 2:
+    case 3:
+        BattleSetup_SetAllySideBattlersToPlayer(setup);
+        PlayerProfile_Copy(CommPlayerInfo_GetProfile(1 - Comm_GetLocalNetId()), setup->profile[BATTLER_PLAYER2]);
+        Heap_Free(FrontierTrainer_Load(&trainer, data->trainerIds[data->battleNo + 7], HEAP_ID_FIELD2, NARC_a_2_0_2));
+        FrontierTrainer_SetBattleTrainer(setup, &trainer, opponentCount, BATTLER_ENEMY2, HEAP_ID_FIELD2);
+        Party_InitWithMaxSize(setup->party[BATTLER_ENEMY2], BattleCastle_GetOpponentMonCount(data->type, FALSE));
+        mon = AllocMonZeroed(HEAP_ID_FIELD2);
+        count = 0;
+        if (opponentCount > 0) {
+            slot = opponentCount;
+            do {
+                CopyPokemonToPokemon(Party_GetMonByIndex(data->opponentParty, slot), mon);
+                BattleSetup_AddMonToParty(setup, mon, BATTLER_ENEMY2);
+                slot++;
+                count++;
+            } while (count < opponentCount);
+        }
+        Heap_Free(mon);
+        break;
+    }
+    return setup;
+}
+
+static u32 BattleCastle_GetBattleType(int type) {
+    switch (type) {
+    case 0:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_TRAINER;
+    case 1:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    case 2:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_MULTI | BATTLE_TYPE_LINK | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    case 3:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_MULTI | BATTLE_TYPE_LINK | BATTLE_TYPE_DOUBLES | BATTLE_TYPE_TRAINER;
+    default:
+        return BATTLE_TYPE_FRONTIER | BATTLE_TYPE_TRAINER;
+    }
+}
+
+int BattleCastle_GetMonLevel(BattleCastleData *data) {
+    return 50;
+}
+
+BOOL BattleCastle_IsMultiType(int type) {
+    switch (type) {
+    case FRONTIER_CHALLENGE_MULTI:
+    case FRONTIER_CHALLENGE_LINK_MULTI:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+void BattleCastle_ReviveParty(Party *party) {
+    int count = Party_GetCount(party);
+    int i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, i);
+        int value;
+        if (GetMonData(mon, MON_DATA_SPECIES_EXISTS, NULL) != 0) {
+            if (GetMonData(mon, MON_DATA_HP, NULL) == 0) {
+                value = 1;
+                SetMonData(mon, MON_DATA_HP, &value);
+            }
+            value = 0;
+            SetMonData(mon, MON_DATA_STATUS, &value);
+        }
+    }
+}
+
+static void BattleCastle_SetMonOriginalTrainer(BattleCastleData *data, Pokemon *mon) {
+    PlayerProfile *profile = Save_PlayerData_GetProfile(data->saveData);
+    MonSetCatchDataNoHealBall(mon, profile, 4, 0, 0, HEAP_ID_FIELD2);
+}
+
+void BattleCastle_AddMonToParty(BattleCastleData *data, Party *party, Pokemon *mon) {
+    BattleCastle_SetMonOriginalTrainer(data, mon);
+    Party_AddMon(party, mon);
+}
+
+void BattleCastle_SetOpponentParty(BattleCastleData *data) {
+    int count;
+    Pokemon *mon;
+    int i;
+
+    SaveArray_Party_Init(data->opponentParty);
+    count = BattleCastle_GetOpponentMonCount(data->type, TRUE);
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < count; i++) {
+        FrontierMon_ToPokemon(&data->opponentMons[i], mon, BattleCastle_GetMonLevel(data));
+        BattleCastle_AddMonToParty(data, data->opponentParty, mon);
+    }
+    Heap_Free(mon);
+}
+
+static int BattleCastle_GetTrainerAIFlags(BattleCastleData *data) {
+    int round;
+    int aiFlags;
+
+    if (data->type == FRONTIER_CHALLENGE_SINGLE && (data->trainerIds[data->battleNo] == CASTLE_VALET_SILVER || data->trainerIds[data->battleNo] == CASTLE_VALET_GOLD)) {
+        return 7;
+    }
+    round = BattleCastle_GetRound(data);
+    round++;
+    aiFlags = 7;
+    switch (round) {
+    case 1:
+    case 2:
+        aiFlags = 0;
+        break;
+    case 3:
+    case 4:
+        aiFlags = 1;
+        break;
+    }
+    return aiFlags;
+}
+
+u16 BattleCastle_GetRound(BattleCastleData *data) {
+    u16 round = data->round;
+
+    if (BattleCastle_IsMultiType(data->type) == TRUE) {
+        u16 partnerRound = data->partnerRound;
+        if (partnerRound > data->round) {
+            round = partnerRound;
+        }
+    }
+    return round;
+}
+
+void BattleCastle_DrawRoundTiles(BgConfig *bgConfig, BattleCastleData *data, int bgId) {
+    u16 tilemap[30];
+
+    BattleCastle_BuildRoundTilemap(tilemap, BattleCastle_GetRound(data));
+    LoadRectToBgTilemapRect(bgConfig, bgId, tilemap, 11, 6, 10, 3);
+    ScheduleBgTilemapBufferTransfer(bgConfig, bgId);
+}
+
+static void BattleCastle_BuildRoundTilemap(u16 *tilemap, int round) {
+    u8 tiles[10];
+    u32 i, x, y;
+    int palette = BattleCastle_ClampRound(round);
+
+    // a 10x3 frame mirrored horizontally (tiles 0-4, then 4-0 flipped), 3 tile rows per round color
+    for (i = 0; i < 5; i++) {
+        tiles[i] = i;
+        tiles[5 + i] = 4 - i;
+    }
+    for (y = 0; y < 3; y++) {
+        for (x = 0; x < 10; x++) {
+            tilemap[y * 10 + x] = tiles[x] + (palette * 0x60 + 0x10 + y * 0x20);
+            if (x >= 5) {
+                tilemap[y * 10 + x] |= 0x400;
+            }
+        }
+    }
+}
+
+static int BattleCastle_ClampRound(int round) {
+    if ((u32)round >= 8) {
+        round = 7;
+    }
+    return round;
+}
+
+void BattleCastle_SpendPoints(FrontierSave *frontierSave, int type, int amount) {
+    int stat = BattleCastle_GetPointsStat(type);
+    int used;
+
+    FrontierSave_SubStat(frontierSave, stat, FrontierStat_GetFriendIndex(BattleCastle_GetPointsStat(type)), amount);
+    stat = BattleCastle_GetSpentPointsStat(type);
+    used = FrontierSave_GetStat(frontierSave, stat, FrontierStat_GetFriendIndex(BattleCastle_GetSpentPointsStat(type)));
+    used += amount;
+    if (used > 9999) {
+        stat = BattleCastle_GetSpentPointsStat(type);
+        FrontierSave_SetStat(frontierSave, stat, FrontierStat_GetFriendIndex(BattleCastle_GetSpentPointsStat(type)), 9999);
+    } else {
+        stat = BattleCastle_GetSpentPointsStat(type);
+        FrontierSave_AddStat(frontierSave, stat, FrontierStat_GetFriendIndex(BattleCastle_GetSpentPointsStat(type)), amount);
+    }
+}

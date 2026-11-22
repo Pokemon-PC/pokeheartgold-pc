@@ -1,0 +1,706 @@
+#include "global.h"
+
+#include "pokeathlon/pokeathlon_course_internal.h"
+#include "pokeathlon/pokeathlon_course_objects.h"
+#include "pokeathlon/pokeathlon_course_types_def.h"
+#include "pokeathlon/pokeathlon_ring_drop.h"
+
+#include "assert.h"
+#include "filesystem.h"
+#include "math_util.h"
+#include "sprite_system.h"
+
+// An entry of NARC 170 #19: a mon object's collision circle by its size.
+
+static BOOL PokeathlonRingDropMon_Collide(PokeathlonRingDropMon *a, PokeathlonRingDropMon *b);
+static BOOL PokeathlonRingDropMon_CanCollide(PokeathlonRingDropMon *mon);
+
+static BOOL PokeathlonRingDrop_IsAttackState(int state) {
+    if (state == RING_DROP_MON_DASH || state == RING_DROP_MON_JUMP_FALL) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// source pushes target (they collide; direction points from source to target). A dash pushes three times its
+// power and takes stamina, a press pushes with the press power; the attacker scores. Other pushes are weak bumps.
+static BOOL PokeathlonRingDropMon_Push(PokeathlonRingDropMon *target, PokeathlonRingDropMon *source, VecFx32 *direction) {
+    int power = source->member->params->dashPower;
+    int damage = source->member->params->dashDamage;
+    if (PokeathlonRingDropMon_CanBePushed(target->state, source->state)) {
+        if (source->state == RING_DROP_MON_DASH) {
+            int score;
+            power = 3.0f * (float)power;
+            damage = 2.0f * (float)damage;
+            score = source->flags.bits.score + 1;
+            if (score > 200) {
+                score = 200;
+            }
+            source->flags.bits.score = score;
+            PokeathlonCourse_AddMonCounter(source->course, source->flags.bits.participant, source->flags.bits.member, POKEATHLON_COUNTER_POINTS, 1);
+            PokeathlonCourse_AddMonCounter(source->course, source->flags.bits.participant, source->flags.bits.member, POKEATHLON_COUNTER_TACKLES, 1);
+        } else if (source->state == RING_DROP_MON_JUMP_FALL) {
+            int score;
+            power = source->member->params->pressPower;
+            damage = source->member->params->pressDamage;
+            score = source->flags.bits.score + 2;
+            if (score > 200) {
+                score = 200;
+            }
+            source->flags.bits.score = score;
+            PokeathlonCourse_AddMonCounter(source->course, source->flags.bits.participant, source->flags.bits.member, POKEATHLON_COUNTER_POINTS, 1);
+            PokeathlonCourse_AddMonCounter(source->course, source->flags.bits.participant, source->flags.bits.member, POKEATHLON_COUNTER_TACKLES, 1);
+        } else {
+            power = FX32_CONST(3);
+        }
+        VEC_MultAdd(power, direction, &target->velocity, &target->velocity);
+        PokeathlonRingDrop_ClampVelocity(&target->velocity, FX32_CONST(12));
+        PokeathlonRingDropMon_FaceDirection(source, direction);
+        if (PokeathlonRingDrop_IsAttackState(source->state)) {
+            target->hitFrames = 4;
+            source->hitFrames = 4;
+            PokeathlonRingDropMon_DrainStamina(target, damage);
+        }
+        if (!target->attacker || PokeathlonRingDrop_IsAttackState(source->state)) {
+            target->attacker = source;
+            if (source->attacker && source->attacker != target) {
+                target->attacker = source->attacker;
+            }
+        }
+        target->flags.bits.pushed = 1;
+        target->attackerState = source->state;
+        if (PokeathlonRingDrop_IsAttackState(source->state)) {
+            u32 attacker;
+            if (target->flags.bits.hit != 2) {
+                switch (source->state) {
+                case RING_DROP_MON_DASH:
+                    target->flags.bits.hit = 1;
+                    break;
+                case RING_DROP_MON_JUMP_FALL:
+                    target->flags.bits.hit = 2;
+                    break;
+                }
+            }
+            attacker = source->flags.bits.participant;
+            if (attacker < target->flags.bits.participant) {
+                attacker++;
+            }
+            target->flags.bits.attacker = attacker;
+            target->hitMarkFrames = 4;
+        } else {
+            target->flags.bits.bumped = 1;
+        }
+        GF_ASSERT(source->state != RING_DROP_MON_FALL_OUT && source->state != RING_DROP_MON_RETURN);
+        GF_ASSERT(target->state != RING_DROP_MON_FALL_OUT && target->state != RING_DROP_MON_RETURN && target->state != RING_DROP_MON_JUMP_FALL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// The twelve team members' mon objects.
+void PokeathlonRingDrop_CreateMonObjects(PokeathlonRingDrop *ringDrop, PokeathlonCourseData *course) {
+    SpriteList *spriteList;
+
+    spriteList = SpriteManager_GetSpriteList(ringDrop->spriteManager);
+    ringDrop->monObjects = PokeathlonCourseMonObjects_Create(ringDrop->heapId, 12, 7, ringDrop->resources, spriteList);
+    {
+        PokeathlonCourseMonInfo infos[POKEATHLON_PARTICIPANTS * POKEATHLON_TEAM_SIZE];
+        PokeathlonCourseMonGfxTemplate template = { 0 };
+        int i;
+        for (i = 0; i < POKEATHLON_PARTICIPANTS * POKEATHLON_TEAM_SIZE; i++) {
+            int member = i % POKEATHLON_TEAM_SIZE;
+            int participant = i / POKEATHLON_TEAM_SIZE;
+            PokeathlonCourse_GetMonInfo(course, participant, member, &infos[i]);
+            template.sizeTypes[i] = PokeathlonCourse_GetSpriteSizeType(PokeathlonCourse_GetPerformance(course, participant, member));
+        }
+        template.priority = 3;
+        template.vram = NNS_G2D_VRAM_TYPE_2DMAIN;
+        template.whichScreen = NNS_G2D_VRAM_TYPE_2DMAIN;
+        PokeathlonCourseMonObjects_Load(ringDrop->monObjects, POKEATHLON_PARTICIPANTS * POKEATHLON_TEAM_SIZE, infos, &template, 0, 0);
+    }
+}
+
+// Places the team members (the first of each team in the ring), sets their numbers and the start countdown sprites.
+
+void PokeathlonRingDrop_InitMons(PokeathlonRingDrop *ringDrop, PokeathlonCourseData *course) {
+    PokeathlonCourseCollision collisions[POKEATHLON_SIZE_CLASSES] = { 0 };
+
+    PokeathlonCoursePoint own;
+    s32 centerX;
+    s32 centerY;
+    s32 startX;
+    s32 startY;
+
+    int i;
+    u8 participant, member;
+    PokeathlonCourseMonObject *object;
+    PokeathlonRingDropMember *teamMember;
+    s16 x, y;
+    PokeathlonRingDropMon *mon;
+
+    ReadWholeNarcMemberByIdPair(collisions, NARC_a_1_7_0, 19);
+    GF_ASSERT(ringDrop != NULL);
+    PokeathlonRingDrop_InitMemberParams(course);
+    for (i = 0; i < POKEATHLON_PARTICIPANTS * POKEATHLON_TEAM_SIZE; i++) {
+        int size;
+        participant = i / POKEATHLON_TEAM_SIZE;
+        member = i % POKEATHLON_TEAM_SIZE;
+        teamMember = &ringDrop->players[participant].mon.members[member];
+        object = PokeathlonCourseMonObjects_Get(ringDrop->monObjects, i);
+        PokeathlonCourseMonObject_SetDrawFlag(object, member == 0);
+        size = PokeathlonCourse_GetCollisionSizeClass(PokeathlonCourse_GetPerformance(course, participant, member));
+        PokeathlonCourseObject_SetCollision(object, collisions[size - 1].offsetY, collisions[size - 1].radius);
+        object = PokeathlonCourseMonObjects_Get(ringDrop->monObjects, i);
+        PokeathlonCourseMonObject_GetGfx(object);
+        PokeathlonCourseMonObject_SetAffineOverwriteMode(object, NNS_G2D_RND_AFFINE_OVERWRITE_DOUBLE);
+        PokeathlonRingDrop_SetMonAffineCenter(object, TRUE);
+        x = gPokeathlonRingDropMonStartPositions[participant][0];
+        y = gPokeathlonRingDropMonStartPositions[participant][1];
+        if (participant == PokeathlonCourse_GetNetId(course)) {
+            own.x = x;
+            own.y = y;
+        }
+        PokeathlonCourseMonObject_SetAnimState(object, 2);
+        PokeathlonCourseMonObject_SetDrawPriority(object, 7);
+        PokeathlonCourseObject_SetGroundPosition(object, x, y);
+        PokeathlonCourseObject_SetTouchRadius(object, PokeathlonCourse_GetTouchRadius());
+        PokeathlonCourseObject_GroundToCenter(object, x, y, &centerX, &centerY);
+        teamMember->index = i;
+        teamMember->object = object;
+        teamMember->params = PokeathlonRingDrop_GetMemberParams(course, participant, member);
+        teamMember->stamina = teamMember->params->stamina;
+    }
+    PokeathlonCourse_CreateStartSprites(course, 0, ringDrop->resources, SpriteManager_GetSpriteList(ringDrop->spriteManager), NNS_G2D_VRAM_TYPE_2DMAIN, 1, &own);
+    for (i = 0; i < POKEATHLON_PARTICIPANTS; i++) {
+        mon = &ringDrop->players[i].mon;
+        mon->player = &ringDrop->players[i];
+        mon->member = ringDrop->players[i].mon.members;
+        mon->ui = ringDrop->ui;
+        mon->course = course;
+        PokeathlonCourseObject_GroundToCenter(mon->member->object, gPokeathlonRingDropMonStartPositions[i][0], gPokeathlonRingDropMonStartPositions[i][1], &startX, &startY);
+        PokeathlonRingDropMon_SetState(mon, RING_DROP_MON_STAND);
+        mon->flags.bits.direction = 2;
+        mon->position.x = startX << FX32_SHIFT;
+        mon->position.y = startY << FX32_SHIFT;
+        mon->destination.x = startX << FX32_SHIFT;
+        mon->destination.y = startY << FX32_SHIFT;
+        mon->flags.bits.participant = i;
+        mon->fallSpeed = 0;
+        mon->status = 3;
+        ringDrop->players[i].mon.index = i;
+    }
+}
+
+void PokeathlonRingDrop_FreeMonObjects(PokeathlonRingDrop *ringDrop) {
+    PokeathlonCourseMonObjects_Free(ringDrop->monObjects);
+}
+
+static void PokeathlonRingDropMon_ApplyPushReaction(PokeathlonRingDropMon *mon, int reaction) {
+    switch (reaction) {
+    case RING_DROP_REACTION_NONE:
+        break;
+    case RING_DROP_REACTION_STAND:
+        PokeathlonRingDropMon_SetState(mon, RING_DROP_MON_STAND);
+        break;
+    case RING_DROP_REACTION_STOP:
+        PokeathlonRingDropMon_SetState(mon, RING_DROP_MON_DASH_END);
+        mon->dashFrames = 1;
+        break;
+    case RING_DROP_REACTION_STAGGER:
+        PokeathlonRingDropMon_Stagger(mon);
+        break;
+    default:
+        GF_ASSERT(FALSE);
+        break;
+    }
+}
+
+int PokeathlonRingDropMon_GetPushReaction(PokeathlonRingDropMon *mon) {
+    int state = mon->state;
+    int attackerState = mon->attackerState;
+    u32 pushed = mon->flags.bits.pushed;
+    int reaction = RING_DROP_REACTION_NONE;
+
+    if (pushed == 0) {
+        return reaction;
+    }
+    switch (state) {
+    case RING_DROP_MON_JUMP_FALL:
+        reaction = RING_DROP_REACTION_NONE;
+        break;
+    case RING_DROP_MON_DASH_START:
+    case RING_DROP_MON_DASH:
+    case RING_DROP_MON_DASH_END:
+    case RING_DROP_MON_JUMP_START:
+    case RING_DROP_MON_LANDING:
+        if (attackerState == RING_DROP_MON_JUMP_FALL || attackerState == RING_DROP_MON_DASH) {
+            reaction = RING_DROP_REACTION_STAGGER;
+        } else if (state == RING_DROP_MON_DASH) {
+            reaction = RING_DROP_REACTION_STOP;
+        } else {
+            reaction = RING_DROP_REACTION_STAND;
+        }
+        break;
+    case RING_DROP_MON_STAND:
+    case RING_DROP_MON_STAGGER:
+    case RING_DROP_MON_JUMP_RISE:
+        if (attackerState == RING_DROP_MON_JUMP_FALL || attackerState == RING_DROP_MON_DASH) {
+            reaction = RING_DROP_REACTION_STAGGER;
+        }
+        break;
+    case 0:
+    case RING_DROP_MON_FALL_OUT:
+    case RING_DROP_MON_RETURN:
+    case RING_DROP_MON_JUMP_TOP:
+        GF_ASSERT(FALSE);
+        break;
+    default:
+        GF_ASSERT(FALSE);
+        break;
+    }
+    return reaction;
+}
+
+// Host: every pair of Pokemon that touch pushes each other once (until one of them stops sliding).
+
+static void PokeathlonRingDrop_UpdateCollisions(PokeathlonCourseData *course) {
+    int i;
+    PokeathlonRingDrop *ringDrop;
+    u8(*contacts)[POKEATHLON_PARTICIPANTS];
+    int j;
+
+    ringDrop = PokeathlonCourse_GetWork(course);
+    contacts = ringDrop->contacts;
+    for (i = 0; i < POKEATHLON_PARTICIPANTS; i++) {
+        PokeathlonRingDropMon *mon = &ringDrop->players[i].mon;
+        if (!PokeathlonRingDropMon_CanCollide(mon) || mon->hitFrames > 0) {
+            continue;
+        }
+        for (j = i + 1; j < POKEATHLON_PARTICIPANTS; j++) {
+            PokeathlonRingDropMon *other = &ringDrop->players[j].mon;
+            if (PokeathlonRingDropMon_CanCollide(other) && PokeathlonRingDropMon_Collide(mon, other)) {
+                VecFx32 direction = { 0, 0, 0 };
+                BOOL pushedA, pushedB;
+                int reactionA, reactionB;
+                if (contacts[i][j] && !mon->flags.bits.pushed) {
+                    contacts[i][j] = contacts[j][i] = 0;
+                }
+                if (contacts[i][j] == 0) {
+                    VEC_Subtract(&mon->position, &other->position, &direction);
+                    if (direction.x == 0 && direction.y == 0) {
+                        direction.x = (MTRandom() & 0x3F) - 32;
+                        direction.y = (MTRandom() & 0x3F) - 32;
+                    }
+                    VEC_Normalize(&direction, &direction);
+                    pushedA = PokeathlonRingDropMon_Push(mon, other, &direction);
+                    direction.x *= -1;
+                    direction.y *= -1;
+                    pushedB = PokeathlonRingDropMon_Push(other, mon, &direction);
+                    reactionA = PokeathlonRingDropMon_GetPushReaction(mon);
+                    reactionB = PokeathlonRingDropMon_GetPushReaction(other);
+                    PokeathlonRingDropMon_ApplyPushReaction(mon, reactionA);
+                    PokeathlonRingDropMon_ApplyPushReaction(other, reactionB);
+                    if (pushedA || pushedB) {
+                        contacts[i][j] = contacts[j][i] = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Host: the Pokemon in the ring loses stamina; when it runs out, the Pokemon rests for 60 frames and comes back
+// with 20. The members on the bench get theirs back (0.2 a frame).
+static void PokeathlonRingDrop_UpdateStamina(PokeathlonRingDropPlayer *players, PokeathlonCourseData *course) {
+    int i;
+    int member;
+
+    for (i = 0; i < POKEATHLON_PARTICIPANTS; players++, i++) {
+        PokeathlonRingDropMon *mon = &players->mon;
+        PokeathlonRingDropMember *teamMember;
+        for (member = 0, teamMember = players->mon.members; member < POKEATHLON_TEAM_SIZE; member++, teamMember++) {
+            int max;
+            float refill = 0.0f;
+            max = teamMember->params->stamina;
+            if (mon->flags.bits.member == member) {
+                if (mon->flags.bits.exhausted) {
+                    mon->restFrames--;
+                    if (mon->restFrames <= 0) {
+                        teamMember->stamina = FX32_CONST(20);
+                        mon->destination = mon->position;
+                        mon->flags.bits.exhausted = 0;
+                    }
+                } else if (teamMember->stamina <= 0) {
+                    mon->restFrames = 60;
+                    mon->flags.bits.exhausted = 1;
+                    mon->flags.bits.jumpRequested = 0;
+                    mon->flags.bits.hasTarget = 0;
+                    PokeathlonCourse_AddMonCounter(mon->course, mon->flags.bits.participant, mon->flags.bits.member, POKEATHLON_COUNTER_FAILURES, 1);
+                }
+            } else {
+                refill = 819.0f;
+            }
+            teamMember->stamina = (float)teamMember->stamina + refill;
+            if (teamMember->stamina > max) {
+                teamMember->stamina = max;
+            }
+        }
+    }
+}
+
+static inline float PokeathlonRingDrop_ToFx32Rounded(s16 x) {
+    if (x > 0) {
+        return 0.5f + (float)(x << FX32_SHIFT);
+    }
+    return (float)(x << FX32_SHIFT) - 0.5f;
+}
+
+static inline float PokeathlonRingDrop_TouchRadius(void) {
+    if (PokeathlonCourse_GetTouchRadius() > 0) {
+        return 0.5f + (float)(PokeathlonCourse_GetTouchRadius() << FX32_SHIFT);
+    }
+    return (float)(PokeathlonCourse_GetTouchRadius() << FX32_SHIFT) - 0.5f;
+}
+
+static inline int PokeathlonRingDrop_Abs(int x) {
+    return x < 0 ? -x : x;
+}
+
+// Host: applies the participants' touches (touching the switch button switches; touching the own Pokemon and
+// dragging makes it walk; a short flick from it dashes, a short tap on it jumps), then moves every Pokemon.
+
+void PokeathlonRingDrop_UpdateMons(PokeathlonRingDropPlayer *players, PokeathlonCourseData *course) {
+    int i;
+    for (i = 0; i < POKEATHLON_PARTICIPANTS; i++) {
+        PokeathlonRingDropPlayer *player = &players[i];
+        VecFx32 touch = { 0, 0, 0 }, touchStart = { 0, 0, 0 };
+        PokeathlonRingDropTouch *record = &player->touch;
+        PokeathlonRingDropMon *mon = &player->mon;
+        touch.x = PokeathlonRingDrop_ToFx32Rounded(player->touchX);
+        touch.y = PokeathlonRingDrop_ToFx32Rounded(player->touchY);
+        touchStart.x = PokeathlonRingDrop_ToFx32Rounded(player->touchStartX);
+        touchStart.y = PokeathlonRingDrop_ToFx32Rounded(player->touchStartY);
+        if (record->started) {
+            if (PokeathlonRingDrop_IsOnSwitchButton(player->touchX, player->touchY)) {
+                if (PokeathlonRingDropMon_CanSwitch(mon)) {
+                    PokeathlonRingDropMon_StartSwitch(mon);
+                }
+            } else {
+                int radius = PokeathlonRingDrop_TouchRadius();
+                if (!mon->flags.bits.switching && mon->state != RING_DROP_MON_FALL_OUT && PokeathlonRingDrop_IsWithinDistance(&mon->position, &touch, radius)) {
+                    record->onMon = 1;
+                }
+            }
+        } else if (record->touching) {
+            if (record->onMon == 1) {
+                s16 x = mon->position.x >> FX32_SHIFT, y = mon->position.y >> FX32_SHIFT;
+                if (mon->state == RING_DROP_MON_FALL_OUT) {
+                    record->onMon = 0;
+                } else if (PokeathlonRingDrop_Abs(player->touchX - x) > 1 || PokeathlonRingDrop_Abs(player->touchY - y) > 1) {
+                    PokeathlonRingDropMon_SetDestination(mon, &player->touchX);
+                }
+            }
+        } else if (record->lastFrames) {
+            if (record->onMon == 1 && (mon->state == RING_DROP_MON_STAND || mon->state == RING_DROP_MON_RETURN) && !mon->flags.bits.exhausted && !mon->flags.bits.switching) {
+                if (PokeathlonRingDrop_IsWithinDistance(&touchStart, &touch, FX32_CONST(4))) {
+                    if (record->lastFrames <= 7) {
+                        mon->flags.bits.hasTarget = FALSE;
+                        mon->flags.bits.jumpRequested = TRUE;
+                    }
+                } else if (!PokeathlonRingDrop_IsWithinDistance(&touchStart, &touch, FX32_CONST(12)) && record->lastFrames <= 7) {
+                    mon->flags.bits.hasTarget = TRUE;
+                    mon->flags.bits.jumpRequested = FALSE;
+                    mon->targetX = *(u16 *)&player->touchX;
+                    mon->targetY = *(u16 *)&player->touchY;
+                }
+            }
+            record->onMon = 0;
+        }
+        PokeathlonRingDropMon_Update(&player->mon, course);
+    }
+    PokeathlonRingDrop_UpdateCollisions(course);
+    PokeathlonRingDrop_UpdateStamina(players, course);
+}
+
+// Host: writes the Pokemon into the frame packet to send.
+#define RING_DROP_CONTACTS_TO(field) (offsetof(PokeathlonRingDrop, field) - offsetof(PokeathlonRingDrop, contacts))
+
+void PokeathlonRingDrop_BuildFramePacket(u8 (*contacts)[POKEATHLON_PARTICIPANTS], PokeathlonCourseData *course) {
+    PokeathlonRingDropMonPacket *packets;
+    int bumped;
+    PokeathlonRingDropMon *mon;
+    PokeathlonRingDropMonPacket *packet;
+    int i;
+    PokeathlonRingDropFrameMarks *marks;
+
+    bumped = 0;
+    packets = (void *)PokeathlonCourse_ToBytes(PokeathlonCourse_GetDataCopyArea(course) + POKEATHLON_COURSE_DATA_FRAME_OUT);
+    for (i = 0, mon = (PokeathlonRingDropMon *)((u8 *)contacts + RING_DROP_CONTACTS_TO(players[0].mon)), packet = packets; i < POKEATHLON_PARTICIPANTS; i++, mon = (PokeathlonRingDropMon *)((u8 *)mon + sizeof(PokeathlonRingDropPlayer)), packet++) {
+        s32 x = (mon->position.x << 4) >> 16;
+        s32 y = (mon->position.y << 4) >> 16;
+        if (mon->hitMarkFrames != 0) {
+            mon->hitMarkFrames--;
+        } else if (mon->hitMarkFrames == 0) {
+            mon->flags.bits.attacker = 0;
+            mon->flags.bits.hit = 0;
+        }
+        packet->attacker = mon->flags.bits.attacker;
+        packet->hit = mon->flags.bits.hit;
+        packet->member = mon->flags.bits.member;
+        packet->direction = mon->flags.bits.direction - 1;
+        if (x > 255) {
+            x = 255;
+        } else if (x < 0) {
+            x = 0;
+        }
+        packet->x = x;
+        if (y > 255) {
+            y = 255;
+        } else if (y < 0) {
+            y = 0;
+        }
+        packet->y = y;
+        packet->height = mon->height >> FX32_SHIFT;
+        packet->state = mon->state;
+        packet->score = mon->flags.bits.score;
+        packet->switchState = mon->flags.bits.switchState;
+        packet->status = mon->status;
+        if (mon->flags.bits.bumped) {
+            bumped = 1;
+            mon->flags.bits.bumped = 0;
+        }
+    }
+    marks = &((PokeathlonRingDropFramePacket *)packets)->marks;
+    marks->raw = (marks->raw & ~0x80) | (((u32)bumped << 31) >> 24);
+    marks->raw = (u8)marks->raw;
+    for (i = 0; i < POKEATHLON_PARTICIPANTS * POKEATHLON_TEAM_SIZE; i++) {
+        int participant = i / POKEATHLON_TEAM_SIZE;
+        int member = i % POKEATHLON_TEAM_SIZE;
+        s32 stamina = *(fx32 *)((u8 *)contacts + participant * sizeof(PokeathlonRingDropPlayer) + member * sizeof(PokeathlonRingDropMember) + RING_DROP_CONTACTS_TO(players[0].mon.members[0].stamina)) >> FX32_SHIFT;
+        int mark;
+        if (stamina == 0) {
+            mark = 2;
+        } else if (stamina < 30) {
+            mark = 1;
+        } else {
+            mark = 0;
+        }
+        marks->bits.members += mark << (i * 2);
+    }
+}
+
+// Centres the affine transforms of a mon object on its body (or on its feet).
+void PokeathlonRingDrop_SetMonAffineCenter(PokeathlonCourseMonObject *object, BOOL centered) {
+    PokeathlonCourseMonGfx *gfx = PokeathlonCourseMonObject_GetGfx(object);
+    int top = PokeathlonCourseMonGfx_GetTopRow(gfx);
+    VecFx32 center = { 0 };
+    int size = PokeathlonCourseMonGfx_GetInfo(gfx)->isLarge != 0 ? 0x40 : 0x20;
+    if (centered) {
+        center.x = (size / 2) << FX32_SHIFT;
+        center.y = (top + (size - top) / 2) << FX32_SHIFT;
+    } else {
+        center.x = (size / 2) << FX32_SHIFT;
+        center.y = size << FX32_SHIFT;
+    }
+    PokeathlonCourseMonObject_SetAffineMatrix(object, &center);
+}
+
+void PokeathlonRingDropMon_SetState(PokeathlonRingDropMon *mon, int state) {
+    mon->returnFrames = state == RING_DROP_MON_RETURN ? 60 : 0;
+    if (state == RING_DROP_MON_DASH_END) {
+        mon->dashFrames = 16;
+    }
+    mon->state = state;
+}
+
+// Whether two Pokemon touch: their heights differ by at most 5 and their collision circles overlap (a dash makes
+// the circle 8 bigger).
+
+static BOOL PokeathlonRingDropMon_Collide(PokeathlonRingDropMon *a, PokeathlonRingDropMon *b) {
+    VecFx32 delta, centerA, centerB;
+    int radiusA, radiusB;
+    fx32 height = a->height - b->height;
+    if (height < 0) {
+        height = -height;
+    }
+    if (height > 5 * FX32_ONE) {
+        return FALSE;
+    }
+    PokeathlonCourseObject_GetCollisionCircle(a->member->object, a->position.x, a->position.y, &centerA.x, &centerA.y, &radiusA);
+    PokeathlonCourseObject_GetCollisionCircle(b->member->object, b->position.x, b->position.y, &centerB.x, &centerB.y, &radiusB);
+    if (a->state == RING_DROP_MON_DASH) {
+        radiusA += 8;
+    }
+    if (b->state == RING_DROP_MON_DASH) {
+        radiusB += 8;
+    }
+    fx32 radius = (radiusA + radiusB) * FX32_ONE;
+    centerA.z = 0;
+    centerB.z = 0;
+    VEC_Subtract(&centerA, &centerB, &delta);
+    if (VEC_Mag(&delta) <= radius) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// The switch button works while the Pokemon stands on its participant's switch spot.
+BOOL PokeathlonRingDropMon_CanSwitch(PokeathlonRingDropMon *mon) {
+    if (PokeathlonRingDropMon_CanAct(mon)) {
+        VecFx32 spot = { 0, 0, 0 };
+        u8 participant = mon->flags.bits.participant;
+        spot.x = gPokeathlonRingDropSwitchSpots[participant].x * FX32_ONE;
+        spot.y = gPokeathlonRingDropSwitchSpots[participant].y * FX32_ONE;
+        return PokeathlonRingDrop_IsWithinDistance(&mon->position, &spot, gPokeathlonRingDropSwitchSpots[participant].radius * FX32_ONE);
+    }
+    return FALSE;
+}
+
+BOOL PokeathlonRingDropMon_CanAct(PokeathlonRingDropMon *mon) {
+    if (mon->flags.bits.pushed) {
+        return FALSE;
+    }
+    if (mon->flags.bits.exhausted) {
+        return FALSE;
+    }
+    if (mon->flags.bits.switching) {
+        return FALSE;
+    }
+    return mon->state == RING_DROP_MON_STAND;
+}
+
+void PokeathlonRingDropMon_SetDestination(PokeathlonRingDropMon *mon, const s16 *position) {
+    mon->destination.x = position[0] << FX32_SHIFT;
+    mon->destination.y = position[1] << FX32_SHIFT;
+}
+
+// 1..4 by the angle of vec (x, y): 4 within 45 degrees of gPokeathlonRingDropDirectionReference, 2 and 3 the next quarters, 1 the last.
+
+int PokeathlonRingDrop_VecToDirection(const VecFx32 *vec) {
+    VecFx32 reference = gPokeathlonRingDropDirectionReference;
+    VecFx32 flat = { 0, 0, 0 };
+    u16 angle;
+    flat.x = vec->y;
+    flat.z = vec->x;
+    flat.y = 0;
+    angle = CalcAngleBetweenVecs(&reference, &flat);
+    if (angle <= 0x2000 || angle >= 0xE000) {
+        return 4;
+    }
+    if (angle > 0x2000 && angle < 0x6000) {
+        return 2;
+    }
+    if (angle >= 0x6000 && angle <= 0xA000) {
+        return 3;
+    }
+    return 1;
+}
+
+static BOOL PokeathlonRingDropMon_CanCollide(PokeathlonRingDropMon *mon) {
+    GF_ASSERT(mon);
+    GF_ASSERT(mon->state);
+    return mon->state != RING_DROP_MON_JUMP_TOP && !mon->flags.bits.switching && mon->state != RING_DROP_MON_RETURN && mon->state != RING_DROP_MON_FALL_OUT;
+}
+
+static void PokeathlonRingDrop_ClearContacts(PokeathlonCourseData *course, s32 participant) {
+    u8 *contact = ((PokeathlonRingDrop *)PokeathlonCourse_GetWork(course))->contacts[participant];
+    s32 i;
+    for (i = 0; i < POKEATHLON_PARTICIPANTS; i++, contact++) {
+        *contact = 0;
+    }
+}
+
+// A pushed Pokemon slides (its velocity decays) until it stops; otherwise it walks to its destination at its
+// speed (half of it below 30 stamina).
+
+void PokeathlonRingDropMon_Move(PokeathlonRingDropMon *mon, PokeathlonCourseData *course) {
+    VecFx32 delta, direction, move, decay;
+    fx32 distance = 0, speed;
+    int moving;
+
+    VEC_Subtract(&mon->destination, &mon->position, &delta);
+    distance = VEC_Mag(&delta);
+    moving = distance > 0 ? 1 : 0;
+    if (mon->flags.bits.pushed) {
+        GF_ASSERT(mon->attackerState != 0);
+        // BUG: presses happen while falling (RING_DROP_MON_JUMP_FALL), so a pressed Pokemon always slides at the
+        // slower speed.
+        if (mon->attackerState == RING_DROP_MON_DASH || mon->attackerState == RING_DROP_MON_JUMP_RISE) {
+            speed = FX32_ONE;
+        } else {
+            speed = 0xB33;
+        }
+        if (mon->staggerFrames <= 0) {
+            VecFx32 normal = { 0, 0, 0 }, zero = { 0, 0, 0 };
+            VEC_Normalize(&mon->velocity, &normal);
+            VEC_MultAdd(speed, &normal, &zero, &decay);
+            decay.x = decay.x < 0 ? -decay.x : decay.x;
+            decay.y = decay.y < 0 ? -decay.y : decay.y;
+            PokeathlonRingDrop_DecayVelocity(&mon->velocity, decay.x, decay.y);
+        }
+        VEC_Add(&mon->position, &mon->velocity, &mon->position);
+        mon->destination = mon->position;
+        if (mon->velocity.x != 0) {
+            return;
+        }
+        if (mon->velocity.y != 0) {
+            return;
+        }
+        PokeathlonRingDrop_ClearContacts(course, (u8)mon->flags.bits.participant);
+        mon->attacker = NULL;
+        mon->flags.bits.pushed = FALSE;
+    }
+    if (!mon->flags.bits.exhausted && mon->staggerFrames <= 0 && moving) {
+        VEC_Normalize(&delta, &direction);
+        if (!mon->flags.bits.pushed) {
+            mon->flags.bits.direction = PokeathlonRingDrop_VecToDirection(&direction);
+        }
+        speed = mon->member->params->speed;
+        if (mon->member->stamina < 30 * FX32_ONE) {
+            speed = FX_Mul(speed, FX32_HALF);
+        }
+        if (distance <= speed) {
+            move = delta;
+        } else {
+            VecFx32 zero = { 0, 0, 0 };
+            VEC_MultAdd(speed, &direction, &zero, &move);
+        }
+        VEC_Add(&mon->position, &move, &mon->position);
+        mon->dashDirection = direction;
+    }
+}
+
+static inline void PokeathlonRingDrop_LoadRingEdge(VecFx32 *points) {
+    VecFx32 *cursor;
+    const s16(*source)[2] = gPokeathlonRingDropRingEdge;
+    int i = 0;
+    cursor = points;
+    for (; i < 4; i++) {
+        cursor->x = (*source)[0] << FX32_SHIFT;
+        cursor->y = (*source)[1] << FX32_SHIFT;
+        source++;
+        cursor++;
+    }
+}
+
+BOOL PokeathlonRingDropMon_IsOutOfRing(PokeathlonRingDropMon *mon) {
+    VecFx32 points[4];
+    int x, y;
+    if (mon->position.x <= 0 || mon->position.y <= 0) {
+        return TRUE;
+    }
+    PokeathlonCourseObject_CenterToGround(mon->member->object, mon->position.x >> FX32_SHIFT, mon->position.y >> FX32_SHIFT, &x, &y);
+    if (y >= 64 && y <= 160) {
+        fx32 groundX = FX32_CONST(x);
+        fx32 groundY = FX32_CONST(y);
+        PokeathlonRingDrop_LoadRingEdge(points);
+        fx32 left = FX_Div(FX_Mul(points[1].y - points[0].y, groundX - points[0].x), points[1].x - points[0].x);
+        left += points[0].y;
+        fx32 right = FX_Div(FX_Mul(points[3].y - points[2].y, groundX - points[2].x), points[3].x - points[2].x);
+        right += points[2].y;
+        if (groundY >= left && groundY >= right) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}

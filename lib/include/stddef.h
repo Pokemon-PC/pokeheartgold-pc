@@ -1,0 +1,19 @@
+#ifdef PLATFORM_PC
+// PC port: use the host C library's <stddef.h> instead of Metrowerks MSL.
+#include_next <stddef.h>
+#else
+#ifndef MSL_STDDEF_H_
+#define MSL_STDDEF_H_
+
+#include <size_t.h>
+
+_MSL_BEGIN_NAMESPACE_STD
+_MSL_BEGIN_EXTERN_C
+
+#define offsetof(type, field) ((size_t)&((type *)0)->field)
+
+_MSL_END_EXTERN_C
+_MSL_END_NAMESPACE_STD
+
+#endif //MSL_STDDEF_H_
+#endif // PLATFORM_PC

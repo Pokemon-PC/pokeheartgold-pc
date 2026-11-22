@@ -1,0 +1,1059 @@
+#include "frontier/battle_arcade_data.h"
+
+#include "global.h"
+
+#include "constants/abilities.h"
+#include "constants/battle.h"
+#include "constants/items.h"
+#include "constants/pokemon.h"
+
+#include "frontier/battle_arcade_setup.h"
+#include "frontier/frontier_link_messages.h"
+#include "frontier/frontier_script_ui.h"
+#include "frontier/frontier_trainer_record.h"
+#include "frontier/frontier_trainers.h"
+
+#include "filesystem.h"
+#include "frontier_save_access.h"
+#include "gf_gfx_loader.h"
+#include "gf_gfx_planes.h"
+#include "heap.h"
+#include "math_util.h"
+#include "party.h"
+#include "player_avatar.h"
+#include "pokemon.h"
+#include "save_vars_flags.h"
+#include "sprite.h"
+#include "sys_vars.h"
+
+// ArcadeContext is allocated together with a pointer to the script's result variable.
+typedef struct ArcadeContextStorage {
+    ArcadeContext context;
+    u16 *resultVar;
+    u32 unkA84;
+} ArcadeContextStorage;
+
+typedef struct ArcadeSpritePos {
+    s16 x;
+    s16 y;
+} ArcadeSpritePos;
+
+// Cursor speed from a round on
+typedef struct ArcadeRoundCursorSpeed {
+    u8 minRound;
+    u8 speed;
+} ArcadeRoundCursorSpeed;
+
+// Battle points won below a rank
+typedef struct ArcadeRankBattlePoints {
+    u8 maxRank;
+    u8 points;
+} ArcadeRankBattlePoints;
+
+typedef void (*ArcadeEventFunc)(ArcadeContext *ctx, Party *party, int count);
+
+typedef void (*BlendPaletteWideFunc)(const void *src, void *dst, int size, int cur, int target);
+
+extern const u8 gBattleArcadeFaintedMonPoints[];
+extern const u8 gBattleArcadeStatusedMonPoints[];
+extern const ArcadeRoundCursorSpeed gBattleArcadeRoundCursorSpeeds[];
+extern const ArcadeRankBattlePoints gBattleArcadeRankBattlePoints[];
+extern const ArcadeSpritePos gBattleArcadePlayerMonIconPositions[];
+extern const ArcadeSpritePos gBattleArcadeOpponentMonIconPositions[];
+// Background files of an event
+typedef struct ArcadeEventBgFiles {
+    u16 charFile;
+    u16 screenFile;
+    u16 paletteFile;
+} ArcadeEventBgFiles;
+
+extern const ArcadeEventBgFiles gBattleArcadeEventBgFiles[];
+extern const u8 gBattleArcadeRoundValues_Single[];
+extern const u8 gBattleArcadeRoundValues_Multi[];
+extern const u16 gBattleArcadeBerries_Rank0[];
+extern const u16 gBattleArcadeBerries_Rank3[];
+extern const u16 gBattleArcadeBerries_Rank6[];
+extern const u16 gBattleArcadeItems_Rank0[];
+extern const u16 gBattleArcadeItems_Rank3[];
+extern const u16 gBattleArcadeItems_Rank6[];
+
+ArcadeContext *BattleArcadeData_Alloc(SaveData *saveData, u32 resume, u8 type, u8 slot0, u16 slot1, u16 slot2, u16 *resultVar);
+
+#ifdef PLATFORM_PC
+void FrontierTrainer_GenerateMons(u32 count, int trainerId, int partnerTrainerId, u16 *monIds, FrontierMon *mons, u8 *ivs, u32 *outPids, u8 multiplayer);   // integer widths of the definition (x64 ABI)
+#else
+void FrontierTrainer_GenerateMons(u32 count, u16 trainerId, u16 partnerTrainerId, u16 *monIds, FrontierMon *mons, u8 *ivs, u32 *outPids, u8 multiplayer);
+#endif
+
+static void BattleArcadeData_InitNew(ArcadeContext *ctx);
+static void BattleArcadeData_InitResume(ArcadeContext *ctx);
+static void BattleArcadeData_RestoreHeldItems(ArcadeContext *ctx);
+static u16 BattleArcade_GetGameBoardResult(const GAME_BOARD_ARGS *args, u32 index);
+static int BattleArcade_GetPartyConditionPoints(ArcadeContext *ctx, Party *party, Party *partnerParty, u8 count);
+static void BattleArcade_Event_LowerHp(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Poison(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Paralyze(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Burn(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Sleep(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Freeze(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_GiveBerry(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_GiveItem(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_LevelUp(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Sun(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Rain(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Sandstorm(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Hail(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Fog(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_TrickRoom(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_SpeedUp(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_SpeedDown(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Random(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_SwapParties(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Dummy28(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Dummy29(ArcadeContext *ctx, Party *party, int count);
+static void BattleArcade_Event_Dummy30(ArcadeContext *ctx, Party *party, int count);
+
+static const u16 *sBattleArcadeEventItemLists[] = {
+    gBattleArcadeBerries_Rank0,
+    gBattleArcadeBerries_Rank3,
+    gBattleArcadeBerries_Rank6,
+    gBattleArcadeItems_Rank0,
+    gBattleArcadeItems_Rank3,
+    gBattleArcadeItems_Rank6,
+};
+
+static ArcadeEventFunc sBattleArcadeEventFuncs[] = {
+    BattleArcade_Event_LowerHp,
+    BattleArcade_Event_Poison,
+    BattleArcade_Event_Paralyze,
+    BattleArcade_Event_Burn,
+    BattleArcade_Event_Sleep,
+    BattleArcade_Event_Freeze,
+    BattleArcade_Event_GiveBerry,
+    BattleArcade_Event_GiveItem,
+    BattleArcade_Event_LevelUp,
+    BattleArcade_Event_LowerHp,
+    BattleArcade_Event_Poison,
+    BattleArcade_Event_Paralyze,
+    BattleArcade_Event_Burn,
+    BattleArcade_Event_Sleep,
+    BattleArcade_Event_Freeze,
+    BattleArcade_Event_GiveBerry,
+    BattleArcade_Event_GiveItem,
+    BattleArcade_Event_LevelUp,
+    BattleArcade_Event_Sun,
+    BattleArcade_Event_Rain,
+    BattleArcade_Event_Sandstorm,
+    BattleArcade_Event_Hail,
+    BattleArcade_Event_Fog,
+    BattleArcade_Event_TrickRoom,
+    BattleArcade_Event_SpeedUp,
+    BattleArcade_Event_SpeedDown,
+    BattleArcade_Event_Random,
+    BattleArcade_Event_SwapParties,
+    BattleArcade_Event_Dummy28,
+    BattleArcade_Event_Dummy29,
+    BattleArcade_Event_Dummy30,
+    BattleArcade_Event_Dummy28,
+};
+
+static ArcadeContext *sBattleArcadeData;
+
+static inline void BattleArcadeData_AllocContext(void) {
+    ArcadeContextStorage *storage = Heap_Alloc(HEAP_ID_FIELD2, sizeof(ArcadeContextStorage));
+    sBattleArcadeData = &storage->context;
+    MI_CpuFill8(storage, 0, sizeof(ArcadeContextStorage));
+}
+
+// Copies an entered Pokemon into the arcade party without its held item, capped at level 50.
+static inline void BattleArcadeData_AddPartyMon(Party *party, u16 slot) {
+    Pokemon *mon;
+    struct {
+        u32 exp;
+        u32 item;
+    } data;
+
+    mon = Party_GetMonByIndex(party, sBattleArcadeData->partySlots[slot]);
+    Party_AddMon(sBattleArcadeData->playerParty, mon);
+    mon = Party_GetMonByIndex(sBattleArcadeData->playerParty, slot);
+    data.item = ITEM_NONE;
+    SetMonData(mon, MON_DATA_HELD_ITEM, &data.item);
+    if (GetMonData(mon, MON_DATA_LEVEL, NULL) > 50) {
+        data.exp = GetMonExpBySpeciesAndLevel(GetMonData(mon, MON_DATA_SPECIES, NULL), 50);
+        SetMonData(mon, MON_DATA_EXPERIENCE, &data.exp);
+        CalcMonLevelAndStats(mon);
+    }
+}
+
+ArcadeContext *BattleArcadeData_Alloc(SaveData *saveData, u32 resume, u8 type, u8 slot0, u16 slot1, u16 slot2, u16 *resultVar) {
+    u16 i;
+    ArcadeContext *ctx[1];
+    ArcadeContext *saved;
+    u32 index;
+    int count;
+    ArcadeChallenge *record;
+    u8 *typeRecord;
+    FrontierSave *frontier;
+    Party *party;
+    Pokemon *mon;
+
+    BattleArcadeData_AllocContext();
+    ctx[0] = sBattleArcadeData;
+    ctx[0]->challenge = Save_Frontier_GetArcadeChallenge(saveData);
+    ctx[0]->saveData = saveData;
+    ctx[0]->heapId = HEAP_ID_FIELD2;
+    ctx[0] = sBattleArcadeData;
+    ctx[0]->playerParty = SaveArray_Party_Alloc(HEAP_ID_FIELD2);
+    ctx[0]->opponentParty = SaveArray_Party_Alloc(HEAP_ID_FIELD2);
+    ((ArcadeContextStorage *)ctx[0])->resultVar = resultVar;
+    ctx[0]->eventId = 0x20;
+    record = ctx[0]->challenge;
+    typeRecord = Save_Frontier_GetArcadeFlags(saveData);
+
+    if (resume == FALSE) {
+        u8 flag;
+
+        ctx[0] = sBattleArcadeData;
+        ctx[0]->type = type;
+        ctx[0]->battleNo = 0;
+        ctx[0]->cursorSpeed = 3;
+        ctx[0]->randomFlag = 0;
+        ArcadeChallenge_Clear(record);
+        if (sBattleArcadeData->type == FRONTIER_CHALLENGE_LINK_MULTI) {
+            flag = Save_VarsFlags_GetVar4052(Save_VarsFlags_Get(sBattleArcadeData->saveData));
+        } else {
+            flag = ArcadeFlags_GetField(typeRecord, ARCADE_FLAGS_HAS_STREAK, sBattleArcadeData->type, 0, 0);
+        }
+        if (flag == 1) {
+            ctx[0] = sBattleArcadeData;
+            frontier = Save_Frontier_GetStatic(ctx[0]->saveData);
+            index = BattleArcade_GetWinStreakStat(sBattleArcadeData->type);
+            ctx[0]->winStreak = FrontierSave_GetStat(frontier, index, FrontierStat_GetFriendIndex(BattleArcade_GetWinStreakStat(ctx[0]->type)));
+        } else {
+            sBattleArcadeData->winStreak = 0;
+        }
+        ctx[0] = sBattleArcadeData;
+        ctx[0]->round = ctx[0]->winStreak / 7;
+        ctx[0]->unk24 = 0;
+        ctx[0]->partySlots[0] = slot0;
+        ctx[0]->partySlots[1] = slot1;
+        ctx[0]->partySlots[2] = slot2;
+    } else {
+        sBattleArcadeData->type = ArcadeChallenge_GetField(record, ARCADE_CHALLENGE_TYPE, 0, 0, 0);
+        i = ArcadeChallenge_GetField(record, ARCADE_CHALLENGE_BATTLE_NO, 0, 0, 0);
+        ctx[0] = sBattleArcadeData;
+        ctx[0]->battleNo = i;
+        ctx[0]->cursorSpeed = ArcadeChallenge_GetField(record, ARCADE_CHALLENGE_CURSOR_SPEED, 0, 0, 0);
+        ctx[0]->randomFlag = ArcadeChallenge_GetField(record, ARCADE_CHALLENGE_RANDOM_FLAG, 0, 0, 0);
+        saved = (ArcadeContext *)sBattleArcadeData;
+        frontier = Save_Frontier_GetStatic(saved->saveData);
+        index = BattleArcade_GetWinStreakStat(sBattleArcadeData->type);
+        saved->winStreak = FrontierSave_GetStat(frontier, index, FrontierStat_GetFriendIndex(BattleArcade_GetWinStreakStat(ctx[0]->type)));
+        saved->round = saved->winStreak / 7;
+        for (i = 0; i < 3; i++) {
+            ctx[0] = sBattleArcadeData;
+            ctx[0]->partySlots[i] = ArcadeChallenge_GetField(record, ARCADE_CHALLENGE_PARTY_SLOTS, i, 0, 0);
+        }
+    }
+
+    for (i = 0; i < 3; i++) {
+        ctx[0] = sBattleArcadeData;
+        mon = Party_GetMonByIndex(SaveArray_Party_Get(ctx[0]->saveData), ctx[0]->partySlots[i]);
+        ctx[0] = sBattleArcadeData;
+        ctx[0]->heldItems[i] = GetMonData(mon, MON_DATA_HELD_ITEM, NULL);
+    }
+
+    party = SaveArray_Party_Get(ctx[0]->saveData);
+    count = BattleArcade_GetMonCount(sBattleArcadeData->type, 0);
+    for (i = 0; i < count; i++) {
+        BattleArcadeData_AddPartyMon(party, i);
+    }
+
+    if (BattleArcade_MultiplayerCheck(sBattleArcadeData->type) == TRUE) {
+        Frontier_RecordLinkPlayerLocations(sBattleArcadeData->saveData);
+    }
+    return sBattleArcadeData;
+}
+
+void BattleArcadeData_Init(ArcadeContext *ctx, u32 resume) {
+    if (!resume) {
+        BattleArcadeData_InitNew(ctx);
+    } else {
+        BattleArcadeData_InitResume(ctx);
+    }
+}
+
+static void BattleArcadeData_InitNew(ArcadeContext *ctx) {
+    s32 rank = BattleArcade_GetRound(ctx);
+    u8 battleNo;
+    u32 count;
+    u32 multiplayer;
+    u32 *personalities;
+    u32 i;
+
+    BattleArcade_GetRoundTrainerIds(ctx->type, rank, ctx->trainerIds, 14);
+    battleNo = ctx->battleNo;
+    count = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    multiplayer = BattleArcade_MultiplayerCheck(ctx->type);
+    personalities = ctx->personalities;
+    FrontierTrainer_GenerateMons(count, ctx->trainerIds[battleNo], ctx->trainerIds[battleNo + 7], ctx->setIds, ctx->opponentMons, ctx->ivs, personalities, multiplayer);
+
+    rank = BattleArcade_GetRound(ctx);
+    for (i = 0; i < 3; i++) {
+        if (rank >= gBattleArcadeRoundCursorSpeeds[i].minRound) {
+            ctx->cursorSpeed = gBattleArcadeRoundCursorSpeeds[i].speed;
+            return;
+        }
+    }
+}
+
+static void BattleArcadeData_InitResume(ArcadeContext *ctx) {
+    FrontierMon frontierMons[6];
+    u16 monIds[6];
+    u32 ivs[2];
+    u32 personalities[6];
+    int i;
+    Pokemon *mon;
+
+    BattleArcadeData_RestoreHeldItems(ctx);
+    for (i = 0; i < 14; i++) {
+        ctx->trainerIds[i] = ArcadeChallenge_GetField(ctx->challenge, ARCADE_CHALLENGE_TRAINER_IDS, i, 0, 0);
+    }
+    for (i = 0; i < 4; i++) {
+        monIds[i] = ArcadeChallenge_GetField(ctx->challenge, ARCADE_CHALLENGE_SET_IDS, i, 0, 0);
+        ctx->setIds[i] = monIds[i];
+    }
+    FrontierMon_GenerateList(frontierMons, monIds, (u8 *)ivs, NULL, personalities, 4, HEAP_ID_FIELD2, NARC_a_2_0_3);
+    mon = AllocMonZeroed(HEAP_ID_FIELD2);
+    for (i = 0; i < 4; i++) {
+        FrontierMon_ToPokemon(&frontierMons[i], mon, BattleArcade_GetMonLevel(ctx));
+        BattleArcade_AddMonToParty(ctx, ctx->opponentParty, mon);
+    }
+    Heap_Free(mon);
+}
+
+static void BattleArcadeData_RestoreHeldItems(ArcadeContext *ctx) {
+    u8 count = Party_GetCount(ctx->playerParty);
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(ctx->playerParty, i);
+        u16 item = ArcadeChallenge_GetField(ctx->challenge, ARCADE_CHALLENGE_HELD_ITEMS, i, 0, 0);
+        SetMonData(mon, MON_DATA_HELD_ITEM, &item);
+    }
+}
+
+void BattleArcadeData_Free(ArcadeContext *ctx) {
+    if (ctx != NULL) {
+        if (ctx->playerParty != NULL) {
+            Heap_Free(ctx->playerParty);
+        }
+        if (ctx->opponentParty != NULL) {
+            Heap_Free(ctx->opponentParty);
+        }
+        MI_CpuFill8(ctx, 0, sizeof(ArcadeContextStorage));
+        Heap_Free(ctx);
+    }
+}
+
+void BattleArcade_StoreGameBoardResult(ArcadeContext *ctx, GAME_BOARD_ARGS *args) {
+    s32 i;
+
+    for (i = 0; i < 6; i++) {
+        ctx->gameBoardResults[i] = BattleArcade_GetGameBoardResult(args, (u8)i);
+    }
+}
+
+static u16 BattleArcade_GetGameBoardResult(const GAME_BOARD_ARGS *args, u32 index) {
+    if (index >= 6) {
+        GF_ASSERT(FALSE);
+        return 0;
+    }
+    return args->returnWork;
+}
+
+void BattleArcadeData_SaveRecord(ArcadeContext *ctx, u32 mode) {
+    struct {
+        union {
+            u16 halfword;
+            u32 words[2];
+        } buffer;
+        u8 byte;
+    } value;
+    u8 *typeRecord;
+    FrontierSave *frontier;
+    int index;
+    int key;
+    u32 count;
+    u32 i;
+
+    typeRecord = Save_Frontier_GetArcadeFlags(ctx->saveData);
+    BattleArcade_GetOpponentMonCount(ctx->type, 1);
+
+    value.byte = ctx->type;
+    ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_TYPE, 0, 0, &value.byte);
+    ArcadeChallenge_SetSaved(ctx->challenge, 1);
+    value.byte = ctx->battleNo;
+    ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_BATTLE_NO, 0, 0, &value.byte);
+    value.byte = ctx->cursorSpeed;
+    ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_CURSOR_SPEED, 0, 0, &value.byte);
+    value.byte = ctx->randomFlag;
+    ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_RANDOM_FLAG, 0, 0, &value.byte);
+
+    frontier = Save_Frontier_GetStatic(ctx->saveData);
+    index = BattleArcade_GetWinStreakStat(ctx->type);
+    key = FrontierStat_GetFriendIndex(BattleArcade_GetWinStreakStat(ctx->type));
+    FrontierSave_SetStat(frontier, index, key, ctx->winStreak);
+
+    if (mode != 2) {
+        frontier = Save_Frontier_GetStatic(ctx->saveData);
+        index = BattleArcade_GetBestStreakStat(ctx->type);
+        key = FrontierStat_GetFriendIndex(BattleArcade_GetBestStreakStat(ctx->type));
+        FrontierSave_RaiseStat(frontier, index, key, ctx->winStreak);
+        value.byte = ctx->hasStreak;
+        ArcadeFlags_SetField(typeRecord, ARCADE_FLAGS_HAS_STREAK, ctx->type, 0, &value.byte);
+        if (ctx->type == FRONTIER_CHALLENGE_LINK_MULTI) {
+            frontier = Save_Frontier_GetStatic(ctx->saveData);
+            key = FrontierStat_GetFriendIndex(110);
+            FrontierSave_SetStat(frontier, 110, key, ctx->hasStreak);
+        }
+    }
+
+    for (i = 0; i < 14; i = (u16)(i + 1)) {
+        value.buffer.halfword = ctx->trainerIds[i];
+        ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_TRAINER_IDS, i, 0, &value.buffer.halfword);
+    }
+    for (i = 0; i < 3; i = (u16)(i + 1)) {
+        value.byte = ctx->partySlots[i];
+        ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_PARTY_SLOTS, i, 0, &value.byte);
+    }
+    count = Party_GetCount(ctx->playerParty);
+    for (i = 0; i < count; i = (u16)(i + 1)) {
+        value.buffer.halfword = GetMonData(Party_GetMonByIndex(ctx->playerParty, i), MON_DATA_HELD_ITEM, NULL);
+        ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_HELD_ITEMS, i, 0, &value.buffer.halfword);
+    }
+    count = Party_GetCount(ctx->opponentParty);
+    for (i = 0; i < count; i = (u16)(i + 1)) {
+        Party_GetMonByIndex(ctx->opponentParty, i);
+        value.buffer.halfword = ctx->setIds[i];
+        ArcadeChallenge_SetField(ctx->challenge, ARCADE_CHALLENGE_SET_IDS, i, 0, &value.buffer.halfword);
+    }
+}
+
+u32 BattleArcade_IncBattleNo(ArcadeContext *ctx) {
+    ctx->battleNo++;
+    return ctx->battleNo;
+}
+
+u32 BattleArcade_GetBattleNo(ArcadeContext *ctx) {
+    return ctx->battleNo;
+}
+
+u32 BattleArcade_GetTrainerSprite(ArcadeContext *ctx, u8 partner) {
+    FrontierTrainerRecord trainer;
+    u8 index = BattleArcade_GetTrainerIndex(ctx, partner);
+    void *data = FrontierTrainer_Load(&trainer, ctx->trainerIds[index], HEAP_ID_FIELD2, NARC_a_2_0_2);
+
+    Heap_Free(data);
+    return FrontierTrainer_GetClassSprite(trainer.trainerClass);
+}
+
+u32 BattleArcade_GetTrainerIndex(ArcadeContext *ctx, u32 partner) {
+    return (u16)(ctx->battleNo + partner * 7);
+}
+
+void BattleArcadeData_SaveRecordMode1(ArcadeContext *ctx) {
+    BattleArcadeData_SaveRecord(ctx, 1);
+}
+
+void BattleArcade_CompleteRound(ArcadeContext *ctx) {
+    ctx->hasStreak = 1;
+    if (ctx->round < 8) {
+        ctx->round++;
+    }
+    ctx->battleNo = 0;
+    BattleArcadeData_SaveRecord(ctx, 0);
+}
+
+void BattleArcade_SetPartyBeforeBattle(ArcadeContext *ctx) {
+    BattleArcade_SetOpponentParty(ctx);
+}
+
+void BattleArcade_SetPartyAfterBattle(ArcadeContext *ctx) {
+    u8 battleNo = ctx->battleNo;
+    u32 count = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    u32 multiplayer;
+    u32 *personalities;
+
+    multiplayer = BattleArcade_MultiplayerCheck(ctx->type);
+    personalities = ctx->personalities;
+    FrontierTrainer_GenerateMons(count, ctx->trainerIds[battleNo], ctx->trainerIds[battleNo + 7], ctx->setIds, ctx->opponentMons, ctx->ivs, personalities, multiplayer);
+    BattleArcade_SetOpponentParty(ctx);
+}
+
+u32 BattleArcade_GetWonBattlePoints(ArcadeContext *ctx, Party *playerParty, Party *opponentParty, int rank) {
+    u32 points = 0;
+    u8 count = BattleArcade_GetMonCount(ctx->type, 0);
+    s32 i;
+
+    points += BattleArcade_GetPartyConditionPoints(ctx, playerParty, opponentParty, count);
+    for (i = 0; i < 5; i++) {
+        if (rank < gBattleArcadeRankBattlePoints[i].maxRank) {
+            points += gBattleArcadeRankBattlePoints[i].points;
+            break;
+        }
+    }
+    return points;
+}
+
+static int BattleArcade_GetPartyConditionPoints(ArcadeContext *ctx, Party *party, Party *partnerParty, u8 count) {
+    u8 fainted, statused;
+    int result;
+    int i;
+    Pokemon *mon;
+
+    result = 0;
+    fainted = 0;
+    statused = 0;
+    for (i = 0; i < count; i++) {
+        mon = Party_GetMonByIndex(party, i);
+        if (GetMonData(mon, MON_DATA_SPECIES_EXISTS, NULL)) {
+            if (GetMonData(mon, MON_DATA_HP, NULL) == 0) {
+                fainted++;
+            }
+            if (GetMonData(mon, MON_DATA_STATUS, NULL)) {
+                statused++;
+            }
+        }
+    }
+    if (BattleArcade_MultiplayerCheck(ctx->type) == TRUE) {
+        for (i = 0; i < count; i++) {
+            mon = Party_GetMonByIndex(partnerParty, i);
+            if (GetMonData(mon, MON_DATA_SPECIES_EXISTS, NULL)) {
+                if (GetMonData(mon, MON_DATA_HP, NULL) == 0) {
+                    fainted++;
+                }
+                if (GetMonData(mon, MON_DATA_STATUS, NULL)) {
+                    statused++;
+                }
+            }
+        }
+    }
+    result += gBattleArcadeStatusedMonPoints[statused];
+    result += gBattleArcadeFaintedMonPoints[fainted];
+    return result;
+}
+
+void BattleArcade_LoadEventBg(ArcadeContext *ctx, FrontierMap *map) {
+    if (ctx->eventId != 0x20) {
+        NNSG2dPaletteData *plttData;
+        NARC *narc = NARC_New(NARC_a_1_8_3, HEAP_ID_101);
+        void *pltt;
+
+        GfGfxLoader_LoadCharDataFromOpenNarc(narc, gBattleArcadeEventBgFiles[ctx->eventId].charFile, map->bgConfig, GF_BG_LYR_MAIN_2, 0, 0, TRUE, HEAP_ID_101);
+        GfGfxLoader_LoadScrnDataFromOpenNarc(narc, gBattleArcadeEventBgFiles[ctx->eventId].screenFile, map->bgConfig, GF_BG_LYR_MAIN_2, 0, 0, TRUE, HEAP_ID_101);
+        pltt = GfGfxLoader_GetPlttDataFromOpenNarc(narc, gBattleArcadeEventBgFiles[ctx->eventId].paletteFile, &plttData, HEAP_ID_101);
+        DC_FlushRange(plttData->pRawData, plttData->szByte);
+        GX_BeginLoadBGExtPltt();
+        GX_LoadBGExtPltt(plttData->pRawData, 0x4000, 0x2000);
+        GX_EndLoadBGExtPltt();
+        Heap_Free(pltt);
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, TRUE);
+        ScheduleBgTilemapBufferTransfer(map->bgConfig, GF_BG_LYR_MAIN_2);
+        NARC_Delete(narc);
+    } else {
+        GfGfx_EngineATogglePlanes(GX_PLANEMASK_BG2, FALSE);
+    }
+}
+
+void BattleArcade_LoadMultiBgScreen(ArcadeContext *ctx, FrontierMap *map) {
+    NARC *narc = NARC_New(NARC_a_1_8_3, HEAP_ID_101);
+    BgConfig *bgConfig = map->bgConfig;
+
+    GfGfxLoader_LoadScrnDataFromOpenNarc(narc, 0x39, bgConfig, GF_BG_LYR_MAIN_3, 0, 0, TRUE, HEAP_ID_101);
+    ScheduleBgTilemapBufferTransfer(map->bgConfig, GF_BG_LYR_MAIN_3);
+    NARC_Delete(narc);
+}
+
+void BattleArcade_CreateMonSprites(ArcadeContext *ctx, FrontierMap *map, u32 opponent) {
+    int i;
+    u8 count = BattleArcade_GetMonCount(ctx->type, 1);
+    u8 opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+
+    if (!opponent) {
+        for (i = 0; i < count; i++) {
+            ctx->playerMonSprites[i] = FrontierMap_CreateMonIcon(map, Party_GetMonByIndex(ctx->playerParty, i), i, gBattleArcadePlayerMonIconPositions[i].x, gBattleArcadePlayerMonIconPositions[i].y);
+            Sprite_SetAnimActiveFlag(ctx->playerMonSprites[i]->sprite, FALSE);
+        }
+    } else {
+        for (i = 0; i < opponentCount; i++) {
+            ctx->opponentMonSprites[i] = FrontierMap_CreateMonIcon(map, Party_GetMonByIndex(ctx->opponentParty, i), count + i, gBattleArcadeOpponentMonIconPositions[i].x, gBattleArcadeOpponentMonIconPositions[i].y);
+            Sprite_SetAnimActiveFlag(ctx->opponentMonSprites[i]->sprite, FALSE);
+        }
+    }
+}
+
+void BattleArcade_DeleteMonSprites(ArcadeContext *ctx, FrontierMap *map, u32 opponent) {
+    s32 count = BattleArcade_GetMonCount(ctx->type, 1);
+    s32 opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    s32 i;
+
+    if (!opponent) {
+        for (i = 0; i < count; i++) {
+            FrontierMap_DeleteMonIcon(map, ctx->playerMonSprites[i], i);
+        }
+    } else {
+        for (i = 0; i < opponentCount; i++) {
+            FrontierMap_DeleteMonIcon(map, ctx->opponentMonSprites[i], count);
+            count++;
+        }
+    }
+}
+
+void BattleArcade_SetPlayerMonSpriteVisible(ArcadeContext *ctx, FrontierMap *map, u32 visible, u32 slot) {
+    if ((s32)slot < (s32)BattleArcade_GetMonCount(ctx->type, 1)) {
+        if (visible == TRUE) {
+            Sprite_SetDrawFlag(ctx->playerMonSprites[slot]->sprite, TRUE);
+        } else {
+            Sprite_SetDrawFlag(ctx->playerMonSprites[slot]->sprite, FALSE);
+        }
+    }
+}
+
+void BattleArcade_SetOpponentMonSpriteVisible(ArcadeContext *ctx, FrontierMap *map, u32 visible, u32 slot) {
+    if ((s32)slot < (s32)BattleArcade_GetOpponentMonCount(ctx->type, 1)) {
+        if (visible == TRUE) {
+            Sprite_SetDrawFlag(ctx->opponentMonSprites[slot]->sprite, TRUE);
+        } else {
+            Sprite_SetDrawFlag(ctx->opponentMonSprites[slot]->sprite, FALSE);
+        }
+    }
+}
+
+void BattleArcade_CreateItemIcons(ArcadeContext *ctx, FrontierMap *map, u32 opponent) {
+    int count = BattleArcade_GetMonCount(ctx->type, 1);
+    int opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    int i;
+
+    if (!opponent) {
+        for (i = 0; i < count; i++) {
+            ctx->playerItemIcons[i] = FrontierMap_CreateItemIcon(map, gBattleArcadePlayerMonIconPositions[i].x + 8, gBattleArcadePlayerMonIconPositions[i].y + 4);
+            if (GetMonData(Party_GetMonByIndex(ctx->playerParty, i), MON_DATA_HELD_ITEM, NULL) == 0) {
+                Sprite_SetDrawFlag(ctx->playerItemIcons[i]->sprite, FALSE);
+            }
+        }
+    } else {
+        for (i = 0; i < opponentCount; i++) {
+            ctx->opponentItemIcons[i] = FrontierMap_CreateItemIcon(map, gBattleArcadeOpponentMonIconPositions[i].x + 8, gBattleArcadeOpponentMonIconPositions[i].y + 4);
+            if (GetMonData(Party_GetMonByIndex(ctx->opponentParty, i), MON_DATA_HELD_ITEM, NULL) == 0) {
+                Sprite_SetDrawFlag(ctx->opponentItemIcons[i]->sprite, FALSE);
+            }
+        }
+    }
+}
+
+void BattleArcade_DeleteItemIcons(ArcadeContext *ctx, FrontierMap *map, u32 opponent) {
+    s32 count = BattleArcade_GetMonCount(ctx->type, 1);
+    s32 opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    s32 i;
+
+    if (!opponent) {
+        for (i = 0; i < count; i++) {
+            FrontierMap_DeleteItemIcon(map, ctx->playerItemIcons[i]);
+        }
+    } else {
+        for (i = 0; i < opponentCount; i++) {
+            FrontierMap_DeleteItemIcon(map, ctx->opponentItemIcons[i]);
+        }
+    }
+}
+
+void BattleArcade_SetItemIconVisible(ArcadeContext *ctx, FrontierMap *map, u32 opponent, u32 slot, u32 visible) {
+    s32 count = BattleArcade_GetMonCount(ctx->type, 1);
+    s32 opponentCount = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+
+    if (!opponent) {
+        if ((s32)slot < count) {
+            u32 item = GetMonData(Party_GetMonByIndex(ctx->playerParty, slot), MON_DATA_HELD_ITEM, NULL);
+            if (*(u16 *)&visible == TRUE) {
+                if (item == ITEM_NONE) {
+                    Sprite_SetDrawFlag(ctx->playerItemIcons[slot]->sprite, FALSE);
+                } else {
+                    Sprite_SetDrawFlag(ctx->playerItemIcons[slot]->sprite, TRUE);
+                }
+            } else {
+                Sprite_SetDrawFlag(ctx->playerItemIcons[slot]->sprite, FALSE);
+            }
+        }
+    } else {
+        if ((s32)slot < opponentCount) {
+            u32 item = GetMonData(Party_GetMonByIndex(ctx->opponentParty, slot), MON_DATA_HELD_ITEM, NULL);
+            if (*(u16 *)&visible == TRUE) {
+                if (item == ITEM_NONE) {
+                    Sprite_SetDrawFlag(ctx->opponentItemIcons[slot]->sprite, FALSE);
+                } else {
+                    Sprite_SetDrawFlag(ctx->opponentItemIcons[slot]->sprite, TRUE);
+                }
+            } else {
+                Sprite_SetDrawFlag(ctx->opponentItemIcons[slot]->sprite, FALSE);
+            }
+        }
+    }
+}
+
+void BattleArcade_LoadBlendedBgExtPalette(u32 color, u32 mode) {
+    int size;
+    int fileId;
+    void *buffer;
+    NARC *narc;
+    void *pltt;
+    NNSG2dPaletteData *plttData;
+
+    if (mode == 0) {
+        fileId = 162;
+        size = 0x1E0;
+    } else {
+        fileId = 161;
+        size = 0x120;
+    }
+    buffer = Heap_Alloc(HEAP_ID_101, 0x2000);
+    memset(buffer, 0, 0x2000);
+    narc = NARC_New(NARC_a_1_8_3, HEAP_ID_101);
+    pltt = GfGfxLoader_GetPlttDataFromOpenNarc(narc, fileId, &plttData, HEAP_ID_101);
+    ((BlendPaletteWideFunc)BlendPalette)(plttData->pRawData, buffer, 0x1000, color, 0);
+    DC_FlushRange(buffer, 0x2000);
+    GX_BeginLoadBGExtPltt();
+    GX_LoadBGExtPltt(buffer, 0x6000, size);
+    GX_EndLoadBGExtPltt();
+    NARC_Delete(narc);
+    Heap_Free(buffer);
+    Heap_Free(pltt);
+}
+
+u16 BattleArcade_SendBuffer(ArcadeContext *ctx, u32 cmd, u32 value) {
+    switch (cmd) {
+    case 0:
+        BattleArcadeLink_SendWinStreak(ctx);
+        break;
+    case 1:
+        BattleArcadeLink_SendTrainerIds(ctx);
+        break;
+    case 2:
+        BattleArcadeLink_SendOpponentMons(ctx);
+        break;
+    case 3:
+        BattleArcadeLink_SendValueA(ctx, value);
+        break;
+    case 4:
+        BattleArcadeLink_SendValueB(ctx, value);
+        break;
+    case 5:
+        BattleArcadeLink_SendPartyMons(ctx);
+        break;
+    }
+}
+
+// Events 0-8 affect the opponent's party, 9-17 the player's party.
+void BattleArcade_ApplyEvent(ArcadeContext *ctx, u8 event) {
+    Party *party;
+    u32 count;
+
+    if (event < 9) {
+        party = ctx->opponentParty;
+        count = BattleArcade_GetOpponentMonCount(ctx->type, 1);
+    } else {
+        party = ctx->playerParty;
+        count = BattleArcade_GetMonCount(ctx->type, 1);
+    }
+    sBattleArcadeEventFuncs[event](ctx, party, count);
+}
+
+static void BattleArcade_Event_LowerHp(ArcadeContext *ctx, Party *party, int count) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, i);
+        u32 maxHp = GetMonData(mon, MON_DATA_MAX_HP, NULL);
+        u32 hp = (u32)((double)maxHp * 1.2);
+        hp -= maxHp;
+        hp = maxHp - hp;
+        SetMonData(mon, MON_DATA_HP, &hp);
+    }
+}
+
+static void BattleArcade_Event_Poison(ArcadeContext *ctx, Party *party, int count) {
+    struct {
+        ArcadeContext *ctx;
+        Party *party;
+        volatile int count;
+        int immuneCount;
+        int status;
+    } frame;
+    int i;
+
+    frame.count = count;
+    frame.ctx = ctx;
+    frame.party = party;
+    frame.immuneCount = 0;
+    for (i = 0; i < frame.count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(frame.party, i);
+        int type1 = GetMonData(mon, MON_DATA_TYPE_1, NULL);
+        int type2 = GetMonData(mon, MON_DATA_TYPE_2, NULL);
+        int ability = GetMonData(mon, MON_DATA_ABILITY, NULL);
+        if (type1 == TYPE_POISON || type2 == TYPE_POISON || type1 == TYPE_STEEL || type2 == TYPE_STEEL || ability == ABILITY_IMMUNITY) {
+            frame.immuneCount++;
+        } else {
+            frame.status = STATUS_POISON;
+            SetMonData(mon, MON_DATA_STATUS, &frame.status);
+        }
+    }
+    if (frame.immuneCount >= frame.count) {
+        frame.ctx->eventNoEffect = TRUE;
+    }
+}
+
+static void BattleArcade_Event_Paralyze(ArcadeContext *ctx, Party *party, int count) {
+    struct {
+        volatile int count;
+        int type2;
+        int status;
+    } frame;
+    int immuneCount = 0;
+    int i;
+
+    frame.count = count;
+    for (i = 0; i < frame.count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, i);
+        int type1 = GetMonData(mon, MON_DATA_TYPE_1, NULL);
+        frame.type2 = GetMonData(mon, MON_DATA_TYPE_2, NULL);
+        int ability = GetMonData(mon, MON_DATA_ABILITY, NULL);
+        if (type1 == TYPE_GROUND || frame.type2 == TYPE_GROUND || ability == ABILITY_LIMBER) {
+            immuneCount++;
+        } else {
+            frame.status = STATUS_PARALYSIS;
+            SetMonData(mon, MON_DATA_STATUS, &frame.status);
+        }
+    }
+    if (immuneCount >= frame.count) {
+        ctx->eventNoEffect = TRUE;
+    }
+}
+
+static void BattleArcade_Event_Burn(ArcadeContext *ctx, Party *party, int count) {
+    struct {
+        volatile int count;
+        int type2;
+        int status;
+    } frame;
+    int immuneCount = 0;
+    int i;
+
+    frame.count = count;
+    for (i = 0; i < frame.count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, i);
+        int type1 = GetMonData(mon, MON_DATA_TYPE_1, NULL);
+        frame.type2 = GetMonData(mon, MON_DATA_TYPE_2, NULL);
+        int ability = GetMonData(mon, MON_DATA_ABILITY, NULL);
+        if (type1 == TYPE_FIRE || frame.type2 == TYPE_FIRE || ability == ABILITY_WATER_VEIL) {
+            immuneCount++;
+        } else {
+            frame.status = STATUS_BURN;
+            SetMonData(mon, MON_DATA_STATUS, &frame.status);
+        }
+    }
+    if (immuneCount >= frame.count) {
+        ctx->eventNoEffect = TRUE;
+    }
+}
+
+// Starts with the Pokemon picked by eventRandom and puts the first one that can fall asleep to sleep.
+static void BattleArcade_Event_Sleep(ArcadeContext *ctx, Party *party, int count) {
+    s32 skipped = 0;
+    u8 slot = ctx->eventRandom % count;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, slot);
+        u32 ability = GetMonData(mon, MON_DATA_ABILITY, NULL);
+        if (ability == ABILITY_INSOMNIA || ability == ABILITY_VITAL_SPIRIT) {
+            slot++;
+            skipped++;
+            if (slot >= (u32)count) {
+                slot = 0;
+            }
+        } else {
+            u32 status = LCRandom() % 4 + 2;
+            SetMonData(mon, MON_DATA_STATUS, &status);
+            break;
+        }
+    }
+    if (skipped >= count) {
+        ctx->eventNoEffect = TRUE;
+    }
+}
+
+static void BattleArcade_Event_Freeze(ArcadeContext *ctx, Party *party, int count) {
+    s32 skipped = 0;
+    u8 slot = ctx->eventRandom % count;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, slot);
+        u32 type1 = GetMonData(mon, MON_DATA_TYPE_1, NULL);
+        u32 type2 = GetMonData(mon, MON_DATA_TYPE_2, NULL);
+        u32 ability = GetMonData(mon, MON_DATA_ABILITY, NULL);
+        if (type1 == TYPE_ICE || type2 == TYPE_ICE || ability == ABILITY_MAGMA_ARMOR) {
+            slot++;
+            skipped++;
+            if (slot >= (u32)count) {
+                slot = 0;
+            }
+        } else {
+            u32 status = STATUS_FREEZE;
+            SetMonData(mon, MON_DATA_STATUS, &status);
+            break;
+        }
+    }
+    if (skipped >= count) {
+        ctx->eventNoEffect = TRUE;
+    }
+}
+
+static void BattleArcade_Event_GiveBerry(ArcadeContext *ctx, Party *party, int count) {
+    u32 rank = BattleArcade_GetRound(ctx);
+    const u16 *items;
+    s32 itemCount;
+    u16 item;
+    s32 i;
+
+    if (rank < 3) {
+        items = sBattleArcadeEventItemLists[0];
+        itemCount = 8;
+    } else if (rank < 6) {
+        items = sBattleArcadeEventItemLists[1];
+        itemCount = 20;
+    } else {
+        items = sBattleArcadeEventItemLists[2];
+        itemCount = 10;
+    }
+    item = items[ctx->eventRandom % itemCount];
+    for (i = 0; i < count; i++) {
+        SetMonData(Party_GetMonByIndex(party, i), MON_DATA_HELD_ITEM, &item);
+    }
+}
+
+static void BattleArcade_Event_GiveItem(ArcadeContext *ctx, Party *party, int count) {
+    u32 rank = BattleArcade_GetRound(ctx);
+    const u16 *items;
+    s32 itemCount;
+    u16 item;
+    s32 i;
+
+    if (rank < 3) {
+        items = sBattleArcadeEventItemLists[3];
+        itemCount = 11;
+    } else if (rank < 6) {
+        items = sBattleArcadeEventItemLists[4];
+        itemCount = 13;
+    } else {
+        items = sBattleArcadeEventItemLists[5];
+        itemCount = 11;
+    }
+    item = items[ctx->eventRandom % itemCount];
+    for (i = 0; i < count; i++) {
+        SetMonData(Party_GetMonByIndex(party, i), MON_DATA_HELD_ITEM, &item);
+    }
+}
+
+static void BattleArcade_Event_LevelUp(ArcadeContext *ctx, Party *party, int count) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        Pokemon *mon = Party_GetMonByIndex(party, i);
+        u32 level = GetMonData(mon, MON_DATA_LEVEL, NULL) + 3;
+        u32 exp;
+        if (level > MAX_LEVEL) {
+            GF_ASSERT(FALSE);
+            level = MAX_LEVEL;
+        }
+        exp = GetMonExpBySpeciesAndLevel(GetMonData(mon, MON_DATA_SPECIES, NULL), level);
+        SetMonData(mon, MON_DATA_EXPERIENCE, &exp);
+        CalcMonLevelAndStats(mon);
+    }
+}
+
+static void BattleArcade_Event_Sun(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 1001;
+}
+
+static void BattleArcade_Event_Rain(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 1;
+}
+
+static void BattleArcade_Event_Sandstorm(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 7;
+}
+
+static void BattleArcade_Event_Hail(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 4;
+}
+
+static void BattleArcade_Event_Fog(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 9;
+}
+
+static void BattleArcade_Event_TrickRoom(ArcadeContext *ctx, Party *party, int count) {
+    ctx->weather = 1002;
+}
+
+static void BattleArcade_Event_SpeedUp(ArcadeContext *ctx, Party *party, int count) {
+    if (ctx->cursorSpeed < 7) {
+        ctx->cursorSpeed++;
+    }
+}
+
+static void BattleArcade_Event_SpeedDown(ArcadeContext *ctx, Party *party, int count) {
+    if (ctx->cursorSpeed != 0) {
+        ctx->cursorSpeed--;
+    }
+}
+
+static void BattleArcade_Event_Random(ArcadeContext *ctx, Party *party, int count) {
+    ctx->randomFlag = 1;
+}
+
+static void BattleArcade_Event_SwapParties(ArcadeContext *ctx, Party *party, int count) {
+}
+
+static void BattleArcade_Event_Dummy28(ArcadeContext *ctx, Party *party, int count) {
+}
+
+static void BattleArcade_Event_Dummy29(ArcadeContext *ctx, Party *party, int count) {
+}
+
+static void BattleArcade_Event_Dummy30(ArcadeContext *ctx, Party *party, int count) {
+}
+
+u32 BattleArcadeData_GetRoundTableValue(ArcadeContext *ctx) {
+    u32 type = ctx->type;
+    u32 round = ctx->round;
+    u32 result;
+
+    if (type <= FRONTIER_CHALLENGE_DOUBLE) {
+        result = round >= 8 ? 6 : gBattleArcadeRoundValues_Single[round];
+    } else {
+        result = round >= 8 ? 0x11 : gBattleArcadeRoundValues_Multi[round];
+    }
+    if (type == FRONTIER_CHALLENGE_SINGLE) {
+        u16 winStreak = ctx->winStreak;
+        if (winStreak == 0x15 || winStreak == 0x31) {
+            result = 0x14;
+        }
+    }
+    return result;
+}
+
+void BattleArcade_CopyMonHeldItem(Party *srcParty, Party *dstParty, int srcSlot, int dstSlot) {
+    u16 item = GetMonData(Party_GetMonByIndex(srcParty, srcSlot), MON_DATA_HELD_ITEM, NULL);
+    SetMonData(Party_GetMonByIndex(dstParty, dstSlot), MON_DATA_HELD_ITEM, &item);
+}

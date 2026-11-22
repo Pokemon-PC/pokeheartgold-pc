@@ -1,0 +1,26 @@
+#ifndef POKEHEARTGOLD_COMM_CLUB_BUTTONS_H
+#define POKEHEARTGOLD_COMM_CLUB_BUTTONS_H
+
+#include "bg_window.h"
+#include "field_types_def.h"
+#include "sys_task.h"
+
+enum CommClubButtonsCloseRequest {
+    COMM_CLUB_BUTTONS_CLOSE_NONE,
+    COMM_CLUB_BUTTONS_CLOSE_CLEAR,
+    COMM_CLUB_BUTTONS_CLOSE_CLEAR_AND_HOLD,
+};
+
+// Shared with the Communication Club.
+typedef struct CommClubButtonsArgs {
+    u32 *msgIds;     // msg_0191 labels, one per button
+    u8 count;        // 1 or 2 buttons
+    u8 closeRequest; // set by the club: 1 = clear the buttons, 2 = clear and hold touch input
+    u16 selection;   // touched button, 0xFFFF = none
+} CommClubButtonsArgs;
+
+SysTask *CommClubButtons_Init(BgConfig *bgConfig, u16 *lastTouchMenuInput, FieldSystem *fieldSystem, CommClubButtonsArgs *args);
+void CommClubButtons_Exit(BgConfig *bgConfig, SysTask *task);
+BOOL CommClubButtons_IsExitDone(void);
+
+#endif // POKEHEARTGOLD_COMM_CLUB_BUTTONS_H

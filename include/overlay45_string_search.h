@@ -1,0 +1,28 @@
+#ifndef OVERLAY45_STRING_SEARCH_H
+#define OVERLAY45_STRING_SEARCH_H
+#include <nitro/types.h>
+#ifdef __cplusplus
+struct StringSearchRange {const s8 *data;u32 size;inline StringSearchRange(const s8*p,u32 n):data(p),size(n){}};
+#endif
+typedef struct StringSearch {
+    union {
+        struct {u32 flag:1,capacity:31;u32 size;s8 *data;} longForm;
+        struct {u8 flag:1,size:7;s8 data[11];} shortForm;
+    } raw;
+#ifdef __cplusplus
+    inline StringSearchRange GetRange() const;
+    inline int Find(const StringSearch &other,u32 start) const;
+#endif
+} StringSearch;
+#ifndef PLATFORM_PC // DS memory-layout check (32-bit pointers)
+typedef char StringSearchSize12[sizeof(StringSearch)==12?1:-1];
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+int LobbyString_Find(const StringSearch *,const StringSearch *,u32);
+u32 LobbyString_FindChars(const StringSearch *s, const s8 *needle, u32 start, u32 count);
+#ifdef __cplusplus
+}
+#endif
+#endif

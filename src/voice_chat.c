@@ -1,0 +1,374 @@
+#include "voice_chat.h"
+
+#include "global.h"
+
+#include "dwc/dwc_main_internal.h"
+#include "vct/vct_audio_internal.h"
+#include "vct/vct_ssp_internal.h"
+
+#include "comm_state.h"
+#include "communication_command.h"
+#include "heap.h"
+#include "wifi_connection.h"
+
+extern void MIC_StartAutoSamplingAsync(MICAutoParam *param, void (*callback)(MICResult, void *), void *arg);
+extern u8 *MIC_GetLastSamplingAddress(void);
+extern void MIC_StopAutoSampling(void);
+
+static void VoiceChat_InitAudio(void);
+static void VoiceChat_MicCallback(MICResult result, void *arg);
+static void VoiceChat_StreamCallback(BOOL isAlarm, int numChannels, void **buffers, u32 size, int format, void *arg);
+static BOOL VoiceChat_RequestSession(u32 aid);
+static BOOL VoiceChat_AcceptSession(int unused);
+static void VoiceChat_ConferenceEventCallback(u32 unusedId, u32 event, VctSession *session, void *unusedContext);
+static void VoiceChat_PhoneEventCallback(u32 unusedId, u32 event, VctSession *session, void *unusedContext);
+static void VoiceChat_EndSession(VctSession *session);
+static void VoiceChat_AllocAligned(void **allocation, void **aligned, u32 size, u32 heapId);
+static void VoiceChat_StartStream(void);
+
+VoiceChat gVoiceChat;
+
+static void VoiceChat_InitAudio(void) {
+    int i;
+
+    MIC_Init();
+    PM_Init();
+    PM_SetAmp(PM_AMP_ON);
+    PM_SetAmpGain(PM_AMPGAIN_160);
+    gVoiceChat.work->unk_1A78 = 0;
+    gVoiceChat.work->unk_1A84 = 0;
+    gVoiceChat.work->ampGain = 0;
+    gVoiceChat.work->ampGainChanged = 0;
+    gVoiceChat.work->unk_1A88 = 0;
+    for (i = 0; i < 16; i++) {
+        gVoiceChat.work->unk_1A8C[i] = 0;
+    }
+    gVoiceChat.work->unk_1AAC = 0;
+    VCT_EnableVAD(1);
+    NNS_SndInit();
+    NNS_SndStrmInit(&gVoiceChat.work->stream);
+    MIi_CpuClearFast(0, (u32 *)gVoiceChat.work->silenceBuffer, 0x880);
+    gVoiceChat.frameBudget = 0;
+    VCT_EnableEchoCancel(1);
+}
+
+static void VoiceChat_MicCallback(MICResult result, void *arg) {
+}
+
+static void VoiceChat_StreamCallback(BOOL isAlarm, int numChannels, void **buffers, u32 size, int format, void *arg) {
+    u8 *address = arg; // the stream argument is the work, which starts with the mic buffer
+    u32 i;
+
+    if (!isAlarm) {
+        for (i = 0; i < numChannels; i++) {
+            MI_CpuFill8(buffers[i], 0, size);
+        }
+        return;
+    }
+    if (gVoiceChat.work->restartSampling) {
+        MIC_StartAutoSamplingAsync(&gVoiceChat.work->micParam, VoiceChat_MicCallback, NULL);
+        gVoiceChat.work->restartSampling = 0;
+    }
+    if ((u32)(MIC_GetLastSamplingAddress() - address) < size) {
+        address += size;
+    }
+    // lid closed: send silence
+    if (PAD_DetectFold()) {
+        address = gVoiceChat.work->silenceBuffer;
+    }
+    if (!gVoiceChat.work->muted) {
+        VCT_SendAudio(address, size);
+    }
+    for (i = 0; i < numChannels; i++) {
+        VCT_ReceiveAudio(buffers[i], size, 0);
+    }
+    gVoiceChat.work->samplingState = 2;
+}
+
+static BOOL VoiceChat_RequestSession(u32 aid) {
+    VctSession *session = gVoiceChat.work->session;
+    if (session == NULL) {
+        session = VCT_CreateSession(aid);
+        if (session == NULL) {
+            return FALSE;
+        }
+        aid = VCT_Request(session, 0);
+    } else {
+        aid = VCT_Request(session, 0);
+    }
+    if (aid != 0) {
+        VCT_DeleteSession(session);
+        gVoiceChat.work->session = NULL;
+        return FALSE;
+    }
+    gVoiceChat.work->session = session;
+    return TRUE;
+}
+
+// The only caller passes 0.
+static BOOL VoiceChat_AcceptSession(int unused) {
+    VctSession *session = gVoiceChat.work->session;
+    if (session != NULL && session->mode == 4) {
+        if (VCT_Response(session, 0) != 0) {
+            return FALSE;
+        }
+        if (VCT_StartStreaming(gVoiceChat.work->session) != 0) {
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static void VoiceChat_ConferenceEventCallback(u32 unusedId, u32 event, VctSession *session, void *unusedContext) {
+    switch (event) {
+    case 9:
+        VoiceChat_EndSession(session);
+        return;
+    case 7:
+        VCT_StartStreaming(session);
+        return;
+    case 12:
+        VoiceChat_EndSession(session);
+        return;
+    }
+}
+
+static void VoiceChat_PhoneEventCallback(u32 unusedId, u32 event, VctSession *session, void *unusedContext) {
+    switch (event) {
+    case 1:
+        if (gVoiceChat.work->session != NULL) {
+            VCT_Response(session, 3);
+            VCT_DeleteSession(session);
+        } else {
+            gVoiceChat.work->session = session;
+        }
+        break;
+    case 8:
+        VCT_Response(session, 0);
+        VoiceChat_EndSession(session);
+        WifiConnection_StopVoiceChat();
+        break;
+    case 9:
+        VoiceChat_EndSession(session);
+        WifiConnection_StopVoiceChat();
+        break;
+    case 4:
+        VCT_Response(session, 4);
+        VoiceChat_EndSession(session);
+        break;
+    case 7:
+        if (session->state != gVoiceChat.work->mode) {
+            VoiceChat_EndSession(session);
+        } else if (VCT_StartStreaming(session) != 0) {
+            gVoiceChat.work->callState = VOICE_CHAT_CALL_TALKING;
+        }
+        break;
+    case 2:
+        VoiceChat_EndSession(session);
+        break;
+    case 3:
+    case 11:
+    case 12:
+        VoiceChat_EndSession(session);
+        break;
+    }
+}
+
+static void VoiceChat_EndSession(VctSession *session) {
+    VCT_StopStreaming(session);
+    VCT_DeleteSession(session);
+    gVoiceChat.work->session = NULL;
+}
+
+void VoiceChat_Update(void) {
+    u64 now = OS_GetTick();
+
+    // VCT_Main has to run every 16.666 ms; catch up on the time elapsed since the last frame.
+    gVoiceChat.frameBudget += ((u32)now - (u32)gVoiceChat.lastTick) * 64000 / 33514 - 16666;
+    if (gVoiceChat.frameBudget < -10000) {
+        gVoiceChat.frameBudget = 0;
+    }
+    gVoiceChat.lastTick = now;
+    VCT_Main();
+    while (gVoiceChat.frameBudget >= 16666) {
+        VCT_Main();
+        gVoiceChat.frameBudget -= 16666;
+    }
+    if (gVoiceChat.work->ampGainChanged) {
+        switch (gVoiceChat.work->ampGain) {
+        case 0:
+            PM_SetAmpGain(PM_AMPGAIN_160);
+            break;
+        case 1:
+            PM_SetAmpGain(PM_AMPGAIN_80);
+            break;
+        case 2:
+            PM_SetAmpGain(PM_AMPGAIN_40);
+            break;
+        case 3:
+            PM_SetAmpGain(PM_AMPGAIN_20);
+            break;
+        }
+        gVoiceChat.work->ampGainChanged = 0;
+    }
+    if (gVoiceChat.work->mode != VOICE_CHAT_MODE_CONFERENCE) {
+        switch (gVoiceChat.work->callState) {
+        case VOICE_CHAT_CALL_IDLE:
+            if (WifiConnection_GetAid() == 0) {
+                if (VoiceChat_RequestSession(1)) {
+                    gVoiceChat.work->callState = VOICE_CHAT_CALL_REQUESTING;
+                    gVoiceChat.work->requestTimer = 60;
+                }
+            } else if (WifiConnection_GetAid() == 1) {
+                if (VoiceChat_AcceptSession(0)) {
+                    gVoiceChat.work->callState = VOICE_CHAT_CALL_TALKING;
+                }
+            }
+            break;
+        case VOICE_CHAT_CALL_REQUESTING:
+            gVoiceChat.work->requestTimer--;
+            if (!gVoiceChat.work->requestTimer) {
+                gVoiceChat.work->callState = VOICE_CHAT_CALL_IDLE;
+            }
+            break;
+        case VOICE_CHAT_CALL_TALKING:
+            break;
+        }
+    }
+}
+
+BOOL VoiceChat_ReceiveData(u32 aid, void *data, u32 size) {
+    if (gVoiceChat.work == NULL) {
+        return FALSE;
+    }
+    if (VCT_HandleData((u8)aid, data, size, gVoiceChat.work)) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void VoiceChat_AllocAligned(void **allocation, void **aligned, u32 size, u32 heapId) {
+    u32 allocSize = size + 0x20;
+    *allocation = Heap_Alloc((enum HeapID)heapId, allocSize);
+    MI_CpuFill8(*allocation, 0, allocSize);
+    *aligned = (void *)(((u32)*allocation + 0x1F) & ~0x1F);
+}
+
+void VoiceChat_Init(int heapId, int codec, int count) {
+    u8 channels[3] = { 0, 0, 0 };
+    u32 allocation;
+    InitArgs config;
+
+    if (!gVoiceChat.work) {
+        allocation = 0;
+        VoiceChat_AllocAligned((void **)&allocation, (void **)&gVoiceChat.work, sizeof(VoiceChatWork), heapId);
+        gVoiceChat.work->rawAlloc = (void *)allocation;
+        VoiceChat_AllocAligned(&gVoiceChat.work->vctBufferRaw, &gVoiceChat.work->vctBuffer, count * 0x23C0 + 32, heapId);
+        gVoiceChat.work->heapId = heapId;
+        gVoiceChat.work->endCallback = NULL;
+        VoiceChat_InitAudio();
+    }
+    gVoiceChat.work->micParam.type = MIC_SAMPLING_TYPE_SIGNED_12BIT;
+    gVoiceChat.work->micParam.buffer = gVoiceChat.work;
+    gVoiceChat.work->micParam.size = 0x880;
+    gVoiceChat.work->micParam.rate = 0x1040;
+    gVoiceChat.work->micParam.loop_enable = TRUE;
+    gVoiceChat.work->micParam.full_callback = NULL;
+    gVoiceChat.work->micParam.full_arg = NULL;
+    gVoiceChat.work->restartSampling = 1;
+    NNS_SndStrmAllocChannel(&gVoiceChat.work->stream, 1, channels);
+    NNS_SndStrmSetVolume(&gVoiceChat.work->stream, 0);
+    NNS_SndStrmSetup(&gVoiceChat.work->stream, 1, gVoiceChat.work->streamBuffer, 0x880, 65, 2, VoiceChat_StreamCallback, gVoiceChat.work);
+    gVoiceChat.work->callState = VOICE_CHAT_CALL_IDLE;
+    gVoiceChat.work->session = NULL;
+    if (!Comm_IsWifiPeerLinkMode(CommState_GetLinkMode())) {
+        config.mode = VOICE_CHAT_MODE_PHONE;
+    } else {
+        config.mode = VOICE_CHAT_MODE_CONFERENCE;
+    }
+    gVoiceChat.work->mode = config.mode;
+    config.data = gVoiceChat.work->sessions;
+    config.count = count;
+    config.id = DWC_GetMyAID();
+    // BUG: id is a u8, so it never equals -1 and this assert never fails.
+    GF_ASSERT(config.id != -1);
+    if (gVoiceChat.work->mode == VOICE_CHAT_MODE_CONFERENCE) {
+        config.callback = VoiceChat_ConferenceEventCallback;
+    } else {
+        config.callback = VoiceChat_PhoneEventCallback;
+    }
+    config.arg = NULL;
+    config.buffer = gVoiceChat.work->vctBuffer;
+    config.size = count * 0x23C0 + 32;
+    VCT_Init(&config);
+    gVoiceChat.work->muted = FALSE;
+    VCT_SetCodec(codec);
+    VoiceChat_StartStream();
+    VCT_EnableEchoCancel(1);
+}
+
+static void VoiceChat_StartStream(void) {
+    NNS_SndStrmStart(&gVoiceChat.work->stream);
+}
+
+// The only caller passes the voice chat active flag.
+void VoiceChat_HangUp(int unused) {
+    VctSession *session = gVoiceChat.work->session;
+    u32 callState;
+    if (session == NULL || gVoiceChat.work->callState == VOICE_CHAT_CALL_IDLE) {
+        WifiConnection_StopVoiceChat();
+        return;
+    }
+    callState = gVoiceChat.work->callState;
+    if (callState == VOICE_CHAT_CALL_REQUESTING) {
+        if (VCT_Request(session, 2) != 0) {
+            WifiConnection_StopVoiceChat();
+            return;
+        }
+    }
+    session = gVoiceChat.work->session;
+    if (VCT_Request(session, 1) != 0) {
+        WifiConnection_StopVoiceChat();
+    }
+}
+
+void VoiceChat_SetEndCallback(void (*callback)(void)) {
+    gVoiceChat.work->endCallback = callback;
+}
+
+void VoiceChat_Shutdown(void) {
+    void (*callback)(void);
+    if (gVoiceChat.work) {
+        callback = gVoiceChat.work->endCallback;
+        MIC_StopAutoSampling();
+        NNS_SndStrmStop(&gVoiceChat.work->stream);
+        NNS_SndStrmFreeChannel(&gVoiceChat.work->stream);
+        VCT_Cleanup();
+        Heap_FreeExplicit((enum HeapID)gVoiceChat.work->heapId, gVoiceChat.work->vctBufferRaw);
+        Heap_FreeExplicit((enum HeapID)gVoiceChat.work->heapId, gVoiceChat.work->rawAlloc);
+        gVoiceChat.work = NULL;
+        if (callback) {
+            callback();
+        }
+    }
+}
+
+int VoiceChat_GetVoiceActivity(void) {
+    int info[4];
+    if (gVoiceChat.work) {
+        VCT_GetVADInfo(info);
+        if (info[1] > 2) {
+            return info[0];
+        }
+    }
+    return 0;
+}
+
+void VoiceChat_Mute(void) {
+    gVoiceChat.work->muted = TRUE;
+}
+
+void VoiceChat_Unmute(void) {
+    gVoiceChat.work->muted = FALSE;
+}

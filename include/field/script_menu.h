@@ -1,0 +1,45 @@
+#ifndef POKEHEARTGOLD_FIELD_SCRIPT_MENU_H
+#define POKEHEARTGOLD_FIELD_SCRIPT_MENU_H
+
+#include "bg_window.h"
+#include "field_system.h"
+#include "message_format.h"
+#include "msgdata.h"
+
+// Values a script menu writes to its result besides the chosen item's value
+#define SCRIPT_MENU_RESULT_WAITING 0xEEEE
+#define SCRIPT_MENU_RESULT_CANCEL  0xFFFE
+
+// Script menus (multichoice, list, floor display) and the money, points and savings boxes.
+typedef struct ScriptMenu ScriptMenu;
+
+void ScriptMenu_AddItem(ScriptMenu *menu, u32 msgId, u32 value);
+void ScriptMenu_ShowMultichoice(ScriptMenu *menu);
+void ScriptMenu_Free(ScriptMenu *menu);
+void ScriptMenu_CloseMultichoice(ScriptMenu *menu);
+ScriptMenu *ScriptMenu_Create(FieldSystem *fieldSystem, u8 x, u8 y, u8 initCursorPos, u8 cancellable, u16 *ret_p, MessageFormat *msgFmt, Window *window, MsgData *msgData);
+void ScriptMenu_AddListItem(ScriptMenu *menu, int msgId, int helpMsgId, int value);
+void ScriptMenu_ShowList(ScriptMenu *menu);
+void ScriptMenu_ShowListWithWidth(ScriptMenu *menu, u16 width);
+void ScriptMenu_ShowListAtPosition(ScriptMenu *menu, u16 *scroll_p, u16 *row_p);
+void PrintCurFloorInNewWindow(FieldSystem *fieldSystem, u8 x, u8 y, u16 *p_ret, MessageFormat *msgFmt, u16 floor);
+void ScriptMenu_ShowMultichoiceGrid(ScriptMenu *menu, u8 numColumns);
+Window *FieldSystem_ShowMoneyBox(FieldSystem *fieldSystem, u8 x, u8 y);
+void MoneyBoxSys_Delete(Window *moneybox);
+void MoneyBoxSys_Update(FieldSystem *fieldSystem, Window *moneybox);
+Window *PointsBox_New(FieldSystem *fieldSystem, u8 type, u8 x, u8 y);
+void PointsBox_Delete(Window *window);
+void PointsBox_Update(FieldSystem *fieldSystem, Window *window, u8 type);
+Window *SavingsBox_New(FieldSystem *fieldSystem, u8 x, u8 y);
+void SavingsBox_Delete(Window *window);
+void SavingsBox_Update(FieldSystem *fieldSystem, Window *window);
+ListMenuItem *ScriptMenu_GetListItems(ScriptMenu *menu);
+u8 ScriptMenu_GetCount(ScriptMenu *menu);
+Window *BattleRegulationWindow_New(FieldSystem *fieldSystem, u16 ruleset);
+void BattleRegulationWindow_Delete(Window *window);
+void ScriptMenu_PrintItemHelpMessage(ScriptMenu *menu, int idx);
+u8 ScriptMenu_IsCancellable(ScriptMenu *menu);
+void ScriptMenu_SetAnchorRight(ScriptMenu *menu, int set);
+void ScriptMenu_SetAnchorBottom(ScriptMenu *menu, int set);
+
+#endif // POKEHEARTGOLD_FIELD_SCRIPT_MENU_H

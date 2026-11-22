@@ -1,0 +1,1663 @@
+#include "global.h"
+
+#include "constants/game_stats.h"
+#include "constants/sndseq.h"
+
+#include "battle/battle_setup.h"
+#include "frontier/frontier.h"
+#include "frontier/frontier_brain_intro.h"
+#include "frontier/frontier_cmd_castle.h"
+#include "frontier/frontier_cmd_factory.h"
+#include "frontier/frontier_cmd_hall.h"
+#include "frontier/frontier_cmd_sound.h"
+#include "frontier/frontier_link_lobby.h"
+#include "frontier/frontier_map.h"
+#include "frontier/frontier_particles.h"
+#include "frontier/frontier_scrcmd.h"
+#include "frontier/frontier_script_commands.h"
+#include "frontier/frontier_script_context.h"
+#include "frontier/frontier_script_ui.h"
+#include "frontier/frontier_system.h"
+#include "frontier/frontier_transition.h"
+#include "msgdata/msg.naix"
+
+#include "battle_frontier_communication.h"
+#include "battle_record.h"
+#include "battle_recording.h"
+#include "bg_window.h"
+#include "brightness.h"
+#include "comm_state.h"
+#include "comm_wireless.h"
+#include "communication_club_link.h"
+#include "communication_core.h"
+#include "communication_player_state.h"
+#include "friend_roster.h"
+#include "frontier_data.h"
+#include "game_stats.h"
+#include "heap.h"
+#include "launch_application.h"
+#include "link_synchronization.h"
+#include "math_util.h"
+#include "message_format.h"
+#include "msgdata.h"
+#include "naming_screen.h"
+#include "palette.h"
+#include "party.h"
+#include "player_avatar.h"
+#include "player_data.h"
+#include "render_window.h"
+#include "save.h"
+#include "save_arrays.h"
+#include "save_vars_flags.h"
+#include "screen_fade.h"
+#include "sound_system.h"
+#include "sprite_system.h"
+#include "sys_task_api.h"
+#include "system.h"
+#include "use_item_on_mon.h"
+#include "wifi_connection.h"
+
+static BOOL FrtCmd_DeleteSprite(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetSpriteDrawFlag(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetSpriteFlip(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetSpriteTranslucent(FrontierScriptContext *ctx);
+static BOOL FrtCmd_StartSpriteAnim(FrontierScriptContext *ctx);
+static BOOL FrtCmd_StopSpriteAnim(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitSpriteAnim(FrontierScriptContext *ctx);
+static BOOL FrtCmd_ClearObjectMovement(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetObjectLookAround(FrontierScriptContext *ctx);
+static BOOL FrtCmd_LaunchNamingScreen(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CreateBattleRecord(FrontierScriptContext *ctx);
+static BOOL FrtCmd_PlayBattleRecord(FrontierScriptContext *ctx);
+static BOOL FrtCmd_DeleteBattleRecord(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CheckBattleRecordSlotValid(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SaveGameNormal(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SaveGameAsync(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SaveWipeExtraChunks(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CheckExtraSaveChunksExist(FrontierScriptContext *ctx);
+static BOOL FrtCmd_AddWaitingIcon(FrontierScriptContext *ctx);
+static BOOL FrtCmd_RemoveWaitingIcon(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferItemName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferInt(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferPlayersName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferPartnersName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferMoveName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferSpeciesName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferTypeName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BufferRivalsName(FrontierScriptContext *ctx);
+static BOOL FrtCmd_GetBattlePoints(FrontierScriptContext *ctx);
+static BOOL FrtCmd_GiveBattlePoints(FrontierScriptContext *ctx);
+static BOOL FrtCmd_TakeBattlePoints(FrontierScriptContext *ctx);
+static BOOL FrtCmd_LinkSync(FrontierScriptContext *ctx);
+static BOOL FrtCmd_ClearLinkSyncPackets(FrontierScriptContext *ctx);
+static BOOL FrtCmd_ExitClubLink(FrontierScriptContext *ctx);
+static BOOL FrtCmd_Random(FrontierScriptContext *ctx);
+static BOOL FrtCmd_HealParty(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitButton(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitButtonOrDelay(FrontierScriptContext *ctx);
+static BOOL FrtCmd_Dummy060(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetSaveVar(FrontierScriptContext *ctx);
+static BOOL FrtCmd_GetSaveVar(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BattleTransition(FrontierScriptContext *ctx);
+static BOOL FrtCmd_GetPlayerSpriteId(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CreateParticleSystem(FrontierScriptContext *ctx);
+static BOOL FrtCmd_DestroyParticleSystem(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CreateParticleEmitter(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitParticles(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitShakeMap(FrontierScriptContext *ctx);
+static BOOL FrtCmd_WaitWindowDelayed(FrontierScriptContext *ctx);
+static BOOL FrtCmd_Dummy150(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CreatePartyMonSprite(FrontierScriptContext *ctx);
+static BOOL FrtCmd_DeleteMonSprite(FrontierScriptContext *ctx);
+static BOOL FrtCmd_BrainIntro(FrontierScriptContext *ctx);
+static BOOL FrtCmd_IncGameStat(FrontierScriptContext *ctx);
+static BOOL FrtCmd_AddGameStat(FrontierScriptContext *ctx);
+static BOOL FrtCmd_AddGameScore(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CheckPlayerOrPartnerVersion0(FrontierScriptContext *ctx);
+static BOOL FrtCmd_CheckBattleRecordAiFlagsValid(FrontierScriptContext *ctx);
+static BOOL FrtCmd_UpdateWifiFriendDate(FrontierScriptContext *ctx);
+static BOOL FrtCmd_Dummy200(FrontierScriptContext *ctx);
+static BOOL FrtCmd_SetWifiContinuousSend(FrontierScriptContext *ctx);
+static BOOL FrtCmd_GetSyncAborted(FrontierScriptContext *ctx);
+static BOOL FrtCmd_ClearSyncAborted(FrontierScriptContext *ctx);
+static BOOL FrtCmd_MenuSetAlignBottom(FrontierScriptContext *ctx);
+
+// Work of the screen transitions of FrtCmd_BattleTransition (the frontier app's data while it runs).
+typedef struct FrontierRowScrollLine {
+    s16 start;
+    s16 end;
+    s16 speedX;
+    s16 speedY;
+    s16 x;
+    s16 y;
+    u32 unk_0C;
+} FrontierRowScrollLine;
+
+// Rows of the two affine backgrounds (BG2/BG3) that drift apart (transitions 3 and 4).
+typedef struct FrontierRowScroll {
+    FrontierRowScrollLine lines[96];
+    FrontierHBlankDma *dma;
+    u32 mode; // 1 or 2
+} FrontierRowScroll;
+
+typedef struct FrontierTransitionWork {
+    FrontierMap *map;
+    u32 state;
+    u32 transition;
+    u32 flashDone;
+    u32 finished;
+    void *prevData; // the frontier app's data before the transition
+    FrontierScanline scanline;
+    FrontierRowScroll *rows;
+    Window *window;
+    FrontierWipe *wipe;
+} FrontierTransitionWork;
+
+typedef struct FrontierCameraPos {
+    s16 y;
+    s16 x;
+} FrontierCameraPos;
+
+static BOOL FrontierScriptNative_WaitSpriteAnim(FrontierScriptContext *ctx);
+static void FrontierScript_SetObjectMovement(FrontierScriptContext *ctx, int unused, int count);
+static void FrontierScript_FreeNamingScreenArgs(void *args);
+static BOOL FrontierScriptNative_WaitSaveBattleRecord(FrontierScriptContext *ctx);
+static int FrontierScript_GetBattleRecordType(int facility, int mode);
+static BOOL FrontierScriptNative_WaitSave(FrontierScriptContext *ctx);
+static u32 FrontierScript_CountDigits(u32 value);
+static String *FrontierScript_ReadString(u32 msgId, enum HeapID heapId);
+static BOOL FrontierScriptNative_WaitLinkSync(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitCommEnd(void);
+static BOOL FrontierScriptNative_WaitButton(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitButtonOrFrames(FrontierScriptContext *ctx);
+static BOOL FrontierTransition_Flash(FrontierTransitionWork *work);
+static BOOL FrontierTransition_FlashWipeHorizontal(FrontierTransitionWork *work);
+static BOOL FrontierTransition_FlashWipeVertical(FrontierTransitionWork *work);
+static u32 FrontierScript_PackHalfWords(u32 low, u32 high);
+static void FrontierTransition_RowScrollTask(SysTask *task, FrontierTransitionWork *work);
+static BOOL FrontierTransition_RowScroll1(FrontierTransitionWork *work);
+static BOOL FrontierTransition_RowScroll2(FrontierTransitionWork *work);
+static BOOL FrontierTransition_Wave(FrontierTransitionWork *work);
+static BOOL FrontierScriptNative_WaitTransition(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitMapEffect(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitShake(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitWindowTask(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitBrainIntro(FrontierScriptContext *ctx);
+static BOOL FrontierScriptNative_WaitLinkSyncOrAbort(FrontierScriptContext *ctx);
+
+static BOOL (*const sFrontierTransitionFuncs[])(FrontierTransitionWork *work) = {
+    FrontierTransition_Flash,
+    FrontierTransition_FlashWipeHorizontal,
+    FrontierTransition_FlashWipeVertical,
+    FrontierTransition_RowScroll1,
+    FrontierTransition_RowScroll2,
+    FrontierTransition_Wave,
+};
+
+const FrontierScrCmdFunc gFrontierCommandTable[] = {
+    FrtCmd_Nop,
+    FrtCmd_End,
+    FrtCmd_Exit,
+    FrtCmd_ChangeMode,
+    FrtCmd_ChangeModeWithTask,
+    FrtCmd_Wait,
+    FrtCmd_SetVar,
+    FrtCmd_CopyVar,
+    FrtCmd_AddVar,
+    FrtCmd_SubVar,
+    FrtCmd_GoTo,
+    FrtCmd_GoToIf,
+    FrtCmd_Call,
+    FrtCmd_Return,
+    FrtCmd_CallIf,
+    FrtCmd_PrintMessageInstant,
+    FrtCmd_PrintMessage,
+    FrtCmd_PrintMessageCanSpeedUp,
+    FrtCmd_CloseMessage,
+    FrtCmd_FadeScreen,
+    FrtCmd_WaitFade,
+    FrtCmd_MenuInitStdGmm,
+    FrtCmd_MenuInit,
+    FrtCmd_MenuItemAdd,
+    FrtCmd_MenuItemAddWithDescription,
+    FrtCmd_MenuExec,
+    FrtCmd_ListMenuInitStdGmm,
+    FrtCmd_ListMenuInit,
+    FrtCmd_ListMenuItemAdd,
+    FrtCmd_ListMenuExec,
+    FrtCmd_ListMenuCancel,
+    FrtCmd_YesNo,
+    FrtCmd_CompareVarToValue,
+    FrtCmd_CompareVarToVar,
+    FrtCmd_LoadObjectGfx,
+    FrtCmd_RemoveObjectGfx,
+    FrtCmd_CreateObjects,
+    FrtCmd_DeleteObject,
+    FrtCmd_SetObjectVisible,
+    FrtCmd_Dummy039,
+    FrtCmd_ApplyMovement,
+    FrtCmd_WaitMovement,
+    FrtCmd_LoadSpriteResources,
+    FrtCmd_UnloadSpriteResources,
+    FrtCmd_CreateSprites,
+    FrtCmd_DeleteSprite,
+    FrtCmd_SetSpriteDrawFlag,
+    FrtCmd_SetSpriteFlip,
+    FrtCmd_SetSpriteTranslucent,
+    FrtCmd_StartSpriteAnim,
+    FrtCmd_StopSpriteAnim,
+    FrtCmd_WaitSpriteAnim,
+    FrtCmd_LaunchNamingScreen,
+    FrtCmd_LinkSync,
+    FrtCmd_ClearLinkSyncPackets,
+    FrtCmd_ExitClubLink,
+    FrtCmd_Random,
+    FrtCmd_HealParty,
+    FrtCmd_WaitButton,
+    FrtCmd_WaitButtonOrDelay,
+    FrtCmd_Dummy060,
+    FrtCmd_SetSaveVar,
+    FrtCmd_GetSaveVar,
+    FrtCmd_BattleTransition,
+    FrtCmd_GetPlayerSpriteId,
+    FrtCmd_CreateParticleSystem,
+    FrtCmd_DestroyParticleSystem,
+    FrtCmd_CreateParticleEmitter,
+    FrtCmd_WaitParticles,
+    FrtCmd_CreatePartyMonSprite,
+    FrtCmd_DeleteMonSprite,
+    FrtCmd_BrainIntro,
+    FrtCmd_IncGameStat,
+    FrtCmd_AddGameStat,
+    FrtCmd_AddGameScore,
+    FrtCmd_CheckPlayerOrPartnerVersion0,
+    FrtCmd_ShakeMap,
+    FrtCmd_WaitShakeMap,
+    FrtCmd_SetWindowDelayed,
+    FrtCmd_WaitWindowDelayed,
+    FrtCmd_CastleShowPoints,
+    FrtCmd_CastleHidePoints,
+    FrtCmd_CastlePrintPoints,
+    FrtCmd_ClearObjectMovement,
+    FrtCmd_SetObjectLookAround,
+    FrtCmd_PlaySE,
+    FrtCmd_StopSE,
+    FrtCmd_WaitSE,
+    FrtCmd_PlayFanfare,
+    FrtCmd_WaitFanfare,
+    FrtCmd_PlayBGM,
+    FrtCmd_StopBGM,
+    FrtCmd_FactoryAlloc,
+    FrtCmd_FactoryInit,
+    FrtCmd_FactoryFree,
+    FrtCmd_FactoryLaunchRentalApp,
+    FrtCmd_FactoryEndBattle,
+    FrtCmd_FactoryStartBattle,
+    FrtCmd_FactoryLaunchTradeApp,
+    FrtCmd_FactorySetRentalParty,
+    FrtCmd_FactoryGenerateOpponent,
+    FrtCmd_FactoryTradeMon,
+    FrtCmd_FactorySetOpponentParty,
+    FrtCmd_FactoryAction,
+    FrtCmd_FactoryGetBattleResult,
+    FrtCmd_FactorySendBuffer,
+    FrtCmd_FactoryReceiveBuffer,
+    FrtCmd_FactoryPrintMsg,
+    FrtCmd_CreateBattleRecord,
+    FrtCmd_SaveBattleRecord,
+    FrtCmd_PlayBattleRecord,
+    FrtCmd_DeleteBattleRecord,
+    FrtCmd_CheckBattleRecordSlotValid,
+    FrtCmd_CheckBattleRecordAiFlagsValid,
+    FrtCmd_SaveGameNormal,
+    FrtCmd_SaveGameAsync,
+    FrtCmd_SaveWipeExtraChunks,
+    FrtCmd_CheckExtraSaveChunksExist,
+    FrtCmd_HallUpdateSpeciesRecord,
+    FrtCmd_AddWaitingIcon,
+    FrtCmd_RemoveWaitingIcon,
+    FrtCmd_BufferItemName,
+    FrtCmd_BufferInt,
+    FrtCmd_BufferPlayersName,
+    FrtCmd_BufferPartnersName,
+    FrtCmd_BufferMoveName,
+    FrtCmd_BufferSpeciesName,
+    FrtCmd_BufferTypeName,
+    FrtCmd_BufferRivalsName,
+    FrtCmd_GetBattlePoints,
+    FrtCmd_GiveBattlePoints,
+    FrtCmd_TakeBattlePoints,
+    FrtCmd_TowerAction,
+    FrtCmd_TowerPrintTrainerMessage,
+    FrtCmd_TowerFreeData,
+    FrtCmd_TowerStartBattle,
+    FrtCmd_TowerEndBattle,
+    FrtCmd_TowerSendLinkMessage,
+    FrtCmd_TowerWaitLink,
+    FrtCmd_HallAlloc,
+    FrtCmd_HallInit,
+    FrtCmd_HallFree,
+    FrtCmd_HallLaunchApp,
+    FrtCmd_HallEndBattle,
+    FrtCmd_HallStartBattle,
+    FrtCmd_HallAction,
+    FrtCmd_HallGetBattleResult,
+    FrtCmd_HallSendLinkMessage,
+    FrtCmd_HallWaitLink,
+    FrtCmd_HallPrintTrainerMessage,
+    FrtCmd_Dummy150,
+    FrtCmd_CastleAlloc,
+    FrtCmd_CastleInit,
+    FrtCmd_CastleFree,
+    FrtCmd_CastleLaunchPartyApp,
+    FrtCmd_CastleEndBattle,
+    FrtCmd_CastleStartBattle,
+    FrtCmd_CastleLaunchOpponentApp,
+    FrtCmd_CastleSetPartyBeforeBattle,
+    FrtCmd_CastleGenerateOpponents,
+    FrtCmd_CastleAction,
+    FrtCmd_CastleGetBattleResult,
+    FrtCmd_CastleSendLinkMessage,
+    FrtCmd_CastleWaitLink,
+    FrtCmd_CastleLaunchEmptyApp,
+    FrtCmd_CastleWaitLinkChoice,
+    FrtCmd_CastleGetPoints,
+    FrtCmd_CastleSpendPoints,
+    FrtCmd_CastleAddPoints,
+    FrtCmd_CastlePrintTrainerMessage,
+    FrtCmd_LinkLobbyAlloc,
+    FrtCmd_LinkLobbyFree,
+    FrtCmd_LinkLobbySend,
+    FrtCmd_LinkLobbyWaitReceive,
+    FrtCmd_LinkLobbyCheckPartnerFacility,
+    FrtCmd_LinkLobbyRunPartyApp,
+    FrtCmd_LinkLobbyGetPartyMenuResult,
+    FrtCmd_LinkLobbyGetPartnerChoice,
+    FrtCmd_LinkLobbyAction,
+    FrtCmd_LinkLobbyStartTower,
+    FrtCmd_TowerLinkSendTrainers,
+    FrtCmd_TowerLinkWaitReceive,
+    FrtCmd_TowerFree,
+    FrtCmd_UpdateWifiFriendDate,
+    FrtCmd_ArcadeAlloc,
+    FrtCmd_ArcadeInit,
+    FrtCmd_ArcadeFree,
+    FrtCmd_ArcadeEndBattle,
+    FrtCmd_ArcadeStartBattle,
+    FrtCmd_ArcadeSetPartyBeforeBattle,
+    FrtCmd_ArcadeSetPartyAfterBattle,
+    FrtCmd_ArcadeAction,
+    FrtCmd_ArcadeGetBattleResult,
+    FrtCmd_ArcadeSendBuffer,
+    FrtCmd_ArcadeReceiveBuffer,
+    FrtCmd_LaunchGameBoard,
+    FrtCmd_ArcadePrintMsg,
+    FrtCmd_ArcadeSetEvent,
+    FrtCmd_ArcadeSetItemIconVisible,
+    FrtCmd_Dummy199,
+    FrtCmd_Dummy200,
+    FrtCmd_SetWifiContinuousSend,
+    FrtCmd_LinkLobbyWaitReceiveOrAbort,
+    FrtCmd_LinkSyncOrAbort,
+    FrtCmd_GetSyncAborted,
+    FrtCmd_ClearSyncAborted,
+    FrtCmd_MenuSetAlignRight,
+    FrtCmd_MenuSetAlignBottom,
+};
+
+static inline u8 ReadScriptByte(FrontierScriptContext *ctx) {
+    const u8 *ptr = ctx->scriptPtr;
+    ctx->scriptPtr = ptr + 1;
+    return *ptr;
+}
+
+static BOOL FrtCmd_DeleteSprite(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    FrontierMap_DeleteSprite(map, FrontierScript_ReadVar(ctx));
+    return FALSE;
+}
+
+static BOOL FrtCmd_SetSpriteDrawFlag(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    u16 index = FrontierScript_ReadVar(ctx);
+    u8 draw = ReadScriptByte(ctx);
+    ManagedSprite *sprite = FrontierMap_GetSprite(map, index);
+    GF_ASSERT(sprite != NULL);
+    ManagedSprite_SetDrawFlag(sprite, draw);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SetSpriteFlip(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    ManagedSprite *sprite = FrontierMap_GetSprite(map, FrontierScript_ReadVar(ctx));
+    GF_ASSERT(sprite != NULL);
+    thunk_Sprite_SetFlipMode(sprite->sprite, 1);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SetSpriteTranslucent(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    u16 index = FrontierScript_ReadVar(ctx);
+    u16 mode = FrontierScript_ReadVar(ctx);
+    ManagedSprite *sprite = FrontierMap_GetSprite(map, index);
+    GF_ASSERT(sprite != NULL);
+    if (mode == 0) {
+        thunk_Sprite_SetOamMode(sprite->sprite, GX_OAM_MODE_NORMAL);
+    } else {
+        thunk_Sprite_SetOamMode(sprite->sprite, GX_OAM_MODE_XLU);
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_StartSpriteAnim(FrontierScriptContext *ctx) {
+    u16 index = FrontierScript_ReadVar(ctx);
+    u16 anim = FrontierScript_ReadVar(ctx);
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    ManagedSprite_SetAnim(FrontierMap_GetSprite(map, index), anim);
+    FrontierMap_SetSpriteAnimActive(map, index, TRUE);
+    return FALSE;
+}
+
+static BOOL FrtCmd_StopSpriteAnim(FrontierScriptContext *ctx) {
+    u16 index = FrontierScript_ReadVar(ctx);
+    FrontierMap_SetSpriteAnimActive(Frontier_GetMap(ctx->frontierSystem->frontierWork), index, FALSE);
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitSpriteAnim(FrontierScriptContext *ctx) {
+    ctx->data[0] = FrontierScript_ReadVar(ctx);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitSpriteAnim);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitSpriteAnim(FrontierScriptContext *ctx) {
+    FrontierMap *map;
+    ManagedSprite *sprite;
+    u16 *index;
+    map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    index = &ctx->data[0];
+    sprite = FrontierMap_GetSprite(map, *index);
+    if (!FrontierMap_IsSpriteAnimActive(map, *index) || !ManagedSprite_IsAnimated(sprite)) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void FrontierScript_SetObjectMovement(FrontierScriptContext *ctx, int unused, int count) {
+    FrontierSystem *system;
+    s16 *params;
+    u16 id;
+    int i;
+    system = ctx->frontierSystem;
+    GF_ASSERT(count <= 7);
+    params = Heap_Alloc(system->heapId, count * 2);
+    id = FrontierScript_ReadVar(ctx);
+    for (i = 0; i < 3; i++) {
+        params[i] = FrontierScript_ReadVar(ctx);
+    }
+    FrontierMap_SetObjectMovement(system->frontierWork, id, 1, params, 3);
+    Heap_Free(params);
+}
+
+static BOOL FrtCmd_ClearObjectMovement(FrontierScriptContext *ctx) {
+    u16 id = FrontierScript_ReadVar(ctx);
+    FrontierMap_SetObjectMovement(ctx->frontierSystem->frontierWork, id, 0, NULL, 0);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SetObjectLookAround(FrontierScriptContext *ctx) {
+    FrontierScript_SetObjectMovement(ctx, 1, 3);
+    return FALSE;
+}
+
+static BOOL FrtCmd_LaunchNamingScreen(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    NamingScreenArgs *namingArgs = NamingScreen_CreateArgs(HEAP_ID_FIELD2, NAME_SCREEN_PLAYER, 0, 8, args->options, NULL);
+    Frontier_LaunchApplication(ctx->frontierSystem->frontierWork, &gOverlayTemplate_NamingScreen, namingArgs, FALSE, FrontierScript_FreeNamingScreenArgs);
+    return TRUE;
+}
+
+static void FrontierScript_FreeNamingScreenArgs(void *args) {
+    NamingScreen_DeleteArgs(args);
+}
+
+static BOOL FrtCmd_CreateBattleRecord(FrontierScriptContext *ctx) {
+    u32 out;
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    BattleRecord_Create(args->saveData, HEAP_ID_FIELD2, &out);
+    return FALSE;
+}
+
+// Saves the battle record of the facility / mode (amount up to 9999), the result goes to the given variable.
+BOOL FrtCmd_SaveBattleRecord(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    u32 facility = FrontierScriptContext_ReadHalfWord(ctx);
+    u32 mode = FrontierScript_ReadVar(ctx);
+    u32 amount = FrontierScript_ReadVar(ctx);
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    if (amount > 9999) {
+        amount = 9999;
+    }
+    system->recordSaveState = 0;
+    system->recordWriteState = 0;
+    system->recordType = FrontierScript_GetBattleRecordType(facility, mode);
+    system->recordAmount = amount;
+    system->recordResult = result;
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitSaveBattleRecord);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitSaveBattleRecord(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(system->frontierWork);
+    int result = BattleRecord_Save(args->saveData, system->recordType, system->recordAmount, 0, &system->recordSaveState, &system->recordWriteState);
+    if (result == WRITE_STATUS_SUCCESS || result == WRITE_STATUS_TOTAL_FAIL) {
+        *system->recordResult = result == WRITE_STATUS_SUCCESS;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static int FrontierScript_GetBattleRecordType(int facility, int mode) {
+    int type = 15;
+    switch (facility) {
+    case 0:
+        break;
+    case 1:
+        switch (mode) {
+        case 0:
+            type = 15;
+            break;
+        case 1:
+            type = 16;
+            break;
+        case 2:
+        case 3:
+        case 6:
+            type = 17;
+            break;
+        case 4:
+        case 5:
+            type = 15;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    case 2:
+        switch (mode) {
+        case 0:
+            type = 18;
+            break;
+        case 1:
+            type = 19;
+            break;
+        case 2:
+        case 3:
+            type = 20;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    case 3:
+        switch (mode) {
+        case 0:
+            type = 21;
+            break;
+        case 1:
+            type = 22;
+            break;
+        case 2:
+        case 3:
+            type = 23;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    case 4:
+        switch (mode) {
+        case 0:
+            type = 27;
+            break;
+        case 1:
+            type = 28;
+            break;
+        case 2:
+        case 3:
+            type = 29;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    case 5:
+        switch (mode) {
+        case 0:
+            type = 24;
+            break;
+        case 1:
+            type = 25;
+            break;
+        case 2:
+        case 3:
+            type = 26;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    case 6:
+        switch (mode) {
+        case 0:
+            type = 30;
+            break;
+        case 1:
+            type = 31;
+            break;
+        case 2:
+        case 3:
+            type = 32;
+            break;
+        default:
+            GF_ASSERT(FALSE);
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+    return type;
+}
+
+// Plays the recorded battle.
+static BOOL FrtCmd_PlayBattleRecord(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    BattleSetup *setup = Heap_Alloc(HEAP_ID_FIELD2, sizeof(BattleSetup));
+    int result;
+    MI_CpuFill8(setup, 0, sizeof(BattleSetup));
+    BattleRecord_Load(args->saveData, HEAP_ID_FIELD2, &result, setup, 0);
+    Sound_SetSceneAndPlayBGM(5, SEQ_GS_VS_TRAINER, 1);
+    Frontier_LaunchApplication(ctx->frontierSystem->frontierWork, &gOverlayTemplate_Battle, setup, TRUE, NULL);
+    return TRUE;
+}
+
+static BOOL FrtCmd_DeleteBattleRecord(FrontierScriptContext *ctx) {
+    BattleRecord_Delete();
+    return FALSE;
+}
+
+static BOOL FrtCmd_CheckBattleRecordSlotValid(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    int out;
+    *result = BattleRecord_IsSlotValid(args->saveData, HEAP_ID_FIELD2, &out, 0);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SaveGameNormal(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    FrontierScript_ReadVarPtr(ctx);
+    SaveGameNormal(args->saveData);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SaveGameAsync(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(system->frontierWork);
+    FrontierScript_ReadVarPtr(ctx);
+    Sys_SetSoftResetDisableFlag(4);
+    Sys_SetAsyncSaveMarker(system->heapId);
+    Save_PrepareForAsyncWrite(args->saveData, 2);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitSave);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitSave(FrontierScriptContext *ctx) {
+    int result = Save_WriteFileAsync(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData);
+    if (result == WRITE_STATUS_SUCCESS) {
+        Sys_ClearAsyncSaveMarker();
+        Sys_ClearSoftResetDisableFlag(4);
+        return TRUE;
+    }
+    if (result == WRITE_STATUS_TOTAL_FAIL) {
+        Sys_ClearAsyncSaveMarker();
+        Sys_ClearSoftResetDisableFlag(4);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_SaveWipeExtraChunks(FrontierScriptContext *ctx) {
+    Save_WipeExtraChunks(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData);
+    return FALSE;
+}
+
+static BOOL FrtCmd_CheckExtraSaveChunksExist(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    *result = Save_CheckExtraChunksExist(args->saveData);
+    return FALSE;
+}
+
+static BOOL FrtCmd_AddWaitingIcon(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    system->waitingIcon = WaitingIcon_New(&system->messageWindow, 0x3E2);
+    return FALSE;
+}
+
+static BOOL FrtCmd_RemoveWaitingIcon(FrontierScriptContext *ctx) {
+    WaitingIcon_Delete(ctx->frontierSystem->waitingIcon);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferItemName(FrontierScriptContext *ctx) {
+    MessageFormat *msgFormat;
+    u8 field;
+    u16 item;
+    field = ReadScriptByte(ctx);
+    item = FrontierScript_ReadVar(ctx);
+    msgFormat = ctx->frontierSystem->msgFormat;
+    BufferItemName(msgFormat, field, item);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferInt(FrontierScriptContext *ctx) {
+    u8 field;
+    u16 value;
+    u32 digits;
+    field = ReadScriptByte(ctx);
+    value = FrontierScript_ReadVar(ctx);
+    digits = FrontierScript_CountDigits(value);
+    BufferIntegerAsString(ctx->frontierSystem->msgFormat, field, value, digits, PRINTING_MODE_RIGHT_ALIGN, TRUE);
+    return FALSE;
+}
+
+static u32 FrontierScript_CountDigits(u32 value) {
+    if (value / 10 == 0) {
+        return 1;
+    }
+    if (value / 100 == 0) {
+        return 2;
+    }
+    if (value / 1000 == 0) {
+        return 3;
+    }
+    if (value / 10000 == 0) {
+        return 4;
+    }
+    if (value / 100000 == 0) {
+        return 5;
+    }
+    if (value / 1000000 == 0) {
+        return 6;
+    }
+    if (value / 10000000 == 0) {
+        return 7;
+    }
+    if (value / 100000000 == 0) {
+        return 8;
+    }
+    return 1;
+}
+
+static BOOL FrtCmd_BufferPlayersName(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u8 field;
+    PlayerProfile *profile;
+    field = ReadScriptByte(ctx);
+    profile = Save_PlayerData_GetProfile(args->saveData);
+    BufferPlayersName(ctx->frontierSystem->msgFormat, field, profile);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferPartnersName(FrontierScriptContext *ctx) {
+    Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u8 field = ReadScriptByte(ctx);
+    PlayerProfile *profile = CommPlayerInfo_GetProfile(Comm_GetLocalNetId() ^ 1);
+    BufferPlayersName(ctx->frontierSystem->msgFormat, field, profile);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferMoveName(FrontierScriptContext *ctx) {
+    u8 field;
+    u16 move;
+    field = ReadScriptByte(ctx);
+    move = FrontierScript_ReadVar(ctx);
+    BufferMoveName(ctx->frontierSystem->msgFormat, field, move);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferSpeciesName(FrontierScriptContext *ctx) {
+    u8 field;
+    u16 msgId;
+    u16 gender;
+    u8 isSingular;
+    String *string;
+    field = ReadScriptByte(ctx);
+    msgId = FrontierScript_ReadVar(ctx);
+    gender = FrontierScriptContext_ReadHalfWord(ctx);
+    isSingular = ReadScriptByte(ctx);
+    string = FrontierScript_ReadString(msgId, HEAP_ID_FIELD2);
+    BufferString(ctx->frontierSystem->msgFormat, field, string, gender, isSingular, 2);
+    String_Delete(string);
+    return FALSE;
+}
+
+static String *FrontierScript_ReadString(u32 msgId, enum HeapID heapId) {
+    MsgData *msgData = NewMsgDataFromNarc(MSGDATA_LOAD_LAZY, NARC_msgdata_msg, NARC_msg_msg_0237_bin, heapId);
+    String *string = NewString_ReadMsgData(msgData, msgId);
+    DestroyMsgData(msgData);
+    return string;
+}
+
+static BOOL FrtCmd_BufferTypeName(FrontierScriptContext *ctx) {
+    u8 field;
+    u16 type;
+    field = ReadScriptByte(ctx);
+    type = FrontierScript_ReadVar(ctx);
+    BufferTypeName(ctx->frontierSystem->msgFormat, field, type);
+    return FALSE;
+}
+
+static BOOL FrtCmd_BufferRivalsName(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    BufferRivalsName(ctx->frontierSystem->msgFormat, ReadScriptByte(ctx), args->saveData);
+    return FALSE;
+}
+
+static BOOL FrtCmd_GetBattlePoints(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    *result = FrontierData_BattlePointAction(Save_FrontierData_Get(args->saveData), 0, FRONTIER_DATA_GET);
+    return FALSE;
+}
+
+static BOOL FrtCmd_GiveBattlePoints(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u16 points = FrontierScript_ReadVar(ctx);
+    GameStats_Add(Save_GameStats_Get(args->saveData), GAME_STAT_BATTLE_POINTS_RECEIVED, points);
+    FrontierData_BattlePointAction(Save_FrontierData_Get(args->saveData), points, FRONTIER_DATA_ADD);
+    return FALSE;
+}
+
+static BOOL FrtCmd_TakeBattlePoints(FrontierScriptContext *ctx) {
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    u16 points = FrontierScript_ReadVar(ctx);
+    GameStats_Add(Save_GameStats_Get(args->saveData), GAME_STAT_BATTLE_POINTS_SPENT, points);
+    FrontierData_BattlePointAction(Save_FrontierData_Get(args->saveData), points, FRONTIER_DATA_SUB);
+    return FALSE;
+}
+
+static BOOL FrtCmd_LinkSync(FrontierScriptContext *ctx) {
+    u16 syncId = FrontierScript_ReadVar(ctx);
+    ctx->data[0] = syncId;
+    LinkSync_StartSync(syncId);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitLinkSync);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitLinkSync(FrontierScriptContext *ctx) {
+    if (Comm_CountConnected() < 2) {
+        return TRUE;
+    }
+    return LinkSync_IsSynced(ctx->data[0]);
+}
+
+static BOOL FrtCmd_ClearLinkSyncPackets(FrontierScriptContext *ctx) {
+    LinkSync_ClearPackets();
+    return FALSE;
+}
+
+static BOOL FrtCmd_ExitClubLink(FrontierScriptContext *ctx) {
+    CommClubLink_Exit();
+    FrontierScriptContext_Pause(ctx, (FrontierShouldResumeScriptFunc)FrontierScriptNative_WaitCommEnd);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitCommEnd(void) {
+    if (CommState_Exists() != TRUE && CommWireless_Exists() != TRUE) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_Random(FrontierScriptContext *ctx) {
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    u16 max = FrontierScript_ReadVar(ctx);
+    *result = LCRandom() % max;
+    return TRUE;
+}
+
+static BOOL FrtCmd_HealParty(FrontierScriptContext *ctx) {
+    HealParty(SaveArray_Party_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData));
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitButton(FrontierScriptContext *ctx) {
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitButton);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitButton(FrontierScriptContext *ctx) {
+    if (gSystem.newKeys & (PAD_BUTTON_A | PAD_BUTTON_B) || System_GetTouchNew()) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitButtonOrDelay(FrontierScriptContext *ctx) {
+    ctx->data[0] = FrontierScript_ReadVar(ctx);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitButtonOrFrames);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitButtonOrFrames(FrontierScriptContext *ctx) {
+    if ((gSystem.newKeys & (PAD_BUTTON_A | PAD_BUTTON_B)) || System_GetTouchNew()) {
+        return TRUE;
+    }
+    ctx->data[0]--;
+    if (ctx->data[0] == 0) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_Dummy060(FrontierScriptContext *ctx) {
+    FrontierScript_ReadVarPtr(ctx);
+    return TRUE;
+}
+
+static BOOL FrtCmd_SetSaveVar(FrontierScriptContext *ctx) {
+    u16 varId = FrontierScriptContext_ReadHalfWord(ctx);
+    u16 value = FrontierScript_ReadVar(ctx);
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    *Save_VarsFlags_GetVarAddr(Save_VarsFlags_Get(args->saveData), varId) = value;
+    return FALSE;
+}
+
+static BOOL FrtCmd_GetSaveVar(FrontierScriptContext *ctx) {
+    u16 varId = FrontierScriptContext_ReadHalfWord(ctx);
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    *result = *Save_VarsFlags_GetVarAddr(Save_VarsFlags_Get(args->saveData), varId);
+    return FALSE;
+}
+
+enum {
+    TRANSITION_FLASH_START,
+    TRANSITION_FLASH_WAIT,
+};
+
+static BOOL FrontierTransition_Flash(FrontierTransitionWork *work) {
+    switch (work->state) {
+    case TRANSITION_FLASH_START:
+        FrontierTransition_StartFlash(SCREEN_MASK_MAIN, 16, -16, &work->flashDone, 2);
+        work->state++;
+        break;
+    case TRANSITION_FLASH_WAIT:
+        if (work->flashDone != 0) {
+            ResetVisibleHardwareWindows(PM_LCD_TOP);
+            ResetVisibleHardwareWindows(PM_LCD_BOTTOM);
+            BeginNormalPaletteFade(FADE_BOTH_SCREENS, (enum FadeType)32, (enum FadeType)32, RGB_BLACK, 12, 1, HEAP_ID_FIELD2);
+            work->state++;
+        }
+        break;
+    default:
+        if (IsPaletteFadeFinished() == TRUE) {
+            return FALSE;
+        }
+        break;
+    }
+    return TRUE;
+}
+
+enum {
+    TRANSITION_WIPE_START_FLASH,
+    TRANSITION_WIPE_CREATE,
+    TRANSITION_WIPE_START,
+    TRANSITION_WIPE_UPDATE,
+};
+
+static BOOL FrontierTransition_FlashWipeHorizontal(FrontierTransitionWork *work) {
+    BOOL done;
+    switch (work->state) {
+    case TRANSITION_WIPE_START_FLASH:
+        FrontierTransition_StartFlash(SCREEN_MASK_MAIN, 16, -16, &work->flashDone, 2);
+        work->state++;
+        break;
+    case TRANSITION_WIPE_CREATE:
+        if (work->flashDone == 0) {
+            break;
+        }
+        work->window = AllocWindows(HEAP_ID_FIELD2, 1);
+        AddWindowParameterized(work->map->bgConfig, work->window, GF_BG_LYR_MAIN_1, 0, 0, 32, 32, 0, 0);
+        PaletteData_FillPaletteInBuffer(work->map->paletteData, PLTTBUF_MAIN_BG, PLTTSEL_BOTH, 0, 0, 16);
+        FillWindowPixelBuffer(work->window, 0);
+        ScheduleWindowCopyToVram(work->window);
+        work->wipe = FrontierWipe_New(HEAP_ID_FIELD2);
+        work->state++;
+    case TRANSITION_WIPE_START:
+        FrontierWipe_Start(work->wipe, 1, 1, work->window, 15);
+        work->state++;
+        break;
+    case TRANSITION_WIPE_UPDATE:
+        done = FrontierWipe_UpdateHorizontal(work->wipe);
+        ScheduleWindowCopyToVram(work->window);
+        if (done) {
+            work->state++;
+        }
+        break;
+    default:
+        if (IsPaletteFadeFinished() == TRUE) {
+            FrontierWipe_Free(work->wipe);
+            ClearWindowTilemapAndCopyToVram(work->window);
+            RemoveWindow(work->window);
+            WindowArray_Delete(work->window, 1);
+            SetMasterBrightnessByColor(PM_LCD_TOP, RGB_BLACK);
+            SetMasterBrightnessByColor(PM_LCD_BOTTOM, RGB_BLACK);
+            BG_ClearCharDataRange(GF_BG_LYR_MAIN_1, 32, 0, HEAP_ID_FIELD2);
+            BgClearTilemapBufferAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_1);
+            return FALSE;
+        }
+        break;
+    }
+    return TRUE;
+}
+
+static BOOL FrontierTransition_FlashWipeVertical(FrontierTransitionWork *work) {
+    BOOL done;
+    switch (work->state) {
+    case TRANSITION_WIPE_START_FLASH:
+        FrontierTransition_StartFlash(SCREEN_MASK_MAIN, 16, -16, &work->flashDone, 2);
+        work->state++;
+        break;
+    case TRANSITION_WIPE_CREATE:
+        if (work->flashDone == 0) {
+            break;
+        }
+        work->window = AllocWindows(HEAP_ID_FIELD2, 1);
+        AddWindowParameterized(work->map->bgConfig, work->window, GF_BG_LYR_MAIN_1, 0, 0, 32, 32, 0, 0);
+        PaletteData_FillPaletteInBuffer(work->map->paletteData, PLTTBUF_MAIN_BG, PLTTSEL_BOTH, 0, 0, 16);
+        FillWindowPixelBuffer(work->window, 0);
+        ScheduleWindowCopyToVram(work->window);
+        work->wipe = FrontierWipe_New(HEAP_ID_FIELD2);
+        work->state++;
+    case TRANSITION_WIPE_START:
+        FrontierWipe_Start(work->wipe, 1, 1, work->window, 15);
+        work->state++;
+        break;
+    case TRANSITION_WIPE_UPDATE:
+        done = FrontierWipe_UpdateVertical(work->wipe);
+        ScheduleWindowCopyToVram(work->window);
+        if (done) {
+            work->state++;
+        }
+        break;
+    default:
+        if (IsPaletteFadeFinished() == TRUE) {
+            FrontierWipe_Free(work->wipe);
+            ClearWindowTilemapAndCopyToVram(work->window);
+            RemoveWindow(work->window);
+            WindowArray_Delete(work->window, 1);
+            SetMasterBrightnessByColor(PM_LCD_TOP, RGB_BLACK);
+            SetMasterBrightnessByColor(PM_LCD_BOTTOM, RGB_BLACK);
+            BG_ClearCharDataRange(GF_BG_LYR_MAIN_1, 32, 0, HEAP_ID_FIELD2);
+            BgClearTilemapBufferAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_1);
+            return FALSE;
+        }
+        break;
+    }
+    return TRUE;
+}
+
+static u32 FrontierScript_PackHalfWords(u32 low, u32 high) {
+    return low | (high << 16);
+}
+
+static void FrontierTransition_RowScrollTask(SysTask *task, FrontierTransitionWork *work) {
+    int i1;
+    u8 *buffer1;
+    int bg2X, bg2Y, bg3X, bg3Y;
+    u8 *buffer2;
+    int i2;
+    MtxFx22 matrix;
+    FrontierRowScroll *rows = work->rows;
+    bg2X = GetBgHOffset(work->map->bgConfig, GF_BG_LYR_MAIN_2);
+    bg2Y = GetBgHOffset(work->map->bgConfig, GF_BG_LYR_MAIN_2);
+    bg3X = GetBgHOffset(work->map->bgConfig, GF_BG_LYR_MAIN_3);
+    bg3Y = GetBgHOffset(work->map->bgConfig, GF_BG_LYR_MAIN_3);
+
+    if (work->finished == TRUE) {
+        FrontierRowScrollLine *line;
+        buffer1 = FrontierHBlankDma_GetBuffer(rows->dma);
+        i1 = 0;
+        line = rows->lines;
+        for (; i1 < 96; i1++, line++) {
+            int j;
+            line->x = 0;
+            line->y = 0;
+            j = line->start;
+            if (j < line->end) {
+                u8 *dest = buffer1 + j * 32;
+                do {
+                    MTX22_2DAffine(&matrix, 0, FX32_ONE, FX32_ONE, 0);
+                    {
+                        s16 x = bg2X + line->x;
+                        s16 y = bg2Y + line->y;
+                        if (rows->mode == 2) {
+                            x %= 256;
+                            y %= 256;
+                        } else if (rows->mode == 1) {
+                            if (x < 0) {
+                                x += 256;
+                            }
+                            if (y < 0) {
+                                y = -y;
+                            }
+                            x %= 256;
+                        }
+                        G2x_SetBGyAffine_((u32)dest, &matrix, 0, 0, x, y);
+                    }
+                    {
+                        s16 x = bg3X + line->x;
+                        s16 y = bg3Y + line->y;
+                        if (rows->mode == 2) {
+                            x %= 256;
+                            y %= 256;
+                        } else if (rows->mode == 1) {
+                            if (x < 0) {
+                                x += 256;
+                            }
+                            if (y < 0) {
+                                y = -y;
+                            }
+                            x %= 256;
+                        }
+                        G2x_SetBGyAffine_((u32)dest + 16, &matrix, 0, 0, x, y);
+                    }
+                    j++;
+                    dest += 32;
+                } while (j < line->end);
+            }
+        }
+        FrontierHBlankDma_Delete(rows->dma);
+        Heap_Free(rows);
+        SysTask_Destroy(task);
+    } else {
+        FrontierRowScrollLine *line;
+        buffer2 = FrontierHBlankDma_GetBuffer(rows->dma);
+        i2 = 0;
+        line = rows->lines;
+        for (; i2 < 96; i2++, line++) {
+            int j;
+            line->x += line->speedX;
+            line->y += line->speedY;
+            j = line->start;
+            if (j < line->end) {
+                u8 *dest = buffer2 + j * 32;
+                do {
+                    MTX22_2DAffine(&matrix, 0, FX32_ONE, FX32_ONE, 0);
+                    {
+                        s16 x = bg2X + line->x;
+                        s16 y = bg2Y + line->y;
+                        if (rows->mode == 2) {
+                            x %= 256;
+                            y %= 256;
+                        } else if (rows->mode == 1) {
+                            if (x < 0) {
+                                x += 256;
+                            }
+                            if (y < 0) {
+                                y = -y;
+                            }
+                            x %= 256;
+                        }
+                        G2x_SetBGyAffine_((u32)dest, &matrix, 0, 0, x, y);
+                    }
+                    {
+                        s16 x = bg3X + line->x;
+                        s16 y = bg3Y + line->y;
+                        if (rows->mode == 2) {
+                            x %= 256;
+                            y %= 256;
+                        } else if (rows->mode == 1) {
+                            if (x < 0) {
+                                x += 256;
+                            }
+                            if (y < 0) {
+                                y = -y;
+                            }
+                            x %= 256;
+                        }
+                        G2x_SetBGyAffine_((u32)dest + 16, &matrix, 0, 0, x, y);
+                    }
+                    j++;
+                    dest += 32;
+                } while (j < line->end);
+            }
+        }
+    }
+}
+
+enum {
+    TRANSITION_ROW_SCROLL_START_FLASH,
+    TRANSITION_ROW_SCROLL_START,
+    TRANSITION_ROW_SCROLL_WAIT,
+};
+
+static BOOL FrontierTransition_RowScroll1(FrontierTransitionWork *work) {
+    switch (work->state) {
+    case TRANSITION_ROW_SCROLL_START_FLASH:
+        FrontierTransition_StartFlash(SCREEN_MASK_MAIN, 16, -16, &work->flashDone, 2);
+        work->state++;
+        break;
+    case TRANSITION_ROW_SCROLL_START:
+        if (work->flashDone != 0) {
+            FrontierScanlineRegs initial;
+            int i;
+            int start;
+            MI_CpuFill8(&initial, 0, sizeof(initial));
+            work->finished = FALSE;
+            work->rows = Heap_Alloc(HEAP_ID_101, sizeof(FrontierRowScroll));
+            work->rows->mode = 1;
+            work->rows->dma = FrontierHBlankDma_New((void *)REG_BG2PA_ADDR, &initial, HEAP_ID_101);
+            i = 0;
+            start = 0;
+            for (; i < 96; i++) {
+                int distance;
+                work->rows->lines[i].start = start;
+                work->rows->lines[i].end = work->rows->lines[i].start + 2;
+                distance = 49 - i;
+                work->rows->lines[i].speedX = distance % 8;
+                work->rows->lines[i].speedY = distance / 4;
+                work->rows->lines[i].x = 0;
+                work->rows->lines[i].y = 0;
+                work->rows->lines[i].unk_0C = FrontierScript_PackHalfWords(0, 0);
+                start += 2;
+            }
+            StartBrightnessTransition(40, -16, 0, (GXBlendPlaneMask)(GX_BLEND_PLANEMASK_BG1 | GX_BLEND_PLANEMASK_BG2 | GX_BLEND_PLANEMASK_BG3 | GX_BLEND_PLANEMASK_OBJ), 1);
+            SysTask_CreateOnMainQueue((SysTaskFunc)FrontierTransition_RowScrollTask, work, 0x1000);
+            work->state++;
+        }
+        break;
+    case TRANSITION_ROW_SCROLL_WAIT:
+        if (IsBrightnessTransitionActive(1)) {
+            work->finished = TRUE;
+            ToggleBgLayer(GF_BG_LYR_MAIN_3, GF_PLANE_TOGGLE_OFF);
+            BgSetPosTextAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_3, BG_POS_OP_SET_X, 0);
+            BgSetPosTextAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_3, BG_POS_OP_SET_Y, 0);
+            work->state++;
+        }
+        break;
+    default:
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL FrontierTransition_RowScroll2(FrontierTransitionWork *work) {
+    switch (work->state) {
+    case TRANSITION_ROW_SCROLL_START_FLASH:
+        FrontierTransition_StartFlash(SCREEN_MASK_MAIN, 16, -16, &work->flashDone, 2);
+        work->state++;
+        break;
+    case TRANSITION_ROW_SCROLL_START:
+        if (work->flashDone != 0) {
+            FrontierScanlineRegs initial;
+            int i;
+            int start;
+            MI_CpuFill8(&initial, 0, sizeof(initial));
+            work->finished = FALSE;
+            work->rows = Heap_Alloc(HEAP_ID_101, sizeof(FrontierRowScroll));
+            work->rows->mode = 2;
+            work->rows->dma = FrontierHBlankDma_New((void *)REG_BG2PA_ADDR, &initial, HEAP_ID_101);
+            i = 0;
+            start = 0;
+            for (; i < 96; i++) {
+                int distance;
+                int speed;
+                work->rows->lines[i].start = start;
+                work->rows->lines[i].end = work->rows->lines[i].start + 2;
+                distance = 48 - i;
+                speed = distance / 8 + 1;
+                work->rows->lines[i].speedX = speed;
+                if (i % 2 != 0) {
+                    work->rows->lines[i].speedX *= -1;
+                }
+                if (i < 48) {
+                    work->rows->lines[i].speedY = i;
+                } else {
+                    work->rows->lines[i].speedY = 96 - i;
+                }
+                work->rows->lines[i].x = 0;
+                work->rows->lines[i].y = 0;
+                work->rows->lines[i].unk_0C = FrontierScript_PackHalfWords(0, 0);
+                start += 2;
+            }
+            StartBrightnessTransition(40, -16, 0, (GXBlendPlaneMask)(GX_BLEND_PLANEMASK_BG2 | GX_BLEND_PLANEMASK_BG3 | GX_BLEND_PLANEMASK_OBJ), 1);
+            SysTask_CreateOnMainQueue((SysTaskFunc)FrontierTransition_RowScrollTask, work, 0x1000);
+            work->state++;
+        }
+        break;
+    case TRANSITION_ROW_SCROLL_WAIT:
+        if (IsBrightnessTransitionActive(1)) {
+            work->finished = TRUE;
+            ToggleBgLayer(GF_BG_LYR_MAIN_3, GF_PLANE_TOGGLE_OFF);
+            BgSetPosTextAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_3, BG_POS_OP_SET_X, 0);
+            BgSetPosTextAndCommit(work->map->bgConfig, GF_BG_LYR_MAIN_3, BG_POS_OP_SET_Y, 0);
+            work->state++;
+        }
+        break;
+    default:
+        return FALSE;
+    }
+    return TRUE;
+}
+
+enum {
+    TRANSITION_WAVE_INIT,
+    TRANSITION_WAVE_START,
+};
+
+static BOOL FrontierTransition_Wave(FrontierTransitionWork *work) {
+    switch (work->state) {
+    case TRANSITION_WAVE_INIT:
+        FrontierScanline_Init(&work->scanline, HEAP_ID_101);
+        work->state++;
+        break;
+    case TRANSITION_WAVE_START:
+        FrontierScanline_StartWave(&work->scanline, 0, 191, 0x2AA, 0x12000, 400, (void *)REG_BG3HOFS_ADDR, 0, 4);
+        work->state++;
+        break;
+    }
+    return TRUE;
+}
+
+// Runs screen transition var while the frontier app's data points to its work.
+static BOOL FrtCmd_BattleTransition(FrontierScriptContext *ctx) {
+    FrontierTransitionWork *work;
+    Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    ctx->data[0] = FrontierScript_ReadVar(ctx);
+    Sound_SetSceneAndPlayBGM(5, SEQ_GS_VS_TRAINER, 1);
+    work = Heap_Alloc(HEAP_ID_FIELD2, sizeof(FrontierTransitionWork));
+    work->prevData = Frontier_GetData(ctx->frontierSystem->frontierWork);
+    work->state = 0;
+    work->transition = ctx->data[0];
+    work->map = FrontierSystem_GetFrontierMap(ctx->frontierSystem);
+    Frontier_SetData(ctx->frontierSystem->frontierWork, work);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitTransition);
+    PaletteData_FillPaletteInBuffer(work->map->paletteData, PLTTBUF_MAIN_BG, PLTTSEL_BOTH, 0, 0, 1);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitTransition(FrontierScriptContext *ctx) {
+    FrontierTransitionWork *work;
+    BOOL running;
+    work = Frontier_GetData(ctx->frontierSystem->frontierWork);
+    running = sFrontierTransitionFuncs[work->transition](work);
+    if (!running) {
+        SetMasterBrightnessByColor(PM_LCD_TOP, RGB_BLACK);
+        SetMasterBrightnessByColor(PM_LCD_BOTTOM, RGB_BLACK);
+        Frontier_SetData(ctx->frontierSystem->frontierWork, work->prevData);
+        Heap_Free(work);
+    }
+    return !running;
+}
+
+static BOOL FrtCmd_GetPlayerSpriteId(FrontierScriptContext *ctx) {
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    FrontierLaunchArgs *args = Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork);
+    PlayerProfile *profile = Save_PlayerData_GetProfile(args->saveData);
+    if (PlayerProfile_GetTrainerGender(profile) == PLAYER_GENDER_MALE) {
+        *result = 0;
+    } else {
+        *result = 0x61;
+    }
+    return FALSE;
+}
+
+static BOOL FrtCmd_CreateParticleSystem(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    u16 index = FrontierScript_ReadVar(ctx);
+    u16 member = FrontierScript_ReadVar(ctx);
+    u16 perspectiveType = FrontierScript_ReadVar(ctx);
+    FrontierParticles_CreateSystem(map->particles, index, member, perspectiveType);
+    return FALSE;
+}
+
+static BOOL FrtCmd_DestroyParticleSystem(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    FrontierParticles_DestroySystem(map->particles, FrontierScript_ReadVar(ctx));
+    return FALSE;
+}
+
+static BOOL FrtCmd_CreateParticleEmitter(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    u16 index = FrontierScript_ReadVar(ctx);
+    u16 resource = FrontierScript_ReadVar(ctx);
+    ParticleSystem_CreateEmitterWithParam(FrontierParticles_GetSystem(map->particles, index), resource, NULL, NULL);
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitParticles(FrontierScriptContext *ctx) {
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitMapEffect);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitMapEffect(FrontierScriptContext *ctx) {
+    return FrontierParticles_AreAllDone(Frontier_GetMap(ctx->frontierSystem->frontierWork)->particles) == TRUE;
+}
+
+// Shakes the map: offset x / y, flipped every interval + 1 frames, count times.
+BOOL FrtCmd_ShakeMap(FrontierScriptContext *ctx) {
+    u16 x;
+    u16 y;
+    u16 interval;
+    u16 count;
+    FrontierMapShake *shake = &Frontier_GetMap(ctx->frontierSystem->frontierWork)->shake;
+    if (shake->task != NULL) {
+        GF_ASSERT(FALSE);
+        SysTask_Destroy(shake->task);
+    }
+    x = FrontierScript_ReadVar(ctx);
+    y = FrontierScript_ReadVar(ctx);
+    interval = FrontierScript_ReadVar(ctx);
+    count = FrontierScript_ReadVar(ctx);
+    MI_CpuFill8(shake, 0, sizeof(FrontierMapShake));
+    shake->x = x;
+    shake->y = y;
+    shake->interval = interval;
+    shake->count = count;
+    shake->task = SysTask_CreateOnMainQueue((SysTaskFunc)FrontierMap_ShakeTask, shake, 70000);
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitShakeMap(FrontierScriptContext *ctx) {
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitShake);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitShake(FrontierScriptContext *ctx) {
+    return Frontier_GetMap(ctx->frontierSystem->frontierWork)->shake.task == NULL;
+}
+
+// Sets the main screen's window 0 (or turns it off) after a delay.
+BOOL FrtCmd_SetWindowDelayed(FrontierScriptContext *ctx) {
+    FrontierMap *map = Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    FrontierMapWindowTask *data = &map->windowTask;
+    if (data->task) {
+        GF_ASSERT(FALSE);
+        SysTask_Destroy(data->task);
+    }
+    MI_CpuFill8(data, 0, sizeof(FrontierMapWindowTask));
+    data->left = FrontierScript_ReadVar(ctx);
+    data->top = FrontierScript_ReadVar(ctx);
+    data->right = FrontierScript_ReadVar(ctx);
+    data->bottom = FrontierScript_ReadVar(ctx);
+    data->delay = FrontierScript_ReadVar(ctx);
+    data->enable = FrontierScript_ReadVar(ctx);
+    data->task = SysTask_CreateOnMainQueue((SysTaskFunc)FrontierMap_WindowTask, data, 300);
+    return FALSE;
+}
+
+static BOOL FrtCmd_WaitWindowDelayed(FrontierScriptContext *ctx) {
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitWindowTask);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitWindowTask(FrontierScriptContext *ctx) {
+    return Frontier_GetMap(ctx->frontierSystem->frontierWork)->windowTask.task == NULL;
+}
+
+static BOOL FrtCmd_Dummy150(FrontierScriptContext *ctx) {
+    FrontierScriptContext_ReadHalfWord(ctx);
+    return FALSE;
+}
+
+static BOOL FrtCmd_CreatePartyMonSprite(FrontierScriptContext *ctx) {
+    FrontierMap *map = FrontierSystem_GetFrontierMap(ctx->frontierSystem);
+    u32 slot = FrontierScript_ReadVar(ctx);
+    int x = FrontierScript_ReadVar(ctx);
+    int y = FrontierScript_ReadVar(ctx);
+    int id = FrontierScriptContext_ReadHalfWord(ctx);
+    Pokemon *mon;
+    FrontierScriptContext_ReadHalfWord(ctx);
+    FrontierScriptContext_ReadHalfWord(ctx);
+    mon = Party_GetMonByIndex(SaveArray_Party_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData), slot);
+    FrontierMap_CreateMonSprite(map, mon, HEAP_ID_FIELD2, id, x, y, 0, 0, 8, 0);
+    return FALSE;
+}
+
+static BOOL FrtCmd_DeleteMonSprite(FrontierScriptContext *ctx) {
+    FrontierMap *map = FrontierSystem_GetFrontierMap(ctx->frontierSystem);
+    FrontierMap_DeleteMonSprite(map, FrontierScriptContext_ReadHalfWord(ctx));
+    return FALSE;
+}
+
+static BOOL FrtCmd_BrainIntro(FrontierScriptContext *ctx) {
+    FrontierMap *map = FrontierSystem_GetFrontierMap(ctx->frontierSystem);
+    u16 brain = FrontierScriptContext_ReadHalfWord(ctx);
+    FrontierCameraPos pos;
+    FrontierMap_GetCameraPos(map, (u16 *)&pos.x, (u16 *)&pos.y);
+    FrontierBrainIntro_Start(brain, map->bgConfig, map->spriteSystem, map->spriteManager, map->paletteData, &ctx->data[0], pos.x, pos.y);
+    Sound_SetSceneAndPlayBGM(5, SEQ_GS_BA_BRAIN, 1);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitBrainIntro);
+    return TRUE;
+}
+
+static BOOL FrontierScriptNative_WaitBrainIntro(FrontierScriptContext *ctx) {
+    Frontier_GetMap(ctx->frontierSystem->frontierWork);
+    return ctx->data[0] == TRUE;
+}
+
+static BOOL FrtCmd_IncGameStat(FrontierScriptContext *ctx) {
+    u16 stat = FrontierScriptContext_ReadHalfWord(ctx);
+    GameStats_Inc(Save_GameStats_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData), stat);
+    return FALSE;
+}
+
+static BOOL FrtCmd_AddGameStat(FrontierScriptContext *ctx) {
+    u16 stat = FrontierScriptContext_ReadHalfWord(ctx);
+    u16 value = FrontierScript_ReadVar(ctx);
+    GameStats_Add(Save_GameStats_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData), stat, value);
+    return FALSE;
+}
+
+static BOOL FrtCmd_AddGameScore(FrontierScriptContext *ctx) {
+    u16 score = FrontierScriptContext_ReadHalfWord(ctx);
+    GameStats_AddScore(Save_GameStats_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData), score);
+    return FALSE;
+}
+
+static BOOL FrtCmd_CheckPlayerOrPartnerVersion0(FrontierScriptContext *ctx) {
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    *result = Save_IsPlayerOrPartnerVersion0(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData);
+    return FALSE;
+}
+
+static BOOL FrtCmd_CheckBattleRecordAiFlagsValid(FrontierScriptContext *ctx) {
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    *result = BattleRecord_AreAiFlagsValid();
+    return FALSE;
+}
+
+static BOOL FrtCmd_UpdateWifiFriendDate(FrontierScriptContext *ctx) {
+    FriendRoster *roster = Save_FriendRoster_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData);
+    FriendRoster_UpdateDate(roster, WifiConnection_GetTargetFriendIndex());
+    return FALSE;
+}
+
+static BOOL FrtCmd_Dummy200(FrontierScriptContext *ctx) {
+    Save_Block23_Get(Frontier_GetLaunchArgs(ctx->frontierSystem->frontierWork)->saveData);
+    FrontierScript_ReadVar(ctx);
+    return FALSE;
+}
+
+static BOOL FrtCmd_SetWifiContinuousSend(FrontierScriptContext *ctx) {
+    Comm_SetWifiContinuousSend(FrontierScript_ReadVar(ctx));
+    return FALSE;
+}
+
+BOOL FrtCmd_LinkSyncOrAbort(FrontierScriptContext *ctx) {
+    u16 syncId = FrontierScript_ReadVar(ctx);
+    ctx->data[0] = syncId;
+    LinkSync_StartSync(syncId);
+    FrontierScriptContext_Pause(ctx, FrontierScriptNative_WaitLinkSyncOrAbort);
+    return TRUE;
+}
+
+// As FrontierScriptNative_WaitLinkSync, but also stops waiting (system->syncAborted) when the partner's data says so.
+static BOOL FrontierScriptNative_WaitLinkSyncOrAbort(FrontierScriptContext *ctx) {
+    BOOL result;
+    FrontierLinkLobby *lobby;
+    if (Comm_CountConnected() < 2) {
+        result = TRUE;
+    } else {
+        result = LinkSync_IsSynced(ctx->data[0]);
+    }
+    if (!result) {
+        lobby = Frontier_GetData(ctx->frontierSystem->frontierWork);
+        if (lobby != NULL && lobby->receiveCount != 0) {
+            if (lobby->partnerValue74 == 1 || lobby->partnerValue74 == FRONTIER_MENU_RESULT_CANCEL) {
+                ctx->frontierSystem->syncAborted = TRUE;
+                result = TRUE;
+            } else if (lobby->partnerValue74 == 0) {
+                if (PlayerProfile_GetVersion(CommPlayerInfo_GetProfile(Comm_GetLocalNetId() ^ 1)) == VERSION_PLATINUM) {
+                    lobby->receiveCount = 0;
+                    FrontierLinkLobby_SendValue74(lobby, 0);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+static BOOL FrtCmd_GetSyncAborted(FrontierScriptContext *ctx) {
+    u16 *result = FrontierScript_ReadVarPtr(ctx);
+    *result = ctx->frontierSystem->syncAborted;
+    return TRUE;
+}
+
+static BOOL FrtCmd_ClearSyncAborted(FrontierScriptContext *ctx) {
+    ctx->frontierSystem->syncAborted = FALSE;
+    return TRUE;
+}
+
+BOOL FrtCmd_MenuSetAlignRight(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    FrontierMenu_SetAlignRight(system->menu, ReadScriptByte(ctx));
+    return TRUE;
+}
+
+static BOOL FrtCmd_MenuSetAlignBottom(FrontierScriptContext *ctx) {
+    FrontierSystem *system = ctx->frontierSystem;
+    FrontierMenu_SetAlignBottom(system->menu, ReadScriptByte(ctx));
+    return TRUE;
+}

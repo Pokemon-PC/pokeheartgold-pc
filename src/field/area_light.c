@@ -1,0 +1,306 @@
+#include "field/area_light.h"
+
+#include "global.h"
+
+#include "field/model_attributes.h"
+
+#include "ascii_util.h"
+#include "gf_rtc.h"
+#include "heap.h"
+#include "system.h"
+
+#define AREA_LIGHT_FILE_COUNT 5
+
+// One time slot of an area light file (data/*light.txt): until endTime (seconds since midnight / 2), the four
+// lights (enabled in lightMask) and the material colors to use.
+struct AreaLightEntry {
+    u32 endTime;
+    u8 lightMask;
+    u8 padding05;
+    GXRgb lightColors[4];
+    s16 lightDirs[4][3];
+    GXRgb diffuse;
+    GXRgb ambient;
+    GXRgb specular;
+    GXRgb emission;
+    u16 padding2E;
+};
+
+struct AreaLightManager {
+    u32 count;
+    AreaLightEntry *entries;
+    u32 activeIndex;
+    ModelAttributes *modelAttributes;
+    u32 applyChanges;
+};
+
+static char sAreaLightFileDun20_01[24] = "data/dun20_01light.txt";
+
+static char sAreaLightFileArea01[24] = "data/area01light.txt";
+
+static char sAreaLightFileArea02[24] = "data/area02light.txt";
+
+static char sAreaLightFileArea00[24] = "data/area00light.txt";
+
+static char sAreaLightFileDun20_02[24] = "data/dun20_02light.txt";
+
+static const char *const sAreaLightFilePaths[5] = {
+    sAreaLightFileArea00,
+    sAreaLightFileArea01,
+    sAreaLightFileArea02,
+    sAreaLightFileDun20_01,
+    sAreaLightFileDun20_02,
+};
+
+AreaLightManager *AreaLightManager_New(ModelAttributes *areaModelAttributes, const u32 archiveID) {
+    AreaLightManager *areaLightManager;
+    s32 sec;
+    u32 i;
+    AreaLightEntry *entry;
+
+    GF_ASSERT(archiveID < AREA_LIGHT_FILE_COUNT);
+    areaLightManager = Heap_Alloc(HEAP_ID_FIELD1, sizeof(AreaLightManager));
+    areaLightManager->modelAttributes = areaModelAttributes;
+    areaLightManager->count = AreaLight_LoadEntries(sAreaLightFilePaths[archiveID], &areaLightManager->entries);
+    areaLightManager->activeIndex = 0;
+    sec = GF_RTC_TimeToSec() / 2;
+    i = 0;
+    if (i < areaLightManager->count) {
+        entry = areaLightManager->entries;
+        do {
+            if (entry->endTime > (u32)sec) {
+                areaLightManager->activeIndex = i;
+                break;
+            }
+            i++;
+            entry++;
+        } while (i < areaLightManager->count);
+    }
+    areaLightManager->applyChanges = 1;
+    AreaLightManager_ApplyActiveEntry(areaLightManager);
+    return areaLightManager;
+}
+
+void AreaLightManager_Free(AreaLightManager **areaLightManager) {
+    GF_ASSERT(areaLightManager != NULL);
+    AreaLight_FreeEntries(&(*areaLightManager)->entries);
+    Heap_FreeExplicit(HEAP_ID_FIELD1, *areaLightManager);
+    *areaLightManager = NULL;
+}
+
+void AreaLightManager_UpdateActiveTemplate(AreaLightManager *areaLightManager) {
+    s32 sec;
+    u32 prevEndTime;
+    s32 prev;
+
+    GF_ASSERT(areaLightManager != NULL);
+    sec = GF_RTC_TimeToSec() / 2;
+    if (areaLightManager->count <= 1) {
+        return;
+    }
+    prev = areaLightManager->activeIndex - 1;
+    if (prev >= 0) {
+        prevEndTime = areaLightManager->entries[prev].endTime;
+    } else {
+        prevEndTime = 0;
+    }
+    if (sec >= (s32)areaLightManager->entries[areaLightManager->activeIndex].endTime || sec < (s32)prevEndTime) {
+        areaLightManager->activeIndex++;
+        if (areaLightManager->activeIndex >= areaLightManager->count) {
+            areaLightManager->activeIndex = 0;
+        }
+        if (areaLightManager->applyChanges != 0) {
+            AreaLightManager_ApplyActiveEntry(areaLightManager);
+        }
+    }
+}
+
+void AreaLight_ApplyEntry(AreaLightEntry *entry, ModelAttributes *modelAttributes) {
+    int i;
+    const s16 *dir;
+    const u16 *color;
+
+    // dir[7..9] = lightDirs[i], color[3] = lightColors[i]
+    i = 0;
+    dir = (const s16 *)entry;
+    color = (const u16 *)entry;
+    for (; i < 4; i++, dir += 3, color++) {
+        if (entry->lightMask & (1 << i)) {
+            ModelAttributes_SetLightVector(modelAttributes, i, dir[7], dir[8], dir[9]);
+            ModelAttributes_SetLightColor(modelAttributes, i, color[3]);
+        } else {
+            ModelAttributes_SetLightVector(modelAttributes, i, 0, 0, 0);
+            ModelAttributes_SetLightColor(modelAttributes, i, 0);
+        }
+    }
+    ModelAttributes_SetDiffuse(modelAttributes, entry->diffuse, FALSE, FALSE);
+    ModelAttributes_SetAmbient(modelAttributes, entry->ambient, TRUE);
+    ModelAttributes_SetSpecular(modelAttributes, entry->specular, FALSE, FALSE);
+    ModelAttributes_SetEmission(modelAttributes, entry->emission, TRUE);
+}
+
+void AreaLightManager_ApplyActiveEntry(AreaLightManager *areaLightManager) {
+    AreaLight_ApplyEntry(&areaLightManager->entries[areaLightManager->activeIndex], areaLightManager->modelAttributes);
+}
+
+void AreaLight_ClearMaterialModifyFlags(NNSG3dResMdl *model) {
+    NNSi_G3dModifyMatFlag(model, FALSE, NNS_G3D_MATFLAG_DIFFUSE);
+    NNSi_G3dModifyMatFlag(model, FALSE, NNS_G3D_MATFLAG_AMBIENT);
+    NNSi_G3dModifyMatFlag(model, FALSE, NNS_G3D_MATFLAG_SPECULAR);
+    NNSi_G3dModifyMatFlag(model, FALSE, NNS_G3D_MATFLAG_EMISSION);
+}
+
+// Each entry is 10 lines: "endTime,...", 4 light lines, 4 material color lines and one more; the file ends with "EOF".
+int AreaLight_LoadEntries(const char *path, AreaLightEntry **entriesOut) {
+    s8 line[256];
+    s8 field[256];
+    const s8 *cursor;
+    long i;
+    const s8 *data;
+    AreaLightEntry *entry;
+    int size;
+    int count;
+    int j;
+
+    data = Sys_AllocAndReadFile(HEAP_ID_FIELD1, path);
+    cursor = data;
+    count = 0;
+    do {
+        cursor = Ascii_GetDelim(cursor, line, '\r');
+        if (line[0] != 'E' || line[1] != 'O' || line[2] != 'F') {
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            cursor = Ascii_GetDelim(cursor, line, '\r');
+            count++;
+        }
+    } while (line[0] != 'E' || line[1] != 'O' || line[2] != 'F');
+    size = count * sizeof(AreaLightEntry);
+    *entriesOut = Heap_Alloc(HEAP_ID_FIELD1, size);
+    MI_CpuFill8(*entriesOut, 0, size);
+    cursor = data;
+    for (i = 0; i < count; i++) {
+        entry = &(*entriesOut)[i];
+        cursor = Ascii_GetDelim(cursor, line, '\r');
+        Ascii_GetDelim(line, field, ',');
+        entry->endTime = Ascii_StrToL(field);
+        for (j = 0; j < 4; j++) {
+            cursor = AreaLight_ParseLight(cursor, &entry->lightColors[j], entry->lightDirs[j]);
+            if (entry->lightColors[j] != 0xFFFF) {
+                entry->lightMask |= 1 << j;
+            } else {
+                entry->lightColors[j] = 0;
+            }
+        }
+        cursor = AreaLight_ParseColor(cursor, &entry->diffuse);
+        cursor = AreaLight_ParseColor(cursor, &entry->ambient);
+        cursor = AreaLight_ParseColor(cursor, &entry->specular);
+        cursor = AreaLight_ParseColor(cursor, &entry->emission);
+        cursor = Ascii_GetDelim(cursor, line, '\r');
+    }
+    Heap_FreeExplicit(HEAP_ID_FIELD1, (void *)data);
+    return count;
+}
+
+void AreaLight_FreeEntries(AreaLightEntry **entries) {
+    Heap_FreeExplicit(HEAP_ID_FIELD1, *entries);
+    *entries = NULL;
+}
+
+// "enabled,r,g,b,x,y,z": color 0xFFFF when the light is off; the direction is clamped to [-1, 1] (fx16).
+const s8 *AreaLight_ParseLight(const s8 *src, u16 *colorOut, s16 *dirOut) {
+    s8 line[256];
+    s8 field[256];
+    s32 dir[3];
+    u16 rgb[3];
+    const s8 *cursor;
+    int i;
+
+    src = Ascii_GetDelim(src, line, '\r');
+    cursor = Ascii_GetDelim(line, field, ',');
+    if (Ascii_StrToL(field) == 1) {
+        for (i = 0; i < 3; i++) {
+            cursor = Ascii_GetDelim(cursor, field, ',');
+            rgb[i] = Ascii_StrToL(field);
+        }
+        *colorOut = rgb[0] | (rgb[1] << 5) | (rgb[2] << 10);
+        for (i = 0; i < 3; i++) {
+            cursor = Ascii_GetDelim(cursor, field, ',');
+            dir[i] = Ascii_StrToL(field);
+        }
+        dirOut[0] = dir[0];
+        dirOut[1] = dir[1];
+        dirOut[2] = dir[2];
+        if (dirOut[0] > FX16_ONE) {
+            dirOut[0] = FX16_ONE;
+        }
+        if (dirOut[0] < -FX16_ONE) {
+            dirOut[0] = -FX16_ONE;
+        }
+        if (dirOut[1] > FX16_ONE) {
+            dirOut[1] = FX16_ONE;
+        }
+        if (dirOut[1] < -FX16_ONE) {
+            dirOut[1] = -FX16_ONE;
+        }
+        if (dirOut[2] > FX16_ONE) {
+            dirOut[2] = FX16_ONE;
+        }
+        if (dirOut[2] < -FX16_ONE) {
+            dirOut[2] = -FX16_ONE;
+        }
+    } else {
+        *colorOut = 0xFFFF;
+    }
+    return src;
+}
+
+// "r,g,b"
+const s8 *AreaLight_ParseColor(const s8 *src, u16 *dest) {
+    s8 line[256];
+    s8 field[256];
+    u16 rgb[3];
+    const s8 *cursor;
+    int i;
+
+    src = Ascii_GetDelim(src, line, '\r');
+    cursor = line;
+    for (i = 0; i < 3; i++) {
+        cursor = Ascii_GetDelim(cursor, field, ',');
+        rgb[i] = Ascii_StrToL(field);
+    }
+    *dest = rgb[0] | (rgb[1] << 5) | (rgb[2] << 10);
+    return src;
+}
+
+void LoadAreaOrDungeonLightTxt(u32 archiveID, ModelAttributes *modelAttributes) {
+    AreaLightEntry *entries;
+    s32 count;
+    s32 sec;
+    s32 i;
+    u32 index;
+    AreaLightEntry *entry;
+
+    GF_ASSERT(archiveID < AREA_LIGHT_FILE_COUNT);
+    count = AreaLight_LoadEntries(sAreaLightFilePaths[archiveID], &entries);
+    sec = GF_RTC_TimeToSec() / 2;
+    i = 0;
+    if (count > 0) {
+        entry = entries;
+        do {
+            if (entry->endTime > (u32)sec) {
+                index = i;
+                break;
+            }
+            i++;
+            entry++;
+        } while (i < count);
+    }
+    AreaLight_ApplyEntry(&entries[index], modelAttributes);
+    AreaLight_FreeEntries(&entries);
+}

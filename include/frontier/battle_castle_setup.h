@@ -1,0 +1,23 @@
+#ifndef POKEHEARTGOLD_FRONTIER_BATTLE_CASTLE_SETUP_H
+#define POKEHEARTGOLD_FRONTIER_BATTLE_CASTLE_SETUP_H
+
+#include "frontier/battle_castle_data.h"
+#include "frontier/frontier.h"
+
+#define CASTLE_VALET_SILVER 313 // trainer ids of the Castle Valet (FRONTIER_BRAIN_BATTLE_SILVER / _GOLD)
+#define CASTLE_VALET_GOLD   314
+
+void BattleCastle_GetRoundTrainerIds(u32 type, u32 round, u16 *trainerIds, int count);
+int BattleCastle_GetPartySize(int type, int both);
+u8 BattleCastle_GetOpponentMonCount(int type, int both);
+BattleSetup *BattleCastle_NewBattleSetup(BattleCastleData *data, FrontierLaunchArgs *args);
+int BattleCastle_GetMonLevel(BattleCastleData *data);
+BOOL BattleCastle_IsMultiType(int type);
+void BattleCastle_ReviveParty(Party *party);
+void BattleCastle_AddMonToParty(BattleCastleData *data, Party *party, Pokemon *mon);
+void BattleCastle_SetOpponentParty(BattleCastleData *data);
+u16 BattleCastle_GetRound(BattleCastleData *data);
+void BattleCastle_DrawRoundTiles(BgConfig *bgConfig, BattleCastleData *data, int bgId);
+void BattleCastle_SpendPoints(FrontierSave *frontierSave, int type, int amount);
+
+#endif // POKEHEARTGOLD_FRONTIER_BATTLE_CASTLE_SETUP_H

@@ -1,0 +1,90 @@
+#ifndef POKEHEARTGOLD_CONSTANTS_WIFI_PLAZA_H
+#define POKEHEARTGOLD_CONSTANTS_WIFI_PLAZA_H
+
+// Players in one lobby (the lobby slots)
+#define WIFI_PLAZA_MAX_PLAYERS 20
+
+// WiFiPlazaGroups: nine groups of three places (place = group * WIFI_PLAZA_GROUP_SEATS + seat)
+#define WIFI_PLAZA_GROUP_COUNT 9
+#define WIFI_PLAZA_GROUP_SEATS 3
+#define WIFI_PLAZA_PLACE_COUNT (WIFI_PLAZA_GROUP_COUNT * WIFI_PLAZA_GROUP_SEATS)
+
+// WiFiPlazaTalkSession.state: how far a talk between two players has got, and whose turn it is
+enum WiFiPlazaTalkState {
+    WIFI_PLAZA_TALK_STATE_NONE,
+    WIFI_PLAZA_TALK_STATE_REQUESTED,
+    WIFI_PLAZA_TALK_STATE_ASKER_TURN,
+    WIFI_PLAZA_TALK_STATE_ANSWERER_TURN,
+    WIFI_PLAZA_TALK_STATE_ENDED,
+};
+
+// WiFiPlazaTalkSession.role
+enum WiFiPlazaTalkRole {
+    WIFI_PLAZA_TALK_ROLE_NONE,
+    WIFI_PLAZA_TALK_ROLE_ASKER,
+    WIFI_PLAZA_TALK_ROLE_ANSWERER,
+};
+
+// WiFiPlazaLobbyClient.surveySubmitState: the own survey answer is not sent, sent and waiting for the server, or
+// taken by the server
+enum WiFiPlazaSurveySubmitState {
+    WIFI_PLAZA_SURVEY_SUBMIT_NONE,
+    WIFI_PLAZA_SURVEY_SUBMIT_SENT,
+    WIFI_PLAZA_SURVEY_SUBMIT_DONE,
+};
+
+// Lobby schedule events (WiFiPlaza_OnLobbyEvent): the room locks, the steps of the three lighting sequences, the
+// mini-games close, the fireworks, the parade and the closing
+enum WiFiPlazaLobbyEvent {
+    WIFI_PLAZA_EVENT_LOCK,
+    WIFI_PLAZA_EVENT_NEON_A0,
+    WIFI_PLAZA_EVENT_NEON_A1,
+    WIFI_PLAZA_EVENT_NEON_A2,
+    WIFI_PLAZA_EVENT_NEON_A3,
+    WIFI_PLAZA_EVENT_NEON_A4,
+    WIFI_PLAZA_EVENT_NEON_A5,
+    WIFI_PLAZA_EVENT_NEON_B0,
+    WIFI_PLAZA_EVENT_NEON_B1,
+    WIFI_PLAZA_EVENT_NEON_B2,
+    WIFI_PLAZA_EVENT_NEON_B3,
+    WIFI_PLAZA_EVENT_NEON_C0,
+    WIFI_PLAZA_EVENT_NEON_C1,
+    WIFI_PLAZA_EVENT_NEON_C2,
+    WIFI_PLAZA_EVENT_NEON_C3,
+    WIFI_PLAZA_EVENT_MINIGAME_END,
+    WIFI_PLAZA_EVENT_FIREWORKS_START,
+    WIFI_PLAZA_EVENT_FIREWORKS_END,
+    WIFI_PLAZA_EVENT_PARADE,
+    WIFI_PLAZA_EVENT_CLOSE,
+};
+
+// WiFiPlazaLobbyClient_GetScheduleValue fields: the room settings of the schedule and the times of three events
+enum WiFiPlazaScheduleField {
+    WIFI_PLAZA_SCHEDULE_LOCK_TIME = 0,
+    WIFI_PLAZA_SCHEDULE_ROOM_TYPE = 2,
+    WIFI_PLAZA_SCHEDULE_SEASON,
+    WIFI_PLAZA_SCHEDULE_ARCEUS,
+    WIFI_PLAZA_SCHEDULE_CLOSE_TIME,
+    WIFI_PLAZA_SCHEDULE_FIREWORKS_START_TIME,
+    WIFI_PLAZA_SCHEDULE_FIREWORKS_END_TIME,
+};
+
+// What a player is doing in the plaza
+enum WiFiPlazaActivity {
+    WIFI_PLAZA_ACTIVITY_NONE,
+    WIFI_PLAZA_ACTIVITY_FREE,
+    WIFI_PLAZA_ACTIVITY_SWALOT_PLOP,
+    WIFI_PLAZA_ACTIVITY_MIME_JR_TOP,
+    WIFI_PLAZA_ACTIVITY_WOBBUFFET_POP,
+    WIFI_PLAZA_ACTIVITY_FOOTPRINT_STAMP_BOARD_0,
+    WIFI_PLAZA_ACTIVITY_FOOTPRINT_STAMP_BOARD_1,
+    WIFI_PLAZA_ACTIVITY_VISITOR_PROFILES,
+    WIFI_PLAZA_ACTIVITY_PLAZA_NEWS,
+    WIFI_PLAZA_ACTIVITY_TALK,
+    WIFI_PLAZA_ACTIVITY_PARADE_FLOAT,
+    WIFI_PLAZA_ACTIVITY_EXIT,
+    WIFI_PLAZA_ACTIVITY_GAME_ENTRY,
+    WIFI_PLAZA_ACTIVITY_SURVEY,
+};
+
+#endif // POKEHEARTGOLD_CONSTANTS_WIFI_PLAZA_H
