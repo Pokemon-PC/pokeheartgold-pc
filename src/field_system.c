@@ -81,6 +81,7 @@ void pc_log(const char *fmt, ...);
 // (experience, stats, moves learned up to N) and heals it. Test aid only.
 #include "party.h"
 #include "pokemon.h"
+#include <stdlib.h>
 void InitBoxMonMoveset(BoxPokemon *boxMon);
 // almostNext: experience one point short of level+1 (the next win levels up).
 void pc_test_set_party_level(int level, BOOL almostNext) {
@@ -94,6 +95,13 @@ void pc_test_set_party_level(int level, BOOL almostNext) {
             continue;
         }
         u32 species = GetMonData(mon, MON_DATA_SPECIES, NULL);
+        // PHG_TEST_SPECIES=N: also turn every party Pokémon into species N
+        // (scripted tests against strong trainers).
+        const char *forced = getenv("PHG_TEST_SPECIES");
+        if (forced != NULL && atoi(forced) > 0) {
+            species = (u32)atoi(forced);
+            SetMonData(mon, MON_DATA_SPECIES, &species);
+        }
         u32 exp = almostNext && level < 100 ? GetMonExpBySpeciesAndLevel(species, level + 1) - 1
                                             : GetMonExpBySpeciesAndLevel(species, level);
         SetMonData(mon, MON_DATA_EXPERIENCE, &exp);
@@ -153,9 +161,13 @@ void pc_test_set_move(int slot, u16 move) {
     }
     Pokemon *mon = Party_GetMonByIndex(party, slot);
     SetMonData(mon, MON_DATA_MOVE1, &move);
-    u32 pp = 30;
+    u32 pp = 60;   // enough for the Elite Four in one run
     SetMonData(mon, MON_DATA_MOVE1_PP, &pp);
     pc_log("test: party slot %d move 1 = %u", slot, (unsigned)move);
+    // Scripted battles: no "will you switch?" question, fast text.
+    Options *options = Save_PlayerData_GetOptionsAddr(sFieldSysPtr->saveData);
+    Options_SetBattleStyle(options, 1);   // set
+    Options_SetTextSpeed(options, 2);     // fast
 }
 
 // Test hook PHG_TEST_WARP=MAP:X:Z: warp like the script command Warp
@@ -182,6 +194,32 @@ void pc_test_warp(u32 mapId, u32 x, u32 z) {
     sPcWarpArgs[2] = z;
     pc_log("test: warp to map %u (%u, %u)", (unsigned)mapId, (unsigned)x, (unsigned)z);
     FieldSystem_CreateTask(sFieldSysPtr, PcTestTask_Warp, NULL);
+}
+
+// Test hook PHG_TEST_TRAINER=ID[:FRAME][,...]: start a trainer battle from
+// the field, like the script command TrainerBattle (bypasses story gates).
+#include "encounter.h"
+static u32 sPcTrainerId;
+static u32 sPcTrainerWinFlag;
+static BOOL PcTestTask_Trainer(TaskManager *taskman) {
+    u32 *state = TaskManager_GetStatePtr(taskman);
+    if (*state == 0) {
+        *state = 1;
+        SetupAndStartTrainerBattle(taskman, sPcTrainerId, 0, 0, 0, 0, HEAP_ID_FIELD2, &sPcTrainerWinFlag);
+        return FALSE;
+    }
+    pc_log("test: trainer %u battle over, win flag %u", (unsigned)sPcTrainerId, (unsigned)sPcTrainerWinFlag);
+    return TRUE;
+}
+
+void pc_test_trainer_battle(u32 trainerId) {
+    if (sFieldSysPtr == NULL) {
+        return;
+    }
+    sPcTrainerId = trainerId;
+    sPcTrainerWinFlag = 0;
+    pc_log("test: trainer battle %u", (unsigned)trainerId);
+    FieldSystem_CreateTask(sFieldSysPtr, PcTestTask_Trainer, NULL);
 }
 
 // Test hooks: the field map is loaded and running (not in a transition or

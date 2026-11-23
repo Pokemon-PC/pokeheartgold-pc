@@ -26,6 +26,7 @@ __attribute__((weak)) BOOL pc_test_map_dump(int rx, int rz);
 __attribute__((weak)) BOOL pc_test_field_idle(void);
 __attribute__((weak)) void pc_test_set_party_level(int level, BOOL almostNext);
 __attribute__((weak)) void pc_test_warp(u32 mapId, u32 x, u32 z);
+__attribute__((weak)) void pc_test_trainer_battle(u32 trainerId);
 __attribute__((weak)) void pc_test_egg_ready(void);
 __attribute__((weak)) void pc_test_give_item(u16 item, u16 qty);
 __attribute__((weak)) void pc_test_set_badges(int n);
@@ -561,6 +562,30 @@ void pc_nitro_vblank(void) {
             && pc_test_warp != NULL) {
             pc_test_warp(warp_map[warp_next], warp_x[warp_next], warp_z[warp_next]);
             warp_next++;
+        }
+    }
+    {
+        /* PHG_TEST_TRAINER=ID[:FRAME][,...]: start trainer battles from the
+         * field (each once the field is idle, after FRAME). */
+        static int tr_n = -1, tr_next;
+        static unsigned tr_id[16], tr_at[16];
+        if (tr_n < 0) {
+            const char *w = getenv("PHG_TEST_TRAINER");
+            tr_n = 0;
+            while (w != NULL && tr_n < 16) {
+                tr_at[tr_n] = 0;
+                if (sscanf(w, "%u:%u", &tr_id[tr_n], &tr_at[tr_n]) < 1) {
+                    break;
+                }
+                tr_n++;
+                w = strchr(w, ',');
+                w = w != NULL ? w + 1 : NULL;
+            }
+        }
+        if (tr_next < tr_n && frames >= tr_at[tr_next] && pc_test_field_idle != NULL && pc_test_field_idle()
+            && pc_test_trainer_battle != NULL) {
+            pc_test_trainer_battle(tr_id[tr_next]);
+            tr_next++;
         }
     }
     {
