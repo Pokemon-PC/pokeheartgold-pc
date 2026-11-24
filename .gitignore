@@ -115,6 +115,7 @@ save.bin
 save.bin.tmp
 # Game data extracted from your own ROM: never commit or share
 pc_data/
+pc_data_ss/
 dist/
 build-clang/
 build-*/
