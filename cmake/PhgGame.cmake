@@ -115,6 +115,31 @@ add_custom_command(
     COMMENT "Generating overlay IDs from main.lsf"
     VERBATIM)
 
+# English layer (language choice): the repository's English text and files,
+# next to the data extracted from the player's ROM (tools/pc_port/build_lang_en.py).
+if(PHG_GAME_VERSION STREQUAL "SOULSILVER")
+    set(PHG_DATA_DIR_NAME pc_data_ss)
+else()
+    set(PHG_DATA_DIR_NAME pc_data)
+endif()
+set(PHG_LANG_TEMPLATE "${PROJECT_SOURCE_DIR}/${PHG_DATA_DIR_NAME}/fr" CACHE PATH
+    "Data extracted from your ROM, used as the template of the English layer")
+set(PHG_LANG_EN_DIR ${PROJECT_SOURCE_DIR}/${PHG_DATA_DIR_NAME}/en)
+if(EXISTS ${PHG_LANG_TEMPLATE}/a/0/2/7)
+    add_custom_command(
+        OUTPUT ${PHG_LANG_EN_DIR}/.built
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/pc_port/build_lang_en.py
+                --template ${PHG_LANG_TEMPLATE} --en-msg ${PHG_EN_MSG_DIR}
+                --files ${PROJECT_SOURCE_DIR}/files --out ${PHG_LANG_EN_DIR}
+                --stamp ${PHG_LANG_EN_DIR}/.built
+        DEPENDS ${PHG_GENERATED_DIR}/msg.stamp ${PROJECT_SOURCE_DIR}/tools/pc_port/build_lang_en.py
+        COMMENT "English data layer -> ${PHG_DATA_DIR_NAME}/en"
+        VERBATIM)
+    add_custom_target(phg_lang_en ALL DEPENDS ${PHG_LANG_EN_DIR}/.built)
+else()
+    message(STATUS "No extracted ROM in ${PHG_LANG_TEMPLATE}: English layer not built")
+endif()
+
 add_custom_target(phg_generated_headers DEPENDS
     ${PHG_GENERATED_DIR}/nitro/fx/fx_const.h
     ${PHG_GENERATED_DIR}/msg.stamp

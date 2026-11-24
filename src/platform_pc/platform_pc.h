@@ -181,6 +181,7 @@ typedef struct PcConfig {
     bool    stretch;
     int     filter;                                    /* PC_FILTER_* */
     int     windowScale;
+    char    language[8];                               /* [options] auto, fr, en... */
 } PcConfig;
 void            pc_config_load(void);
 const PcConfig *pc_config(void);

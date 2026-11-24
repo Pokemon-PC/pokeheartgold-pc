@@ -36,7 +36,7 @@
 /* Search path, highest priority first (e.g. mods/, pc_data/fr, files/).
  * A Nitro path resolves to the first layer that has it as a regular file,
  * so a mod only needs to contain the files it changes. */
-#define PC_FS_MAX_ROOTS 8
+#define PC_FS_MAX_ROOTS 12
 static char s_roots[PC_FS_MAX_ROOTS][PC_PATH_MAX];
 static int  s_root_count;
 
@@ -130,6 +130,19 @@ bool pc_fs_setup_layers(const char *repo_dir, const char *lang) {
     s_root_count = 0;
     for (unsigned i = 0; i < sizeof fmt / sizeof fmt[0]; i++) {
         snprintf(path, sizeof path, fmt[i], repo_dir, lang);
+        if (is_directory(path)) {
+            pc_fs_add_root(path);
+        }
+    }
+    /* Language layers built from the repository (pc_data/en) only hold what
+     * differs by language: the rest of the game comes from the data of the
+     * player's ROM, whatever its language. */
+    static const char *const k_rom_langs[] = { "fr", "en", "de", "it", "es", "ja", "ko" };
+    for (unsigned i = 0; i < sizeof k_rom_langs / sizeof k_rom_langs[0]; i++) {
+        if (strcmp(k_rom_langs[i], lang) == 0) {
+            continue;
+        }
+        snprintf(path, sizeof path, "%s/" PC_DATA_DIR "/%s", repo_dir, k_rom_langs[i]);
         if (is_directory(path)) {
             pc_fs_add_root(path);
         }

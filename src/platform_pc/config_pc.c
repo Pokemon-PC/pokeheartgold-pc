@@ -92,6 +92,9 @@ static const char *const s_default_ini =
     "fast_forward_speed = 4\n"
     "; gamepad analog stick acts as the D-pad (1 = yes)\n"
     "analog_stick_dpad = 1\n"
+    "; language: auto (the language of your ROM), fr, en. English comes from\n"
+    "; the game's source (pc_data/en), the rest from your ROM.\n"
+    "language = auto\n"
     "\n"
     "[display]\n"
     "; start in fullscreen (1 = yes); F11 switches at any time\n"
@@ -206,6 +209,8 @@ static void parse(const char *text) {
                 if (s_cfg.fastForwardSpeed == 1) s_cfg.fastForwardSpeed = 2;
             } else if (SDL_strcasecmp(key, "analog_stick_dpad") == 0) {
                 s_cfg.analogDpad = atoi(value) != 0;
+            } else if (SDL_strcasecmp(key, "language") == 0) {
+                SDL_strlcpy(s_cfg.language, value, sizeof s_cfg.language);
             } else {
                 pc_warn("config: unknown option '%s'", key);
             }
@@ -261,6 +266,7 @@ void pc_config_load(void) {
     }
     loaded = true;
     memset(&s_cfg, 0, sizeof s_cfg);
+    SDL_strlcpy(s_cfg.language, "auto", sizeof s_cfg.language);
     parse(s_default_ini);   /* defaults first, then the user's file on top */
 
     const char *candidates[3] = { getenv("PHG_CONFIG"), "config.ini", NULL };

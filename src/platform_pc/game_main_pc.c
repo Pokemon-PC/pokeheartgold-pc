@@ -17,11 +17,21 @@
  */
 #include "nitro_pc.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 void NitroMain(void);
+
+static int is_auto(const char *s) {
+    const char *a = "auto";
+    while (*s && *a && tolower((unsigned char)*s) == *a) {
+        s++;
+        a++;
+    }
+    return *s == '\0' && *a == '\0';
+}
 
 static void run_game(void *unused) {
     (void)unused;
@@ -63,6 +73,9 @@ int main(int argc, char **argv) {
     pc_input_init();
     pc_audio_init();
     pc_nitro_set_window(TRUE);
+    if (lang == NULL && cfg->language[0] != '\0' && !is_auto(cfg->language)) {
+        lang = cfg->language;              /* config.ini [options] language */
+    }
     if (data == NULL) {
         lang = pc_install_prepare(lang);   /* extracts the player's ROM on first run */
         if (lang == NULL) {

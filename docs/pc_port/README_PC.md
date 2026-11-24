@@ -28,6 +28,14 @@ cartouche SoulSilver. Ses fichiers sont séparés : `pc_data_ss/`, `mods_ss/`,
 `save_ss.bin`. Les deux jeux peuvent partager un dossier, ROM comprises :
 chacun prend la sienne (code de jeu IPK… pour HeartGold, IPG… pour SoulSilver).
 
+### Langue
+
+Le jeu prend la langue de votre ROM. Pour jouer dans l'autre langue
+(anglais avec une ROM française), réglez `language = en` dans `config.ini`
+(section `[options]`), ou lancez avec `--lang en` : les textes anglais viennent
+du code source du jeu (`pc_data/en`), le reste de votre ROM. Le logo du titre
+et quelques images restent dans la langue de la ROM.
+
 ### Commandes par défaut
 
 | DS | Clavier | Manette |
@@ -88,6 +96,14 @@ package `PokemonSoulSilver-PC-…`) and your SoulSilver cartridge ROM. Its files
 are kept apart: `pc_data_ss/`, `mods_ss/`, `save_ss.bin`. Both games can share
 one folder, ROMs included: each picks its own (game code IPK… for HeartGold,
 IPG… for SoulSilver).
+
+### Language
+
+The game uses your ROM's language. To play in the other one (English with a
+French ROM), set `language = en` in `config.ini` (`[options]`) or start with
+`--lang en`: English text comes from the game's source code (`pc_data/en`),
+everything else from your ROM. The title logo and a few pictures keep the ROM's
+language.
 
 ### Default controls
 

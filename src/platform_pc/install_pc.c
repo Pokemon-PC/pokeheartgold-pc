@@ -148,6 +148,8 @@ const char *pc_install_base_dir(void) {
     return s_base;
 }
 
+static const char *const k_langs[] = { "fr", "en", "de", "it", "es", "ja", "ko" };
+
 static const char *lang_from_code(char c) {
     switch (c) {
     case 'F': return "fr";
@@ -286,20 +288,39 @@ static const char *extract_rom(const char *base, const char *rom_path) {
     return lang;
 }
 
-static const char *const k_langs[] = { "fr", "en", "de", "it", "es", "ja", "ko" };
+
+/* pc_data/<lang> holds a whole extracted ROM (not just a language layer
+ * built from the repository, like pc_data/en). */
+static bool has_rom_data(const char *base, const char *lang) {
+    char probe[1200];
+    snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR SEP "%s" SEP "a" SEP "0" SEP "0" SEP "2", base, lang);
+    return file_exists(probe);
+}
+
+static bool any_rom_data(const char *base) {
+    for (unsigned i = 0; i < sizeof k_langs / sizeof k_langs[0]; i++) {
+        if (has_rom_data(base, k_langs[i])) {
+            return true;
+        }
+    }
+    return false;
+}
 
 const char *pc_install_prepare(const char *requested_lang) {
     const char *base = pc_install_base_dir();
     char probe[1200], rom[1100];
     if (requested_lang != NULL) {
         snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR SEP "%s", base, requested_lang);
-        if (dir_exists(probe)) {
+        if (dir_exists(probe) && any_rom_data(base)) {
+            return requested_lang;           /* the ROM data fills in the rest */
+        }
+        if (dir_exists(probe) && find_rom(base, rom, sizeof rom) && extract_rom(base, rom) != NULL) {
             return requested_lang;
         }
     } else {
+        /* auto: the language of the player's ROM */
         for (unsigned i = 0; i < sizeof k_langs / sizeof k_langs[0]; i++) {
-            snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR SEP "%s", base, k_langs[i]);
-            if (dir_exists(probe)) {
+            if (has_rom_data(base, k_langs[i])) {
                 return k_langs[i];
             }
         }
@@ -344,5 +365,4 @@ void pc_install_save_path(const char *name, char *out, size_t n) {
         exe_dir(exe, sizeof exe);
         snprintf(out, n, "%s" SEP "%s", exe, name);
     }
-    (void)file_exists;
 }
