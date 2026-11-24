@@ -35,8 +35,25 @@ add_custom_command(
 # Host tools from the repository used to generate headers (no Metrowerks).
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 enable_language(CXX)
-set(PHG_HOSTTOOLS_DIR ${CMAKE_BINARY_DIR}/hosttools)
-foreach(_tool msgenc jsonproc csv2bin)
+# PHG_PREBUILT_HOSTTOOLS: reuse msgenc/jsonproc/csv2bin from another build
+# (e.g. build-clang/hosttools when building the other game version). Also a
+# workaround when an antivirus holds freshly built tools on their first run.
+set(PHG_PREBUILT_HOSTTOOLS "" CACHE PATH "Folder with msgenc/jsonproc/csv2bin to use instead of building them")
+if(PHG_PREBUILT_HOSTTOOLS)
+    set(PHG_HOSTTOOLS_DIR ${PHG_PREBUILT_HOSTTOOLS})
+    set(_phg_ext "${CMAKE_EXECUTABLE_SUFFIX}")
+    set(_phg_dep_msgenc ${PHG_HOSTTOOLS_DIR}/msgenc${_phg_ext})
+    set(_phg_dep_jsonproc ${PHG_HOSTTOOLS_DIR}/jsonproc${_phg_ext})
+    set(_phg_dep_csv2bin ${PHG_HOSTTOOLS_DIR}/csv2bin${_phg_ext})
+    set(_phg_tools_to_build)
+else()
+    set(PHG_HOSTTOOLS_DIR ${CMAKE_BINARY_DIR}/hosttools)
+    set(_phg_dep_msgenc phg_tool_msgenc)
+    set(_phg_dep_jsonproc phg_tool_jsonproc)
+    set(_phg_dep_csv2bin phg_tool_csv2bin)
+    set(_phg_tools_to_build msgenc jsonproc csv2bin)
+endif()
+foreach(_tool ${_phg_tools_to_build})
     file(GLOB _tool_srcs ${PROJECT_SOURCE_DIR}/tools/${_tool}/*.cpp)
     add_executable(phg_tool_${_tool} ${_tool_srcs})
     target_include_directories(phg_tool_${_tool} PRIVATE ${PROJECT_SOURCE_DIR}/tools/${_tool})
@@ -70,7 +87,7 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/pc_port/gen_msg.py
             ${PHG_GENERATED_DIR} ${PHG_EN_MSG_DIR} --hosttools ${PHG_HOSTTOOLS_DIR}
     COMMAND ${CMAKE_COMMAND} -E touch ${PHG_GENERATED_DIR}/msg.stamp
-    DEPENDS phg_tool_msgenc phg_tool_jsonproc ${_phg_gmms}
+    DEPENDS ${_phg_dep_msgenc} ${_phg_dep_jsonproc} ${_phg_gmms}
             ${PROJECT_SOURCE_DIR}/tools/pc_port/gen_msg.py
             ${PROJECT_SOURCE_DIR}/files/msgdata/msg.mk
             ${PROJECT_SOURCE_DIR}/files/poketool/trainer/trainers.json
@@ -83,7 +100,7 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/pc_port/gen_naix.py
             ${PHG_GENERATED_DIR} --all --rom-dir ${PHG_ROM_DATA_DIR}
             --hosttools ${PHG_HOSTTOOLS_DIR} --stamp ${PHG_GENERATED_DIR}/naix.stamp
-    DEPENDS phg_tool_jsonproc phg_tool_csv2bin
+    DEPENDS ${_phg_dep_jsonproc} ${_phg_dep_csv2bin}
             ${PROJECT_SOURCE_DIR}/tools/pc_port/gen_naix.py
             ${PROJECT_SOURCE_DIR}/filesystem.mk
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}

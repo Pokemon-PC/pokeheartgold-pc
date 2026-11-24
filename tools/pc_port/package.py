@@ -31,13 +31,19 @@ def main():
     args = ap.parse_args()
 
     build = ROOT / args.build
-    exe_name = "pokeheartgold.exe" if os.name == "nt" else "pokeheartgold"
+    # One build = one version: pokeheartgold or pokesoulsilver (PHG_GAME_VERSION).
+    ext = ".exe" if os.name == "nt" else ""
+    found = [v for v in ("heartgold", "soulsilver") if (build / f"poke{v}{ext}").is_file()]
+    if not found:
+        sys.exit(f"no pokeheartgold/pokesoulsilver in {build}: build the game first (cmake --build {args.build})")
+    version = found[0]
+    exe_name = f"poke{version}{ext}"
     exe = build / exe_name
-    if not exe.is_file():
-        sys.exit(f"{exe} not found: build the game first (cmake --build {args.build})")
+    title = {"heartgold": "HeartGold", "soulsilver": "SoulSilver"}[version]
+    mods = "mods_ss" if version == "soulsilver" else "mods"
 
     system = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}.get(platform.system(), "unknown")
-    name = args.name or f"PokemonHeartGold-PC-{system}-{platform.machine().lower()}"
+    name = args.name or f"Pokemon{title}-PC-{system}-{platform.machine().lower()}"
     out = ROOT / args.out
     folder = out / name
     if folder.exists():
@@ -57,8 +63,8 @@ def main():
         print("warning: no strip tool found, the executable keeps its debug info")
 
     shutil.copy2(ROOT / "docs" / "pc_port" / "README_PC.md", folder / "README.txt")
-    (folder / "mods").mkdir()
-    (folder / "mods" / "LISEZMOI-README.txt").write_text(
+    (folder / mods).mkdir()
+    (folder / mods / "LISEZMOI-README.txt").write_text(
         "Fichiers de mod : meme chemin que dans la ROM (ex. a/0/1/2). Voir README.txt.\n"
         "Mod files: same path as inside the ROM (e.g. a/0/1/2). See README.txt.\n",
         encoding="utf-8")

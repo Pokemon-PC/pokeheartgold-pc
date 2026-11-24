@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
     }
     pc_config_load();
     const PcConfig *cfg = pc_config();
-    if (!pc_gfx_init("Pokemon HeartGold", scale > 0 ? scale : cfg->windowScale)) {
+    if (!pc_gfx_init(PC_GAME_TITLE, scale > 0 ? scale : cfg->windowScale)) {
         pc_fatal("graphics init failed (OpenGL 3.3 required)");
     }
     pc_gfx_set_stretch(cfg->stretch);

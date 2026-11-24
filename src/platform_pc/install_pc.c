@@ -4,7 +4,8 @@
  * The PC port never ships Nintendo data: the player provides their own
  * cartridge dump. Layout of a release folder (all next to the executable):
  *
- *   pokeheartgold.exe
+ *   pokeheartgold.exe     (pokesoulsilver.exe: same layout with pc_data_ss/,
+ *                          mods_ss/, save_ss.bin and an IPG* ROM)
  *   config.ini            (written on first run)
  *   save.bin              (the 512 KiB backup memory, same format as the DS)
  *   <anything>.nds        (the player's HeartGold ROM, only needed once)
@@ -54,8 +55,26 @@ static bool file_exists(const char *path) {
     return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG;
 }
 
-/* First *.nds file in dir (out: full path). */
+/* Game code of a ROM file (4 chars at 0x0C), "" if unreadable. */
+static void rom_game_code(const char *path, char code[5]) {
+    code[0] = '\0';
+    FILE *f = fopen(path, "rb");
+    if (f != NULL) {
+        if (fseek(f, 0x0C, SEEK_SET) == 0 && fread(code, 1, 4, f) == 4) {
+            code[4] = '\0';
+        } else {
+            code[0] = '\0';
+        }
+        fclose(f);
+    }
+}
+
+/* A *.nds file in dir (out: full path): this version's ROM (game code
+ * PC_GAME_CODE3*) if there is one, else the first one found (so that a wrong
+ * ROM gets a clear message). HeartGold and SoulSilver ROMs can sit together. */
 static bool find_rom(const char *dir, char *out, size_t n) {
+    bool found = false;
+    char path[1100], code[5];
 #if defined(_WIN32)
     char pattern[1100];
     snprintf(pattern, sizeof pattern, "%s" SEP "*.nds", dir);
@@ -64,26 +83,39 @@ static bool find_rom(const char *dir, char *out, size_t n) {
     if (h == INVALID_HANDLE_VALUE) {
         return false;
     }
-    snprintf(out, n, "%s" SEP "%s", dir, fd.cFileName);
-    FindClose(h);
-    return true;
+    do {
+        snprintf(path, sizeof path, "%s" SEP "%s", dir, fd.cFileName);
 #else
     DIR *d = opendir(dir);
     if (d == NULL) {
         return false;
     }
     struct dirent *e;
-    bool found = false;
-    while (!found && (e = readdir(d)) != NULL) {
+    while ((e = readdir(d)) != NULL) {
         size_t l = strlen(e->d_name);
-        if (l > 4 && (strcmp(e->d_name + l - 4, ".nds") == 0 || strcmp(e->d_name + l - 4, ".NDS") == 0)) {
-            snprintf(out, n, "%s/%s", dir, e->d_name);
-            found = true;
+        if (l <= 4 || (strcmp(e->d_name + l - 4, ".nds") != 0 && strcmp(e->d_name + l - 4, ".NDS") != 0)) {
+            continue;
         }
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+#endif
+        rom_game_code(path, code);
+        if (memcmp(code, PC_GAME_CODE3, 3) == 0) {
+            snprintf(out, n, "%s", path);
+            found = true;
+            break;
+        }
+        if (!found) {
+            snprintf(out, n, "%s", path);
+            found = true;   /* keep looking for the right version */
+        }
+#if defined(_WIN32)
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
     }
     closedir(d);
-    return found;
 #endif
+    return found;
 }
 
 static void exe_dir(char *out, size_t n) {
@@ -106,11 +138,11 @@ const char *pc_install_base_dir(void) {
     }
     char exe[1024], probe[1100], rom[1100];
     exe_dir(exe, sizeof exe);
-    snprintf(probe, sizeof probe, "%s" SEP "pc_data", exe);
+    snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR, exe);
     if (dir_exists(probe) || find_rom(exe, rom, sizeof rom)) {
         snprintf(s_base, sizeof s_base, "%s", exe);
     } else {
-        snprintf(probe, sizeof probe, "%s/pc_data", PHG_REPO_DIR);
+        snprintf(probe, sizeof probe, "%s/" PC_DATA_DIR, PHG_REPO_DIR);
         snprintf(s_base, sizeof s_base, "%s", dir_exists(probe) ? PHG_REPO_DIR : exe);
     }
     return s_base;
@@ -227,27 +259,27 @@ static const char *extract_rom(const char *base, const char *rom_path) {
     memcpy(code, rom + 12, 4);
     code[4] = '\0';
     const char *lang = lang_from_code(code[3]);
-    if (memcmp(code, "IPK", 3) != 0 || lang == NULL) {
+    if (memcmp(code, PC_GAME_CODE3, 3) != 0 || lang == NULL) {
         char msg[512];
         snprintf(msg, sizeof msg,
-                 "%s n'est pas une ROM de Pok\xc3\xa9mon Or HeartGold (code %s).\n"
-                 "%s is not a Pok\xc3\xa9mon HeartGold ROM (game code %s).",
+                 "%s n'est pas une ROM de " PC_GAME_TITLE_FR " (code %s).\n"
+                 "%s is not a " PC_GAME_TITLE_EN " ROM (game code %s).",
                  rom_path, code, rom_path, code);
-        message("Pokemon HeartGold", msg);
+        message(PC_GAME_TITLE, msg);
         free(rom);
         return NULL;
     }
     char out[1200];
-    snprintf(out, sizeof out, "%s" SEP "pc_data", base);
+    snprintf(out, sizeof out, "%s" SEP PC_DATA_DIR, base);
     pc_mkdir(out);
-    snprintf(out, sizeof out, "%s" SEP "pc_data" SEP "%s", base, lang);
+    snprintf(out, sizeof out, "%s" SEP PC_DATA_DIR SEP "%s", base, lang);
     pc_mkdir(out);
     pc_log("install: extracting %s (%s) to %s", rom_path, code, out);
     Extract x = { rom, (size_t)size, rd32(rom + 0x40), rd32(rom + 0x48), out, 0, true };
     walk(&x, 0xF000, "", 0);
     free(rom);
     if (!x.ok || x.count == 0) {
-        message("Pokemon HeartGold", "L'extraction de la ROM a \xc3\xa9\x63hou\xc3\xa9. / ROM extraction failed.");
+        message(PC_GAME_TITLE, "L'extraction de la ROM a \xc3\xa9\x63hou\xc3\xa9. / ROM extraction failed.");
         return NULL;
     }
     pc_log("install: %d files extracted", x.count);
@@ -260,13 +292,13 @@ const char *pc_install_prepare(const char *requested_lang) {
     const char *base = pc_install_base_dir();
     char probe[1200], rom[1100];
     if (requested_lang != NULL) {
-        snprintf(probe, sizeof probe, "%s" SEP "pc_data" SEP "%s", base, requested_lang);
+        snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR SEP "%s", base, requested_lang);
         if (dir_exists(probe)) {
             return requested_lang;
         }
     } else {
         for (unsigned i = 0; i < sizeof k_langs / sizeof k_langs[0]; i++) {
-            snprintf(probe, sizeof probe, "%s" SEP "pc_data" SEP "%s", base, k_langs[i]);
+            snprintf(probe, sizeof probe, "%s" SEP PC_DATA_DIR SEP "%s", base, k_langs[i]);
             if (dir_exists(probe)) {
                 return k_langs[i];
             }
@@ -291,18 +323,18 @@ const char *pc_install_prepare(const char *requested_lang) {
     char msg[1600];
     snprintf(msg, sizeof msg,
              "Donn\xc3\xa9\x65s du jeu introuvables.\n"
-             "Copiez la ROM de VOTRE cartouche Pok\xc3\xa9mon Or HeartGold (fichier .nds)\n"
+             "Copiez la ROM de VOTRE cartouche " PC_GAME_TITLE_FR " (fichier .nds)\n"
              "dans ce dossier, puis relancez le jeu :\n%s\n\n"
              "Game data not found. Copy the ROM dumped from YOUR OWN\n"
-             "Pok\xc3\xa9mon HeartGold cartridge (.nds file) into this folder and restart.",
+             "" PC_GAME_TITLE_EN " cartridge (.nds file) into this folder and restart.",
              base);
-    message("Pokemon HeartGold", msg);
+    message(PC_GAME_TITLE, msg);
     return NULL;
 }
 
 void pc_install_save_path(const char *name, char *out, size_t n) {
     if (name == NULL) {
-        name = "save.bin";
+        name = PC_SAVE_DEFAULT;
     }
     bool absolute = name[0] == '/' || name[0] == '\\' || (name[0] != '\0' && name[1] == ':');
     if (absolute || strchr(name, '/') != NULL || strchr(name, '\\') != NULL) {

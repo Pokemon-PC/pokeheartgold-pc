@@ -52,6 +52,27 @@ void     pc_os_free(void *ptr);
 #define PHG_REPO_DIR "."          /* set by CMake to the repository root */
 #endif
 #define PHG_DEFAULT_LANG "fr"
+
+/* The two versions are two separate games on PC, as on DS: each executable
+ * only accepts its own ROM and keeps its own data, mods and save, so both can
+ * live in one folder. (CMake: PHG_GAME_VERSION=HEARTGOLD or SOULSILVER.) */
+#ifdef SOULSILVER
+#define PC_GAME_TITLE    "Pokemon SoulSilver"
+#define PC_GAME_TITLE_FR "Pok\xc3\xa9mon Argent SoulSilver"
+#define PC_GAME_TITLE_EN "Pok\xc3\xa9mon SoulSilver"
+#define PC_GAME_CODE3    "IPG"
+#define PC_DATA_DIR      "pc_data_ss"
+#define PC_MODS_DIR      "mods_ss"
+#define PC_SAVE_DEFAULT  "save_ss.bin"
+#else
+#define PC_GAME_TITLE    "Pokemon HeartGold"
+#define PC_GAME_TITLE_FR "Pok\xc3\xa9mon Or HeartGold"
+#define PC_GAME_TITLE_EN "Pok\xc3\xa9mon HeartGold"
+#define PC_GAME_CODE3    "IPK"
+#define PC_DATA_DIR      "pc_data"
+#define PC_MODS_DIR      "mods"
+#define PC_SAVE_DEFAULT  "save.bin"
+#endif
 typedef struct PcFile {
     void    *handle;     /* FILE*                                        */
     uint32_t start;      /* byte range inside the host file (NARC member) */

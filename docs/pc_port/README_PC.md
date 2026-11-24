@@ -1,5 +1,5 @@
-Pokémon Or HeartGold — portage PC natif / native PC port
-=========================================================
+Pokémon Or HeartGold / Argent SoulSilver — portage PC natif / native PC port
+============================================================================
 
 (English below)
 
@@ -21,6 +21,12 @@ fournir la ROM de VOTRE PROPRE cartouche.
 
 Votre partie est enregistrée dans `save.bin` (même format que la mémoire de
 sauvegarde de la cartouche, 512 Kio).
+
+**Argent SoulSilver** : c'est un jeu à part, avec son propre exécutable
+(`pokesoulsilver.exe`, paquet `PokemonSoulSilver-PC-…`) et la ROM de votre
+cartouche SoulSilver. Ses fichiers sont séparés : `pc_data_ss/`, `mods_ss/`,
+`save_ss.bin`. Les deux jeux peuvent partager un dossier, ROM comprises :
+chacun prend la sienne (code de jeu IPK… pour HeartGold, IPG… pour SoulSilver).
 
 ### Commandes par défaut
 
@@ -76,6 +82,12 @@ dumped from YOUR OWN cartridge.
 
 Your game is saved in `save.bin` (same format as the cartridge's 512 KiB
 backup memory).
+
+**SoulSilver** is a separate game with its own executable (`pokesoulsilver.exe`,
+package `PokemonSoulSilver-PC-…`) and your SoulSilver cartridge ROM. Its files
+are kept apart: `pc_data_ss/`, `mods_ss/`, `save_ss.bin`. Both games can share
+one folder, ROMs included: each picks its own (game code IPK… for HeartGold,
+IPG… for SoulSilver).
 
 ### Default controls
 

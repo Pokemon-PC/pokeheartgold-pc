@@ -84,10 +84,11 @@ static void pc_nitro_set_language(const char *lang) {
 static void pc_nitro_boot_rom_header(void) {
     u8 *h = (u8 *)HW_ROM_HEADER_BUF;
     memset(h, 0, 0x160);
-    memcpy(h + 0x00, "POKEMON HG\0\0", 12);           /* title */
 #ifdef SOULSILVER
+    memcpy(h + 0x00, "POKEMON SS\0\0", 12);           /* title */
     memcpy(h + 0x0C, "IPGE", 4);                       /* game code */
 #else
+    memcpy(h + 0x00, "POKEMON HG\0\0", 12);
     memcpy(h + 0x0C, "IPKE", 4);
 #endif
     h[0x0F] = (u8)s_language->rom_region;              /* IPKE, IPKF... */

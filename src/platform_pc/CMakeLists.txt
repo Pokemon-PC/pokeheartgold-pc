@@ -26,7 +26,8 @@ add_library(phg_platform STATIC
 )
 target_include_directories(phg_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(phg_platform PUBLIC phg::SDL2 OpenGL::GL)
-target_compile_definitions(phg_platform PUBLIC PLATFORM_PC=1 PHG_REPO_DIR="${PROJECT_SOURCE_DIR}")
+target_compile_definitions(phg_platform PUBLIC PLATFORM_PC=1 PHG_REPO_DIR="${PROJECT_SOURCE_DIR}"
+    ${PHG_GAME_VERSION})   # names, ROM code, data folder of the version (platform_pc.h)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(phg_platform PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -152,7 +153,10 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     # Decompiled code: keep the build readable, not pedantic.
     target_compile_options(pokeheartgold PRIVATE -w)
 endif()
-set_target_properties(pokeheartgold PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+# The target keeps its name; the file is pokeheartgold or pokesoulsilver.
+string(TOLOWER "poke${PHG_GAME_VERSION}" PHG_EXE_NAME)
+set_target_properties(pokeheartgold PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    OUTPUT_NAME ${PHG_EXE_NAME})
 
 # --- Overlay variables: fresh on every load, as on the DS ---------------------
 # Each overlay's sources get their own .data section (Clang pragma), so the

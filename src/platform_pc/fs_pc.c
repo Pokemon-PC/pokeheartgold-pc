@@ -121,9 +121,9 @@ static bool is_directory(const char *path) {
 
 bool pc_fs_setup_layers(const char *repo_dir, const char *lang) {
     static const char *const fmt[] = {
-        "%s/mods/%s",      /* language-specific mods  */
-        "%s/mods",         /* mods for every language */
-        "%s/pc_data/%s",   /* extracted / built data for the language */
+        "%s/" PC_MODS_DIR "/%s", /* language-specific mods  */
+        "%s/" PC_MODS_DIR,       /* mods for every language */
+        "%s/" PC_DATA_DIR "/%s", /* extracted / built data for the language */
         "%s/files",        /* repository sources (built in place)     */
     };
     char path[PC_PATH_MAX];
