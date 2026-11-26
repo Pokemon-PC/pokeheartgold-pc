@@ -120,3 +120,6 @@ dist/
 build-clang/
 build-*/
 files/a/0/8/7
+# Mods of the player (level 1 files, compiled level-2 patch, mod manager state)
+/mods/
+/mods_ss/

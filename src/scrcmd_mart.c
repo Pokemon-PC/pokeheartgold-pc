@@ -15,7 +15,16 @@ struct BadgeMartItems {
     u16 tier;
 };
 
-const struct BadgeMartItems _020FBF22[] = {
+#ifdef PLATFORM_PC
+#include "pokemod_patch.h"
+// Level-2 mods may rewrite this list (pokemod_patch.c): not const on PC, so
+// the compiler cannot fold its values into the code.
+#define PC_MODDABLE
+#else
+#define PC_MODDABLE const
+#endif
+
+PC_MODDABLE struct BadgeMartItems _020FBF22[] = {
     { ITEM_POKE_BALL,    1 },
     { ITEM_GREAT_BALL,   3 },
     { ITEM_ULTRA_BALL,   4 },
@@ -36,6 +45,14 @@ const struct BadgeMartItems _020FBF22[] = {
     { ITEM_SUPER_REPEL,  3 },
     { ITEM_MAX_REPEL,    4 },
 };
+
+#ifdef PLATFORM_PC
+// Code tables that level-2 mods can change, by stable name (see the data
+// map of the plateforme project: boutique.badges = {u16 item, u16 tier}[]).
+void Mart_PcRegisterModTables(void) {
+    pm_patch_register_table("boutique.badges", _020FBF22, sizeof(_020FBF22));
+}
+#endif
 
 BOOL ScrCmd_MartBuy(ScriptContext *ctx) {
     u16 unused;

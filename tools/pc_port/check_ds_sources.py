@@ -66,7 +66,7 @@ def norm(text):
 
 
 
-MACRO_DEFS = re.compile(r'#\s*define\s+(SCRIPT_REL|PC_PTR32|DGT_ULONG|PC_LNK_VRAM_BLOCK_SIZE|ANMOBJ_HEADER_SIZE|TRAINER_HOUSE_DEFAULT_LANGUAGE|MAIN_MENU_UTIL_WORK_AFTER_CRYPTO_HEAP_ID|PCBOX_TAIL_STATE|PCBOX_TAIL_RETURN|PCBOX_TAIL_DONE|PC_HEAP_SIZE)\b[^\n]*')
+MACRO_DEFS = re.compile(r'#\s*define\s+(SCRIPT_REL|PC_PTR32|DGT_ULONG|PC_LNK_VRAM_BLOCK_SIZE|ANMOBJ_HEADER_SIZE|TRAINER_HOUSE_DEFAULT_LANGUAGE|MAIN_MENU_UTIL_WORK_AFTER_CRYPTO_HEAP_ID|PCBOX_TAIL_STATE|PCBOX_TAIL_RETURN|PCBOX_TAIL_DONE|PC_HEAP_SIZE|PC_MODDABLE)\b[^\n]*')
 def unwrap(text, name):
     out = ''; i = 0
     while True:
@@ -83,7 +83,7 @@ def ds(text):
     rep = {'PC_PTR32': '', 'DGT_ULONG': 'unsigned long', 'PC_LNK_VRAM_BLOCK_SIZE': '16', 'ANMOBJ_HEADER_SIZE': '0x1C',
            'TRAINER_HOUSE_DEFAULT_LANGUAGE': 'GAME_LANGUAGE', 'MAIN_MENU_UTIL_WORK_AFTER_CRYPTO_HEAP_ID': '(MainMenuUtilWork *)(&gMainMenuUtilCryptoHeapId + 1)',
            'PCBOX_TAIL_STATE': 'void', 'PCBOX_TAIL_RETURN': '', 'PCBOX_TAIL_DONE': 'return', 'PartyMenuActionWord': 'u32', 'FOOTPRINT_SPRITE_STRIDE': '4', 'RECORD_MIXING_PTR_STRIDE': '4',
-           'LANGUAGE_ENGLISH': '2', 'GAME_LANGUAGE': '2'}
+           'LANGUAGE_ENGLISH': '2', 'GAME_LANGUAGE': '2', 'PC_MODDABLE': 'const'}
     for k, v in rep.items(): text = re.sub(r'\b' + k + r'\b', v, text)
     text = re.sub(r'typedef u32 u32;', '', text)
     # definitions of the macros expanded above (their names are already replaced)

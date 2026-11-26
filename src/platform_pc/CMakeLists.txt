@@ -13,6 +13,7 @@ option(PHG_PC_CONSOLE "Keep a console window for logs on Windows" ON)
 add_library(phg_platform STATIC
     os_pc.c
     fs_pc.c
+    pokemod_patch.c
     input_pc.c
     config_pc.c
     install_pc.c
@@ -25,6 +26,40 @@ add_library(phg_platform STATIC
     crash_pc.c
 )
 target_include_directories(phg_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Level-2 mods: PKPC_RUST=ON applies them with the Rust library of the
+# plateforme project (libpkpc_ffi.a in PKPC_LIB_DIR, ABI in pkpc.h) instead of
+# pokemod_patch.c, which stays the default (a port must build without Rust).
+#   cargo build --profile release-ffi -p pkpc-ffi   (plateforme/)
+#   cmake ... -DPKPC_RUST=ON -DPKPC_LIB_DIR=<plateforme>/target/release-ffi
+option(PKPC_RUST "Apply mod patches with the Rust library libpkpc_ffi.a" OFF)
+set(PKPC_LIB_DIR "" CACHE PATH "Directory of libpkpc_ffi.a (PKPC_RUST=ON)")
+if(PKPC_RUST)
+    find_library(PKPC_LIB NAMES libpkpc_ffi.a pkpc_ffi PATHS ${PKPC_LIB_DIR} NO_DEFAULT_PATH)
+    if(NOT PKPC_LIB)
+        message(FATAL_ERROR "PKPC_RUST=ON: libpkpc_ffi.a not found in PKPC_LIB_DIR='${PKPC_LIB_DIR}'")
+    endif()
+    message(STATUS "Mod patches: Rust library ${PKPC_LIB}")
+    get_target_property(_phg_srcs phg_platform SOURCES)
+    list(REMOVE_ITEM _phg_srcs pokemod_patch.c)
+    list(APPEND _phg_srcs pokemod_pkpc.c)
+    set_property(TARGET phg_platform PROPERTY SOURCES ${_phg_srcs})
+    target_compile_definitions(phg_platform PUBLIC PKPC_RUST=1)
+    # Libraries the Rust standard library needs (cargo --print native-static-libs);
+    # the unwinder is linked statically (no libunwind.dll / libgcc_s to ship).
+    set(_pkpc_sys)
+    if(WIN32)
+        set(_pkpc_sys ws2_32 userenv ntdll bcrypt dbghelp synchronization)
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+            list(APPEND _pkpc_sys -l:libunwind.a)
+        else()
+            list(APPEND _pkpc_sys gcc_eh)
+        endif()
+    else()
+        set(_pkpc_sys pthread dl m)
+    endif()
+    target_link_libraries(phg_platform PUBLIC ${PKPC_LIB} ${_pkpc_sys})
+endif()
 target_link_libraries(phg_platform PUBLIC phg::SDL2 OpenGL::GL)
 target_compile_definitions(phg_platform PUBLIC PLATFORM_PC=1 PHG_REPO_DIR="${PROJECT_SOURCE_DIR}"
     ${PHG_GAME_VERSION})   # names, ROM code, data folder of the version (platform_pc.h)

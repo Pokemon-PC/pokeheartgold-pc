@@ -12,6 +12,11 @@
  * which map 1:1 onto pc_fs_open/pc_fs_seek/pc_fs_read.
  */
 #include "platform_pc.h"
+#ifdef PKPC_RUST
+#include "pkpc.h"   /* mods applied by the Rust library (PKPC_RUST=ON) */
+#else
+#include "pokemod_patch.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -189,6 +194,39 @@ bool pc_fs_open(PcFile *f, const char *nitro_path) {
     f->start  = 0;
     f->length = (uint32_t)len;
     f->pos    = 0;
+    /* Level-2 mods (tables, texts): the file is patched in memory, on top of
+     * whichever layer provides it; the files on disk never change. */
+#ifdef PKPC_RUST
+    if (pkpc_touches_file(nitro_path) == 1) {
+        uint8_t *orig = malloc(len ? (size_t)len : 1);
+        size_t plen = 0;
+        uint8_t *patched = NULL;   /* our own copy: pkpc_free() in pc_fs_close */
+        if (orig != NULL && fread(orig, 1, (size_t)len, fp) == (size_t)len
+            && pkpc_patch_file(nitro_path, orig, (size_t)len, &patched, &plen) != PKPC_OK) {
+            pc_log("mods: %s: %s (original file used)", nitro_path, pkpc_last_error());
+        }
+        if (patched != NULL && plen > 0x7FFFFFFFu) {
+            pkpc_free(patched);
+            patched = NULL;
+        }
+#else
+    if (pm_patch_touches_file(nitro_path)) {
+        uint8_t *orig = malloc(len ? (size_t)len : 1);
+        uint32_t plen = 0;
+        const uint8_t *patched = NULL;
+        if (orig != NULL && fread(orig, 1, (size_t)len, fp) == (size_t)len) {
+            patched = pm_patch_build_file(nitro_path, orig, (uint32_t)len, &plen);
+        }
+#endif
+        free(orig);
+        pc_fseek(fp, 0, SEEK_SET);
+        if (patched != NULL) {
+            fclose(fp);
+            f->handle = NULL;
+            f->mem    = patched;
+            f->length = (uint32_t)plen;
+        }
+    }
     return true;
 }
 
@@ -196,11 +234,14 @@ void pc_fs_close(PcFile *f) {
     if (f->handle != NULL) {
         fclose((FILE *)f->handle);
     }
+#ifdef PKPC_RUST
+    pkpc_free((void *)f->mem);   /* copy made by pkpc_patch_file (NULL: nothing) */
+#endif
     memset(f, 0, sizeof *f);
 }
 
 int32_t pc_fs_read(PcFile *f, void *dst, int32_t len) {
-    if (f->handle == NULL || len < 0) {
+    if ((f->handle == NULL && f->mem == NULL) || len < 0) {
         return -1;
     }
     uint32_t avail = f->length - f->pos;
@@ -209,6 +250,11 @@ int32_t pc_fs_read(PcFile *f, void *dst, int32_t len) {
     }
     if (len == 0) {
         return 0;
+    }
+    if (f->mem != NULL) {   /* patched in memory (pokemod_patch.c cache, or pkpc copy) */
+        memcpy(dst, f->mem + f->start + f->pos, (size_t)len);
+        f->pos += (uint32_t)len;
+        return len;
     }
     FILE *fp = (FILE *)f->handle;
     if (pc_fseek(fp, (long long)f->start + f->pos, SEEK_SET) != 0) {

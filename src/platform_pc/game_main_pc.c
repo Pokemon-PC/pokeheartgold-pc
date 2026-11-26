@@ -11,13 +11,21 @@
  * include SDL (see PORTING_ROADMAP.md, M2).
  *
  * Usage: pokeheartgold [--lang fr|en] [--data DIR] [--save FILE] [--scale N]
- *                      [--rom-dir DIR]
+ *                      [--rom-dir DIR] [--mod-patch FILE]
  * First run: the player's ROM (*.nds) in the game folder, or else in rom_dir
  * (--rom-dir, config.ini [options] rom_dir), is extracted to
  * pc_data/<lang> (install_pc.c); the language follows the ROM.
+ * Level-2 mods (tables, texts) : --mod-patch FILE, PHG_MOD_PATCH, else
+ * <base>/mods/patch_<lang>.mpatch, compiled by the mod manager (plateforme
+ * pokemod); applied in memory by pokemod_patch.c (or by the Rust library
+ * libpkpc_ffi.a with PKPC_RUST=ON), nothing written to disk.
  * Test hooks (environment): PHG_EXIT_AFTER, PHG_TEST_RESET_AT (nitro_pc.c).
  */
 #include "nitro_pc.h"
+#include "pokemod_patch.h"
+#ifdef PKPC_RUST
+#include "pkpc.h"   /* PKPC_RUST=ON: mods applied by the Rust library */
+#endif
 
 #include <ctype.h>
 #include <stdio.h>
@@ -25,6 +33,42 @@
 #include <string.h>
 
 void NitroMain(void);
+void Mart_PcRegisterModTables(void);   /* scrcmd_mart.c */
+
+/* Level-2 mods: a missing patch file is the normal case (no mod). */
+static void load_mod_patch(const char *path, const char *lang) {
+    static char def[1200];
+    if (path == NULL) {
+        path = getenv("PHG_MOD_PATCH");
+    }
+    if (path == NULL) {
+        snprintf(def, sizeof def, "%s/" PC_MODS_DIR "/patch_%s.mpatch", pc_install_base_dir(), lang);
+        path = def;
+    }
+#ifdef PKPC_RUST
+    uint32_t abi = pkpc_abi_version();
+    if ((abi >> 16) != PKPC_ABI_MAJEURE) {
+        pc_log("mods: pkpc library ABI %u.%u, this game needs %u.x: mods disabled",
+               abi >> 16, abi & 0xFFFF, PKPC_ABI_MAJEURE);
+        return;
+    }
+    int r = pkpc_load_patch(path, PC_MOD_GAME_ID, lang);
+    if (r == PKPC_OK) {
+        pc_log("mods: %s (%d patch operations, Rust engine pkpc ABI %u.%u)", path, pkpc_op_count(),
+               abi >> 16, abi & 0xFFFF);
+        Mart_PcRegisterModTables();   /* -> pkpc_register_table (pokemod_pkpc.c) */
+        pkpc_apply_tables();
+    } else if (r != PKPC_E_ABSENT) {
+        pc_log("mods: %s", pkpc_last_error());
+    }
+#else
+    if (pm_patch_load(path, PC_MOD_GAME_ID, lang)) {
+        pc_log("mods: %s (%d patch operations)", path, pm_patch_op_count());
+        Mart_PcRegisterModTables();
+        pm_patch_apply_tables();
+    }
+#endif
+}
 
 static int is_auto(const char *s) {
     const char *a = "auto";
@@ -44,6 +88,7 @@ int main(int argc, char **argv) {
     const char *lang = getenv("PHG_LANG");   /* NULL: the language of the data found */
     const char *data = getenv("PHG_DATA_DIR");
     const char *save = NULL;   /* NULL: save.bin next to the game data */
+    const char *mod_patch = NULL;   /* NULL: PHG_MOD_PATCH or mods/patch_<lang>.mpatch */
     int scale = 0;   /* 0: window_scale from config.ini */
     for (int i = 1; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--lang")) lang = argv[i + 1];
@@ -92,6 +137,7 @@ int main(int argc, char **argv) {
     if (!pc_nitro_init(data, lang, save_path)) {
         pc_fatal("Nitro layer init failed (see log above)");
     }
+    load_mod_patch(mod_patch, lang);
     pc_log("starting NitroMain (lang=%s)", lang);
     pc_run_on_low_stack(run_game, NULL);   /* game code keeps stack addresses in 32-bit words */
     return 0;

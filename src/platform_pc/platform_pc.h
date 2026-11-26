@@ -64,6 +64,7 @@ void     pc_os_free(void *ptr);
 #define PC_DATA_DIR      "pc_data_ss"
 #define PC_MODS_DIR      "mods_ss"
 #define PC_SAVE_DEFAULT  "save_ss.bin"
+#define PC_MOD_GAME_ID   "soulsilver"   /* game id of level-2 mod patches (.mpatch) */
 #else
 #define PC_GAME_TITLE    "Pokemon HeartGold"
 #define PC_GAME_TITLE_FR "Pok\xc3\xa9mon Or HeartGold"
@@ -72,12 +73,14 @@ void     pc_os_free(void *ptr);
 #define PC_DATA_DIR      "pc_data"
 #define PC_MODS_DIR      "mods"
 #define PC_SAVE_DEFAULT  "save.bin"
+#define PC_MOD_GAME_ID   "heartgold"
 #endif
 typedef struct PcFile {
     void    *handle;     /* FILE*                                        */
     uint32_t start;      /* byte range inside the host file (NARC member) */
     uint32_t length;
     uint32_t pos;        /* relative to start                             */
+    const uint8_t *mem;  /* file patched by a mod (pokemod_patch.c), or NULL */
 } PcFile;
 
 typedef enum { PC_SEEK_SET = 0, PC_SEEK_CUR = 1, PC_SEEK_END = 2 } PcSeek;
